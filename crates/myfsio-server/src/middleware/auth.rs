@@ -1630,12 +1630,16 @@ fn resolve_object_action(
     method: &Method,
     query: &str,
 ) -> Result<(&'static str, &'static str), S3Error> {
+    let version_scoped = crate::handlers::query_has_version_id(Some(query));
     match crate::handlers::parse_object_subresource(Some(query)) {
         Err(selectors) => Err(crate::handlers::ambiguous_subresource_error(&selectors)),
-        Ok(Some(subresource)) => Ok((subresource.action(method), subresource.s3_action(method))),
+        Ok(Some(subresource)) => Ok((
+            subresource.action(method),
+            subresource.s3_action(method, version_scoped),
+        )),
         Ok(None) => Ok((
             crate::handlers::object_method_default_action(method),
-            crate::handlers::object_method_default_s3_action(method),
+            crate::handlers::object_method_default_s3_action(method, version_scoped),
         )),
     }
 }
@@ -2173,9 +2177,139 @@ fn error_response(err: S3Error, resource: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        action_grant_matches, policy_action_matches, resource_matches, wildcard_match,
-        wildcard_match_case_sensitive,
+        action_grant_matches, policy_action_matches, resolve_object_action, resource_matches,
+        wildcard_match, wildcard_match_case_sensitive,
     };
+    use axum::http::Method;
+
+    #[test]
+    fn version_id_query_selects_version_scoped_s3_actions() {
+        assert_eq!(
+            resolve_object_action(&Method::DELETE, "versionId=abc").unwrap(),
+            ("delete", "s3:DeleteObjectVersion")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::GET, "versionId=abc").unwrap(),
+            ("read", "s3:GetObjectVersion")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::HEAD, "versionId=abc").unwrap(),
+            ("read", "s3:GetObjectVersion")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::GET, "tagging&versionId=abc").unwrap(),
+            ("read", "s3:GetObjectVersionTagging")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::GET, "acl&versionId=abc").unwrap(),
+            ("read", "s3:GetObjectVersionAcl")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::PUT, "acl&versionId=abc").unwrap(),
+            ("write", "s3:PutObjectVersionAcl")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::GET, "attributes&versionId=abc").unwrap(),
+            ("read", "s3:GetObjectVersionAttributes")
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_version_id_stays_unversioned() {
+        assert_eq!(
+            resolve_object_action(&Method::DELETE, "").unwrap(),
+            ("delete", "s3:DeleteObject")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::DELETE, "versionId=").unwrap(),
+            ("delete", "s3:DeleteObject")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::DELETE, "versionId").unwrap(),
+            ("delete", "s3:DeleteObject")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::DELETE, "VersionId=abc").unwrap(),
+            ("delete", "s3:DeleteObject")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::GET, "acl").unwrap(),
+            ("read", "s3:GetObjectAcl")
+        );
+        assert_eq!(
+            resolve_object_action(&Method::GET, "attributes").unwrap(),
+            ("read", "s3:GetObjectAttributes")
+        );
+    }
+
+    #[test]
+    fn delete_object_grant_does_not_authorize_version_delete() {
+        assert!(action_grant_matches(
+            "s3:DeleteObject",
+            "delete",
+            Some("s3:DeleteObject"),
+            Some(true)
+        ));
+        assert!(!action_grant_matches(
+            "s3:DeleteObject",
+            "delete",
+            Some("s3:DeleteObjectVersion"),
+            Some(true)
+        ));
+        assert!(action_grant_matches(
+            "s3:DeleteObjectVersion",
+            "delete",
+            Some("s3:DeleteObjectVersion"),
+            Some(true)
+        ));
+        assert!(!action_grant_matches(
+            "s3:DeleteObjectVersion",
+            "delete",
+            Some("s3:DeleteObject"),
+            Some(true)
+        ));
+        assert!(action_grant_matches(
+            "delete",
+            "delete",
+            Some("s3:DeleteObjectVersion"),
+            Some(true)
+        ));
+        assert!(action_grant_matches(
+            "delete",
+            "delete",
+            Some("s3:DeleteObject"),
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn version_scoped_read_actions_are_not_covered_by_base_grants() {
+        assert!(!policy_action_matches(
+            "s3:GetObject",
+            "read",
+            Some("s3:GetObjectVersion")
+        ));
+        assert!(!policy_action_matches(
+            "s3:GetObjectAcl",
+            "read",
+            Some("s3:GetObjectVersionAcl")
+        ));
+        assert!(policy_action_matches(
+            "s3:GetObjectVersionAcl",
+            "read",
+            Some("s3:GetObjectVersionAcl")
+        ));
+        assert!(policy_action_matches(
+            "s3:Get*",
+            "read",
+            Some("s3:GetObjectVersion")
+        ));
+        assert!(policy_action_matches(
+            "read",
+            "read",
+            Some("s3:GetObjectVersion")
+        ));
+    }
 
     #[test]
     fn subresource_read_grant_does_not_authorize_write() {
@@ -2387,11 +2521,6 @@ mod tests {
             Some("s3:PutObject")
         ));
         assert!(policy_action_matches(
-            "s3:GetObjectVersion",
-            "read",
-            Some("s3:GetObject")
-        ));
-        assert!(policy_action_matches(
             "s3:ListParts",
             "read",
             Some("s3:ListMultipartUploadParts")
@@ -2400,11 +2529,6 @@ mod tests {
             "s3:PutBucketLifecycle",
             "lifecycle",
             Some("s3:PutLifecycleConfiguration")
-        ));
-        assert!(policy_action_matches(
-            "s3:GetObjectVersion*",
-            "read",
-            Some("s3:GetObject")
         ));
         assert!(policy_action_matches(
             "s3:Upload*",

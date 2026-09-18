@@ -592,6 +592,92 @@ fn streaming_sigv4_request(
     builder.body(Body::from(encoded)).unwrap()
 }
 
+fn presigned_object_get_uri(bucket: &str, key: &str, extra: &[(&str, &str)]) -> String {
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let credential = format!(
+        "{}/{}/us-east-1/s3/aws4_request",
+        TEST_ACCESS_KEY, date_stamp
+    );
+
+    let mut params: Vec<(String, String)> = vec![
+        (
+            "X-Amz-Algorithm".to_string(),
+            "AWS4-HMAC-SHA256".to_string(),
+        ),
+        ("X-Amz-Credential".to_string(), credential),
+        ("X-Amz-Date".to_string(), timestamp.clone()),
+        ("X-Amz-Expires".to_string(), "3600".to_string()),
+        ("X-Amz-SignedHeaders".to_string(), "host".to_string()),
+        (
+            "X-Amz-Security-Token".to_string(),
+            "dummy-session-token".to_string(),
+        ),
+        (
+            "X-Amz-Content-Sha256".to_string(),
+            "UNSIGNED-PAYLOAD".to_string(),
+        ),
+    ];
+    for (k, v) in extra {
+        params.push((k.to_string(), v.to_string()));
+    }
+
+    let canonical_uri = format!("/{}/{}", bucket, key);
+    let mut sorted_params = params.clone();
+    sorted_params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let canonical_query_string = sorted_params
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                myfsio_auth::sigv4::aws_uri_encode(k),
+                myfsio_auth::sigv4::aws_uri_encode(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let canonical_headers = "host:localhost\n";
+    let signed_headers_str = "host";
+    let payload_hash = "UNSIGNED-PAYLOAD";
+    let canonical_request = format!(
+        "GET\n{}\n{}\n{}\n{}\n{}",
+        canonical_uri, canonical_query_string, canonical_headers, signed_headers_str, payload_hash
+    );
+    let scope = format!("{}/us-east-1/s3/aws4_request", date_stamp);
+    let string_to_sign =
+        myfsio_auth::sigv4::build_string_to_sign(&timestamp, &scope, &canonical_request);
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(TEST_SECRET_KEY, &date_stamp, "us-east-1", "s3");
+    let signature = myfsio_auth::sigv4::compute_signature(&signing_key, &string_to_sign);
+
+    params.push(("X-Amz-Signature".to_string(), signature));
+
+    let query_string = params
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                myfsio_auth::sigv4::aws_uri_encode(k),
+                myfsio_auth::sigv4::aws_uri_encode(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    format!("/{}/{}?{}", bucket, key, query_string)
+}
+
+fn presigned_object_get_request(bucket: &str, key: &str, extra: &[(&str, &str)]) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(presigned_object_get_uri(bucket, key, extra))
+        .header("host", "localhost")
+        .body(Body::empty())
+        .unwrap()
+}
+
 const WEBSITE_INDEX_BODY: &str = "<!doctype html><h1>Home</h1>";
 
 fn website_server_config(
@@ -2635,6 +2721,409 @@ async fn test_delete_bucket_unknown_subresource_returns_not_implemented() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_put_object_unknown_subresource_returns_not_implemented_and_does_not_overwrite() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/obj-subresource-guard/k",
+            Body::from("original"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/obj-subresource-guard/k?restore",
+            Body::from("overwritten"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/obj-subresource-guard/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert_eq!(body, "original");
+}
+
+#[tokio::test]
+async fn test_get_object_unknown_subresource_returns_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/get-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/get-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/get-obj-subresource-guard/k?torrent",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+}
+
+#[tokio::test]
+async fn test_head_object_unknown_subresource_returns_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/head-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/head-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/head-obj-subresource-guard/k?restore",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn test_delete_object_unknown_subresource_returns_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/delete-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/delete-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/delete-obj-subresource-guard/k?restore",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/delete-obj-subresource-guard/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_post_object_unknown_subresource_returns_not_implemented_with_xml_body() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::POST,
+            "/post-obj-subresource-guard/k?restore",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.starts_with("<?xml"));
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+    assert!(body.contains("</Error>"));
+}
+
+#[tokio::test]
+async fn test_post_object_with_no_recognized_action_returns_s3_error_not_bare_405() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-bare-405",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-bare-405/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::POST,
+            "/post-obj-bare-405/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.starts_with("<?xml"));
+    assert!(body.contains("<Code>MethodNotAllowed</Code>"));
+    assert!(body.contains("</Error>"));
+}
+
+#[tokio::test]
+async fn test_get_object_response_content_type_override_still_works() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/response-override-bucket",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/response-override-bucket/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/response-override-bucket/k?response-content-type=text%2Fplain",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/plain"
+    );
+}
+
+#[tokio::test]
+async fn test_list_parts_max_parts_and_part_number_marker_still_work() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/list-parts-paging",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/list-parts-paging/big.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    for part_number in 1..=2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!(
+                        "/list-parts-paging/big.bin?uploadId={}&partNumber={}",
+                        upload_id, part_number
+                    ))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from(vec![b'A'; 16]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            &format!(
+                "/list-parts-paging/big.bin?uploadId={}&max-parts=1&part-number-marker=0",
+                upload_id
+            ),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("ListPartsResult"));
+    assert!(body.contains("<PartNumber>1</PartNumber>"));
+    assert!(!body.contains("<PartNumber>2</PartNumber>"));
+    assert!(body.contains("<IsTruncated>true</IsTruncated>"));
+}
+
+#[tokio::test]
+async fn test_presigned_object_get_with_full_amz_param_set_still_works() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/presign-object-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/presign-object-guard/k.txt",
+            Body::from("presigned content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(presigned_object_get_request(
+            "presign-object-guard",
+            "k.txt",
+            &[],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert_eq!(body, "presigned content");
+
+    let resp = app
+        .oneshot(presigned_object_get_request(
+            "presign-object-guard",
+            "k.txt",
+            &[("response-content-type", "text/plain")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/plain"
+    );
 }
 
 #[tokio::test]
@@ -5720,6 +6209,298 @@ async fn test_object_acl() {
     .unwrap();
     assert!(body.contains("AccessControlPolicy"));
     assert!(body.contains("FULL_CONTROL"));
+}
+
+const ALL_USERS_URI: &str = "http://acs.amazonaws.com/groups/global/AllUsers";
+
+async fn acl_body(app: &axum::routing::RouterIntoService<Body>, uri: &str) -> String {
+    let resp =
+        tower::ServiceExt::oneshot(app.clone(), signed_request(Method::GET, uri, Body::empty()))
+            .await
+            .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET {} must succeed", uri);
+    String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+fn canned_acl_request(uri: &str, canned: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .header("x-amz-acl", canned)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_object_acl_is_version_scoped() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-ver-bucket", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/acl-ver-bucket?versioning")
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .body(Body::from(
+                "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    for payload in ["first", "second"] {
+        let resp = tower::ServiceExt::oneshot(
+            app.clone(),
+            signed_request(Method::PUT, "/acl-ver-bucket/doc.txt", Body::from(payload)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let list_body = acl_body(&app, "/acl-ver-bucket?versions").await;
+    let archived_version_id = list_body
+        .split("<Version>")
+        .skip(1)
+        .find(|block| block.contains("<IsLatest>false</IsLatest>"))
+        .and_then(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id))
+        })
+        .filter(|id| *id != "null")
+        .expect("archived version id")
+        .to_string();
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request(
+            &format!(
+                "/acl-ver-bucket/doc.txt?acl&versionId={}",
+                archived_version_id
+            ),
+            "public-read",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let archived_acl = acl_body(
+        &app,
+        &format!(
+            "/acl-ver-bucket/doc.txt?acl&versionId={}",
+            archived_version_id
+        ),
+    )
+    .await;
+    assert!(
+        archived_acl.contains(ALL_USERS_URI),
+        "the archived version must carry the ACL written against its versionId"
+    );
+
+    let current_acl = acl_body(&app, "/acl-ver-bucket/doc.txt?acl").await;
+    assert!(
+        !current_acl.contains(ALL_USERS_URI),
+        "a version-scoped ACL write must not touch the current version"
+    );
+
+    let put_current = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request("/acl-ver-bucket/doc.txt?acl", "authenticated-read"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_current.status(), StatusCode::OK);
+
+    let archived_acl_again = acl_body(
+        &app,
+        &format!(
+            "/acl-ver-bucket/doc.txt?acl&versionId={}",
+            archived_version_id
+        ),
+    )
+    .await;
+    assert!(
+        archived_acl_again.contains(ALL_USERS_URI),
+        "an unversioned ACL write must not overwrite an archived version's ACL"
+    );
+}
+
+#[tokio::test]
+async fn test_object_acl_empty_version_id_is_unversioned() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-empty-ver", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-empty-ver/doc.txt", Body::from("data")),
+    )
+    .await
+    .unwrap();
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request("/acl-empty-ver/doc.txt?acl&versionId=", "public-read"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        put_resp.status(),
+        StatusCode::OK,
+        "an empty versionId must behave as an unversioned write"
+    );
+
+    let via_empty = acl_body(&app, "/acl-empty-ver/doc.txt?acl&versionId=").await;
+    let via_plain = acl_body(&app, "/acl-empty-ver/doc.txt?acl").await;
+    assert_eq!(
+        via_empty, via_plain,
+        "an empty versionId must read the current version"
+    );
+    assert!(via_plain.contains(ALL_USERS_URI));
+}
+
+#[tokio::test]
+async fn test_object_acl_unknown_version_id_not_found() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-missing-ver", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-missing-ver/doc.txt", Body::from("data")),
+    )
+    .await
+    .unwrap();
+
+    let get_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(
+            Method::GET,
+            "/acl-missing-ver/doc.txt?acl&versionId=no-such-version",
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request(
+            "/acl-missing-ver/doc.txt?acl&versionId=no-such-version",
+            "public-read",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_object_acl_current_version_id_matches_unversioned() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-cur-ver", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/acl-cur-ver?versioning")
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .body(Body::from(
+                "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let put_obj = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-cur-ver/doc.txt", Body::from("only")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_obj.status(), StatusCode::OK);
+    let current_version_id = put_obj.headers()["x-amz-version-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request(
+            &format!("/acl-cur-ver/doc.txt?acl&versionId={}", current_version_id),
+            "public-read",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let via_version = acl_body(
+        &app,
+        &format!("/acl-cur-ver/doc.txt?acl&versionId={}", current_version_id),
+    )
+    .await;
+    let via_plain = acl_body(&app, "/acl-cur-ver/doc.txt?acl").await;
+    assert_eq!(
+        via_version, via_plain,
+        "the current version's versionId must address the same ACL as the unversioned path"
+    );
+    assert!(via_plain.contains(ALL_USERS_URI));
+
+    let head_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::HEAD, "/acl-cur-ver/doc.txt", Body::empty()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        head_resp.status(),
+        StatusCode::OK,
+        "a version-scoped ACL write on the live version must not disturb the object"
+    );
+    assert_eq!(head_resp.headers()["content-length"].to_str().unwrap(), "4");
 }
 
 #[tokio::test]
@@ -15515,4 +16296,331 @@ async fn iam_get_policies_delegate_cannot_read_other_policies() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = response_json(resp).await;
     assert!(body["policies"].as_array().unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn version_scoped_object_actions_need_version_scoped_grants() {
+    const OBJ_DELETE_ACCESS_KEY: &str = "AKIAOBJECTDELETE0000";
+    const OBJ_DELETE_SECRET_KEY: &str = "object-delete-secret-key";
+    const VER_DELETE_ACCESS_KEY: &str = "AKIAVERSIONDELETE000";
+    const VER_DELETE_SECRET_KEY: &str = "version-delete-secret-key";
+    const COARSE_DELETE_ACCESS_KEY: &str = "AKIACOARSEDELETE0000";
+    const COARSE_DELETE_SECRET_KEY: &str = "coarse-delete-secret-key";
+    const OBJ_READ_ACCESS_KEY: &str = "AKIAOBJECTREAD000000";
+    const OBJ_READ_SECRET_KEY: &str = "object-read-secret-key";
+    const VER_READ_ACCESS_KEY: &str = "AKIAVERSIONREAD00000";
+    const VER_READ_SECRET_KEY: &str = "version-read-secret-key";
+
+    let scoped_user = |user_id: &str, access_key: &str, secret_key: &str, action: &str| {
+        serde_json::json!({
+            "user_id": user_id,
+            "display_name": user_id,
+            "enabled": true,
+            "access_keys": [{
+                "access_key": access_key,
+                "secret_key": secret_key,
+                "status": "active"
+            }],
+            "policies": [{
+                "bucket": "version-auth",
+                "actions": [action],
+                "prefix": "*"
+            }]
+        })
+    };
+
+    let (app, _tmp) = test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            scoped_user(
+                "u-objdel",
+                OBJ_DELETE_ACCESS_KEY,
+                OBJ_DELETE_SECRET_KEY,
+                "s3:DeleteObject"
+            ),
+            scoped_user(
+                "u-verdel",
+                VER_DELETE_ACCESS_KEY,
+                VER_DELETE_SECRET_KEY,
+                "s3:DeleteObjectVersion"
+            ),
+            scoped_user(
+                "u-coarsedel",
+                COARSE_DELETE_ACCESS_KEY,
+                COARSE_DELETE_SECRET_KEY,
+                "delete"
+            ),
+            scoped_user(
+                "u-objread",
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY,
+                "s3:GetObject"
+            ),
+            scoped_user(
+                "u-verread",
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY,
+                "s3:GetObjectVersion"
+            )
+        ]
+    }));
+
+    let as_user =
+        |method: Method, uri: &str, access_key: &'static str, secret_key: &'static str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("x-access-key", access_key)
+                .header("x-secret-key", secret_key)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/version-auth", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/version-auth?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    for payload in ["first", "second", "third"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/version-auth/doc.txt",
+                Body::from(payload),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let list_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/version-auth?versions",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let list_body = String::from_utf8(
+        list_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let archived: Vec<String> = list_body
+        .split("<Version>")
+        .skip(1)
+        .filter(|block| block.contains("<IsLatest>false</IsLatest>"))
+        .filter_map(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id.to_string()))
+        })
+        .filter(|id| id != "null")
+        .collect();
+    assert!(
+        archived.len() >= 2,
+        "expected two archived versions, got {:?}",
+        archived
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                &format!("/version-auth/doc.txt?versionId={}", archived[0]),
+                OBJ_DELETE_ACCESS_KEY,
+                OBJ_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:DeleteObject grant must not authorize a permanent version delete"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                &format!("/version-auth/doc.txt?versionId={}", archived[0]),
+                VER_DELETE_ACCESS_KEY,
+                VER_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT,
+        "an s3:DeleteObjectVersion grant must authorize a permanent version delete"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                &format!("/version-auth/doc.txt?versionId={}", archived[1]),
+                COARSE_DELETE_ACCESS_KEY,
+                COARSE_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT,
+        "the coarse 'delete' action must keep authorizing version deletes"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                "/version-auth/doc.txt",
+                VER_DELETE_ACCESS_KEY,
+                VER_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:DeleteObjectVersion grant must not authorize a plain delete-marker write"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                "/version-auth/doc.txt",
+                OBJ_DELETE_ACCESS_KEY,
+                OBJ_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT,
+        "an s3:DeleteObject grant must still authorize a plain delete-marker write"
+    );
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/version-auth/read.txt",
+            Body::from("v1"),
+        ))
+        .await
+        .unwrap();
+    let head_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/version-auth/read.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let read_version_id = head_resp.headers()["x-amz-version-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                &format!("/version-auth/read.txt?versionId={}", read_version_id),
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:GetObject grant must not authorize a version-scoped read"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                &format!("/version-auth/read.txt?versionId={}", read_version_id),
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an s3:GetObjectVersion grant must authorize a version-scoped read"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                "/version-auth/read.txt?versionId=",
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an empty versionId must authorize as an ordinary GetObject and read the current version"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                "/version-auth/read.txt?versionId=",
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an empty versionId must not be treated as a version-scoped read"
+    );
+
+    assert_eq!(
+        app.oneshot(as_user(
+            Method::GET,
+            "/version-auth/read.txt",
+            VER_READ_ACCESS_KEY,
+            VER_READ_SECRET_KEY
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:GetObjectVersion grant must not authorize a current-object read"
+    );
 }

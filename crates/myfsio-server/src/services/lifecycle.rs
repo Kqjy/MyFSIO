@@ -661,6 +661,192 @@ fn parse_lifecycle_rules_from_string(raw: &str) -> Vec<ParsedLifecycleRule> {
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleConfigError {
+    Malformed(String),
+    Unsupported(String),
+    Invalid(String),
+}
+
+impl LifecycleConfigError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Malformed(message) | Self::Unsupported(message) | Self::Invalid(message) => {
+                message
+            }
+        }
+    }
+}
+
+fn lifecycle_allowed_children(element: &str) -> &'static [&'static str] {
+    match element {
+        "LifecycleConfiguration" => &["Rule"],
+        "Rule" => &[
+            "ID",
+            "Status",
+            "Prefix",
+            "Filter",
+            "Expiration",
+            "NoncurrentVersionExpiration",
+            "AbortIncompleteMultipartUpload",
+        ],
+        "Filter" => &["Prefix", "Tag", "And"],
+        "And" => &["Prefix", "Tag"],
+        "Tag" => &["Key", "Value"],
+        "Expiration" => &["Days", "Date"],
+        "NoncurrentVersionExpiration" => &["NoncurrentDays"],
+        "AbortIncompleteMultipartUpload" => &["DaysAfterInitiation"],
+        _ => &[],
+    }
+}
+
+pub fn validate_lifecycle_configuration(raw: &str) -> Result<(), LifecycleConfigError> {
+    let doc = roxmltree::Document::parse(raw).map_err(|err| {
+        LifecycleConfigError::Malformed(format!(
+            "LifecycleConfiguration is not well-formed XML: {}",
+            err
+        ))
+    })?;
+
+    let root = doc.root_element();
+    let root_name = root.tag_name().name();
+    if root_name != "LifecycleConfiguration" {
+        return Err(LifecycleConfigError::Malformed(format!(
+            "LifecycleConfiguration must be the root element, found <{}>",
+            root_name
+        )));
+    }
+
+    validate_lifecycle_elements(root)?;
+
+    let rules: Vec<_> = root.children().filter(|node| node.is_element()).collect();
+    if rules.is_empty() {
+        return Err(LifecycleConfigError::Invalid(
+            "LifecycleConfiguration must contain at least one Rule".to_string(),
+        ));
+    }
+    for rule in &rules {
+        validate_lifecycle_rule_node(rule)?;
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_elements(node: roxmltree::Node<'_, '_>) -> Result<(), LifecycleConfigError> {
+    let parent = node.tag_name().name();
+    let allowed = lifecycle_allowed_children(parent);
+    for child in node.children().filter(|child| child.is_element()) {
+        let name = child.tag_name().name();
+        if !allowed.contains(&name) {
+            return Err(LifecycleConfigError::Unsupported(format!(
+                "Lifecycle element <{}> inside <{}> is not supported by this server",
+                name, parent
+            )));
+        }
+        validate_lifecycle_elements(child)?;
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_rule_node(
+    rule: &roxmltree::Node<'_, '_>,
+) -> Result<(), LifecycleConfigError> {
+    match child_text(rule, "Status") {
+        Some(status) => {
+            if status != "Enabled" && status != "Disabled" {
+                return Err(LifecycleConfigError::Invalid(format!(
+                    "Lifecycle 'Status' must be 'Enabled' or 'Disabled', found '{}'",
+                    status
+                )));
+            }
+        }
+        None => {
+            return Err(LifecycleConfigError::Invalid(
+                "Lifecycle 'Status' is required and must be 'Enabled' or 'Disabled'".to_string(),
+            ));
+        }
+    }
+
+    let mut actions = 0usize;
+
+    if let Some(expiration) = child_element(rule, "Expiration") {
+        match (
+            child_text(&expiration, "Days"),
+            child_text(&expiration, "Date"),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(LifecycleConfigError::Invalid(
+                    "Lifecycle 'Expiration' must specify either 'Days' or 'Date', not both"
+                        .to_string(),
+                ))
+            }
+            (Some(days), None) => validate_lifecycle_days("Days", &days)?,
+            (None, Some(date)) => {
+                if parse_datetime(&date).is_none() {
+                    return Err(LifecycleConfigError::Invalid(format!(
+                        "Lifecycle 'Date' must be an RFC 3339 timestamp, found '{}'",
+                        date
+                    )));
+                }
+            }
+            (None, None) => {
+                return Err(LifecycleConfigError::Invalid(
+                    "Lifecycle 'Expiration' must specify 'Days' or 'Date'".to_string(),
+                ))
+            }
+        }
+        actions += 1;
+    }
+
+    if let Some(noncurrent) = child_element(rule, "NoncurrentVersionExpiration") {
+        let days = child_text(&noncurrent, "NoncurrentDays").ok_or_else(|| {
+            LifecycleConfigError::Invalid(
+                "Lifecycle 'NoncurrentVersionExpiration' must specify 'NoncurrentDays'".to_string(),
+            )
+        })?;
+        validate_lifecycle_days("NoncurrentDays", &days)?;
+        actions += 1;
+    }
+
+    if let Some(abort) = child_element(rule, "AbortIncompleteMultipartUpload") {
+        let days = child_text(&abort, "DaysAfterInitiation").ok_or_else(|| {
+            LifecycleConfigError::Invalid(
+                "Lifecycle 'AbortIncompleteMultipartUpload' must specify 'DaysAfterInitiation'"
+                    .to_string(),
+            )
+        })?;
+        validate_lifecycle_days("DaysAfterInitiation", &days)?;
+        actions += 1;
+    }
+
+    if actions == 0 {
+        return Err(LifecycleConfigError::Invalid(
+            "Lifecycle 'Rule' must specify Expiration, NoncurrentVersionExpiration or AbortIncompleteMultipartUpload".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_days(name: &str, text: &str) -> Result<(), LifecycleConfigError> {
+    let parsed: i64 = text.parse().map_err(|_| {
+        LifecycleConfigError::Invalid(format!("Lifecycle '{}' must be a positive integer", name))
+    })?;
+    if parsed < 1 {
+        return Err(LifecycleConfigError::Invalid(format!(
+            "Lifecycle '{}' must be a positive integer (>= 1)",
+            name
+        )));
+    }
+    Ok(())
+}
+
+fn child_element<'a, 'input>(
+    node: &roxmltree::Node<'a, 'input>,
+    name: &str,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    node.children()
+        .find(|child| child.is_element() && child.tag_name().name() == name)
+}
+
 fn parse_lifecycle_rule(value: &Value) -> Option<ParsedLifecycleRule> {
     let map = value.as_object()?;
     let mut tags: Vec<(String, String)> = Vec::new();
@@ -849,6 +1035,240 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert!(rules[0].tags.is_empty());
         assert_eq!(rules[0].prefix, "logs/");
+    }
+
+    fn supported_lifecycle_xml() -> String {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Rule>
+                <ID>expire-logs</ID>
+                <Status>Enabled</Status>
+                <Filter>
+                  <And>
+                    <Prefix>logs/</Prefix>
+                    <Tag><Key>env</Key><Value>prod</Value></Tag>
+                  </And>
+                </Filter>
+                <Expiration><Days>10</Days></Expiration>
+                <NoncurrentVersionExpiration><NoncurrentDays>30</NoncurrentDays></NoncurrentVersionExpiration>
+                <AbortIncompleteMultipartUpload><DaysAfterInitiation>7</DaysAfterInitiation></AbortIncompleteMultipartUpload>
+              </Rule>
+            </LifecycleConfiguration>"#
+            .to_string()
+    }
+
+    fn rule_xml(body: &str) -> String {
+        format!(
+            "<LifecycleConfiguration><Rule><Status>Enabled</Status>{}</Rule></LifecycleConfiguration>",
+            body
+        )
+    }
+
+    #[test]
+    fn accepts_supported_lifecycle_configuration() {
+        assert_eq!(
+            validate_lifecycle_configuration(&supported_lifecycle_xml()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_expiration_date_and_disabled_status() {
+        let xml = "<LifecycleConfiguration><Rule><Status>Disabled</Status>\
+                   <Prefix>tmp/</Prefix>\
+                   <Expiration><Date>2026-01-01T00:00:00Z</Date></Expiration>\
+                   </Rule></LifecycleConfiguration>";
+        assert_eq!(validate_lifecycle_configuration(xml), Ok(()));
+    }
+
+    #[test]
+    fn accepted_configuration_is_parsed_by_the_executor() {
+        let xml = supported_lifecycle_xml();
+        validate_lifecycle_configuration(&xml).expect("valid");
+        let rules = parse_lifecycle_rules(&Value::String(xml));
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].prefix, "logs/");
+        assert_eq!(rules[0].expiration_days, Some(10));
+        assert_eq!(rules[0].noncurrent_days, Some(30));
+        assert_eq!(rules[0].abort_incomplete_multipart_days, Some(7));
+    }
+
+    #[test]
+    fn rejects_malformed_xml() {
+        for raw in ["", "not xml at all", "<LifecycleConfiguration><Rule>"] {
+            assert!(matches!(
+                validate_lifecycle_configuration(raw),
+                Err(LifecycleConfigError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_root_element() {
+        assert!(matches!(
+            validate_lifecycle_configuration("<Lifecycle><Rule/></Lifecycle>"),
+            Err(LifecycleConfigError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_elements() {
+        let cases = [
+            (
+                "Transition",
+                rule_xml("<Transition><Days>30</Days><StorageClass>GLACIER</StorageClass></Transition>"),
+            ),
+            (
+                "NoncurrentVersionTransition",
+                rule_xml("<NoncurrentVersionTransition><NoncurrentDays>30</NoncurrentDays></NoncurrentVersionTransition>"),
+            ),
+            (
+                "ExpiredObjectDeleteMarker",
+                rule_xml("<Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration>"),
+            ),
+            (
+                "NewerNoncurrentVersions",
+                rule_xml("<NoncurrentVersionExpiration><NoncurrentDays>1</NoncurrentDays><NewerNoncurrentVersions>2</NewerNoncurrentVersions></NoncurrentVersionExpiration>"),
+            ),
+            (
+                "ObjectSizeGreaterThan",
+                rule_xml("<Filter><And><Prefix>a/</Prefix><ObjectSizeGreaterThan>5368709120</ObjectSizeGreaterThan></And></Filter><Expiration><Days>1</Days></Expiration>"),
+            ),
+            (
+                "ObjectSizeLessThan",
+                rule_xml("<Filter><ObjectSizeLessThan>1024</ObjectSizeLessThan></Filter><Expiration><Days>1</Days></Expiration>"),
+            ),
+        ];
+        for (element, xml) in cases {
+            match validate_lifecycle_configuration(&xml) {
+                Err(LifecycleConfigError::Unsupported(message)) => {
+                    assert!(
+                        message.contains(element),
+                        "message {} should name {}",
+                        message,
+                        element
+                    );
+                }
+                other => panic!("expected {} to be rejected, got {:?}", element, other),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_future_element() {
+        assert!(matches!(
+            validate_lifecycle_configuration(&rule_xml(
+                "<Expiration><Days>1</Days></Expiration><SomeFutureAction><Days>1</Days></SomeFutureAction>"
+            )),
+            Err(LifecycleConfigError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_misplaced_tag_element() {
+        assert!(matches!(
+            validate_lifecycle_configuration(&rule_xml(
+                "<Expiration><Days>1</Days><Tag><Key>a</Key><Value>b</Value></Tag></Expiration>"
+            )),
+            Err(LifecycleConfigError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_positive_days() {
+        for body in [
+            "<Expiration><Days>0</Days></Expiration>",
+            "<Expiration><Days>-1</Days></Expiration>",
+            "<Expiration><Days>ten</Days></Expiration>",
+            "<NoncurrentVersionExpiration><NoncurrentDays>0</NoncurrentDays></NoncurrentVersionExpiration>",
+            "<AbortIncompleteMultipartUpload><DaysAfterInitiation>0</DaysAfterInitiation></AbortIncompleteMultipartUpload>",
+        ] {
+            assert!(
+                matches!(
+                    validate_lifecycle_configuration(&rule_xml(body)),
+                    Err(LifecycleConfigError::Invalid(_))
+                ),
+                "expected {} to be rejected",
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_rules_without_an_actionable_element() {
+        for body in [
+            "",
+            "<Filter><Prefix>logs/</Prefix></Filter>",
+            "<Expiration></Expiration>",
+            "<Expiration><Days></Days></Expiration>",
+        ] {
+            assert!(
+                matches!(
+                    validate_lifecycle_configuration(&rule_xml(body)),
+                    Err(LifecycleConfigError::Invalid(_))
+                ),
+                "expected {:?} to be rejected",
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_configuration_without_rules() {
+        assert!(matches!(
+            validate_lifecycle_configuration("<LifecycleConfiguration></LifecycleConfiguration>"),
+            Err(LifecycleConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_status_and_date() {
+        assert!(matches!(
+            validate_lifecycle_configuration(
+                "<LifecycleConfiguration><Rule><Status>enabled</Status>\
+                 <Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+            ),
+            Err(LifecycleConfigError::Invalid(_))
+        ));
+        assert!(matches!(
+            validate_lifecycle_configuration(&rule_xml(
+                "<Expiration><Date>2026-01-01</Date></Expiration>"
+            )),
+            Err(LifecycleConfigError::Invalid(_))
+        ));
+        assert!(matches!(
+            validate_lifecycle_configuration(&rule_xml(
+                "<Expiration><Days>1</Days><Date>2026-01-01T00:00:00Z</Date></Expiration>"
+            )),
+            Err(LifecycleConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_or_empty_status() {
+        assert!(matches!(
+            validate_lifecycle_configuration(
+                "<LifecycleConfiguration><Rule>\
+                 <Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+            ),
+            Err(LifecycleConfigError::Invalid(_))
+        ));
+        assert!(matches!(
+            validate_lifecycle_configuration(
+                "<LifecycleConfiguration><Rule><Status></Status>\
+                 <Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>"
+            ),
+            Err(LifecycleConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_json_lifecycle_body() {
+        let json = r#"{"Rules":[{"Status":"Enabled","Expiration":{"Days":1}}]}"#;
+        assert!(matches!(
+            validate_lifecycle_configuration(json),
+            Err(LifecycleConfigError::Malformed(_))
+        ));
     }
 
     #[tokio::test]

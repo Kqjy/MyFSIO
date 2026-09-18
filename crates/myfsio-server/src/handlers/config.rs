@@ -7,9 +7,10 @@ use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_storage::traits::StorageEngine;
 
 use crate::services::acl::{
-    acl_from_object_metadata, acl_from_xml_strict, acl_to_xml_with_lookup, create_canned_acl,
-    store_object_acl,
+    acl_from_bucket_config, acl_from_object_metadata, acl_from_xml_strict, acl_to_xml,
+    acl_to_xml_with_lookup, create_canned_acl, store_object_acl, Acl,
 };
+use crate::services::lifecycle::{validate_lifecycle_configuration, LifecycleConfigError};
 use crate::services::notifications::parse_notification_configurations;
 use crate::services::object_lock::{
     get_legal_hold, get_object_retention as retention_from_metadata,
@@ -475,8 +476,8 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
         Err(response) => return response,
     };
     let raw = String::from_utf8_lossy(&body_bytes).to_string();
-    if let Err(message) = validate_lifecycle_days(&raw) {
-        return xml_error_response(S3Error::new(S3ErrorCode::InvalidArgument, message));
+    if let Err(err) = validate_lifecycle_configuration(&raw) {
+        return xml_error_response(lifecycle_config_error(err));
     }
     let value = serde_json::Value::String(raw);
 
@@ -486,28 +487,13 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
     .await
 }
 
-fn validate_lifecycle_days(raw: &str) -> Result<(), String> {
-    if let Ok(doc) = roxmltree::Document::parse(raw) {
-        for node in doc.descendants().filter(|node| node.is_element()) {
-            let name = node.tag_name().name();
-            if name == "Days" || name == "NoncurrentDays" || name == "DaysAfterInitiation" {
-                let text = node.text().unwrap_or("").trim();
-                if text.is_empty() {
-                    continue;
-                }
-                let parsed: i64 = text
-                    .parse()
-                    .map_err(|_| format!("Lifecycle '{}' must be a positive integer", name))?;
-                if parsed < 1 {
-                    return Err(format!(
-                        "Lifecycle '{}' must be a positive integer (>= 1)",
-                        name
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
+fn lifecycle_config_error(err: LifecycleConfigError) -> S3Error {
+    let code = match err {
+        LifecycleConfigError::Malformed(_) => S3ErrorCode::MalformedXML,
+        LifecycleConfigError::Unsupported(_) => S3ErrorCode::NotImplemented,
+        LifecycleConfigError::Invalid(_) => S3ErrorCode::InvalidArgument,
+    };
+    S3Error::new(code, err.message())
 }
 
 pub async fn delete_lifecycle(state: &AppState, bucket: &str) -> Response {
@@ -1024,17 +1010,51 @@ fn default_owner_for(_state: &AppState) -> String {
     "myfsio".to_string()
 }
 
-pub async fn put_acl(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
-        Ok(bytes) => bytes,
-        Err(response) => return response,
-    };
-    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
-
+pub async fn set_bucket_acl(state: &AppState, bucket: &str, acl: &Acl) -> Response {
+    let value = serde_json::Value::String(acl_to_xml(acl));
     mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
         config.acl = Some(value);
     })
     .await
+}
+
+pub async fn put_acl(state: &AppState, bucket: &str, headers: &HeaderMap, body: Body) -> Response {
+    let acl_request = match super::header_acl_request(headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+
+    let Some(acl_request) = acl_request else {
+        let value = serde_json::Value::String(body_str);
+        return mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+            config.acl = Some(value);
+        })
+        .await;
+    };
+
+    if !body_str.trim().is_empty() {
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "Specifying both Canned ACLs and Header Grants is not allowed",
+        ));
+    }
+
+    let owner = match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => config
+            .acl
+            .as_ref()
+            .and_then(acl_from_bucket_config)
+            .map(|acl| acl.owner)
+            .unwrap_or_else(|| default_owner_for(state)),
+        Err(e) => return storage_err(e),
+    };
+
+    set_bucket_acl(state, bucket, &acl_request.into_acl(&owner)).await
 }
 
 pub async fn get_website(state: &AppState, bucket: &str) -> Response {
@@ -1853,6 +1873,7 @@ pub async fn put_object_acl(
     state: &AppState,
     bucket: &str,
     key: &str,
+    version_id: Option<&str>,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
@@ -1862,62 +1883,82 @@ pub async fn put_object_acl(
     };
     let body_str = String::from_utf8_lossy(&body_bytes);
     let body_trimmed = body_str.trim();
-    let canned_acl_header = headers
-        .get("x-amz-acl")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let acl_request = match super::header_acl_request(headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-    if !body_trimmed.is_empty() && canned_acl_header.is_some() {
+    if !body_trimmed.is_empty() && acl_request.is_some() {
         return xml_error_response(S3Error::new(
             S3ErrorCode::InvalidRequest,
             "Specifying both Canned ACLs and Header Grants is not allowed",
         ));
     }
 
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
-                Ok(metadata) => metadata,
-                Err(err) => return storage_err(err),
-            };
-            let existing_owner = acl_from_object_metadata(&metadata)
-                .map(|acl| acl.owner)
-                .unwrap_or_else(|| default_owner_for(state));
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
+    }
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
+        }
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let mut metadata = match metadata_res {
+        Ok(metadata) => metadata,
+        Err(err) => return storage_err(err),
+    };
+    let existing_owner = acl_from_object_metadata(&metadata)
+        .map(|acl| acl.owner)
+        .unwrap_or_else(|| default_owner_for(state));
 
-            let acl = if !body_trimmed.is_empty() {
-                match acl_from_xml_strict(body_trimmed) {
-                    Some(parsed) => {
-                        if parsed.owner != existing_owner {
-                            return xml_error_response(S3Error::new(
-                                S3ErrorCode::AccessDenied,
-                                "The Owner ID in the ACL does not match the existing object owner",
-                            ));
-                        }
-                        parsed
-                    }
-                    None => {
-                        return xml_error_response(S3Error::from_code(
-                            S3ErrorCode::MalformedACLError,
-                        ));
-                    }
+    let acl = if !body_trimmed.is_empty() {
+        match acl_from_xml_strict(body_trimmed) {
+            Some(parsed) => {
+                if parsed.owner != existing_owner {
+                    return xml_error_response(S3Error::new(
+                        S3ErrorCode::AccessDenied,
+                        "The Owner ID in the ACL does not match the existing object owner",
+                    ));
                 }
-            } else {
-                let canned = canned_acl_header.unwrap_or("private");
-                create_canned_acl(canned, &existing_owner)
-            };
+                parsed
+            }
+            None => {
+                return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedACLError));
+            }
+        }
+    } else {
+        match acl_request {
+            Some(request) => request.into_acl(&existing_owner),
+            None => create_canned_acl("private", &existing_owner),
+        }
+    };
 
-            store_object_acl(&mut metadata, &acl);
-            match state
+    store_object_acl(&mut metadata, &acl);
+    let write_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .put_object_version_metadata(bucket, key, vid, &metadata)
+                .await
+        }
+        None => {
+            state
                 .storage
                 .put_object_metadata(bucket, key, &metadata)
                 .await
-            {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(err) => storage_err(err),
-            }
         }
-        Err(e) => storage_err(e),
+    };
+    match write_res {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(err) => storage_err(err),
     }
 }
 
@@ -2144,26 +2185,42 @@ pub async fn put_object_legal_hold(
     }
 }
 
-pub async fn get_object_acl(state: &AppState, bucket: &str, key: &str) -> Response {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            let metadata = match state.storage.get_object_metadata(bucket, key).await {
-                Ok(metadata) => metadata,
-                Err(err) => return storage_err(err),
-            };
-            let owner = default_owner_for(state);
-            let acl = acl_from_object_metadata(&metadata)
-                .unwrap_or_else(|| create_canned_acl("private", &owner));
-            let lookup = |id: &str| {
-                state
-                    .iam
-                    .get_display_name(id)
-                    .unwrap_or_else(|| id.to_string())
-            };
-            xml_response(StatusCode::OK, acl_to_xml_with_lookup(&acl, lookup))
-        }
-        Err(e) => storage_err(e),
+pub async fn get_object_acl(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Response {
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
     }
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
+        }
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let metadata = match metadata_res {
+        Ok(metadata) => metadata,
+        Err(err) => return storage_err(err),
+    };
+    let owner = default_owner_for(state);
+    let acl =
+        acl_from_object_metadata(&metadata).unwrap_or_else(|| create_canned_acl("private", &owner));
+    let lookup = |id: &str| {
+        state
+            .iam
+            .get_display_name(id)
+            .unwrap_or_else(|| id.to_string())
+    };
+    xml_response(StatusCode::OK, acl_to_xml_with_lookup(&acl, lookup))
 }
 
 fn find_xml_text(doc: &roxmltree::Document<'_>, name: &str) -> Option<String> {
@@ -2280,6 +2337,58 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
     }
 
     tags
+}
+
+#[cfg(test)]
+mod lifecycle_xml_tests {
+    use super::lifecycle_config_error;
+    use crate::services::lifecycle::{validate_lifecycle_configuration, LifecycleConfigError};
+    use myfsio_common::error::S3ErrorCode;
+
+    fn error_code_for(raw: &str) -> S3ErrorCode {
+        let err = validate_lifecycle_configuration(raw).expect_err("expected rejection");
+        lifecycle_config_error(err).code
+    }
+
+    #[test]
+    fn malformed_xml_maps_to_malformed_xml() {
+        assert_eq!(
+            error_code_for("<LifecycleConfiguration>"),
+            S3ErrorCode::MalformedXML
+        );
+    }
+
+    #[test]
+    fn unsupported_element_maps_to_not_implemented() {
+        let xml = "<LifecycleConfiguration><Rule><Status>Enabled</Status>\
+                   <Filter><ObjectSizeGreaterThan>5368709120</ObjectSizeGreaterThan></Filter>\
+                   <Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>";
+        assert_eq!(error_code_for(xml), S3ErrorCode::NotImplemented);
+    }
+
+    #[test]
+    fn invalid_days_maps_to_invalid_argument() {
+        let xml = "<LifecycleConfiguration><Rule><Status>Enabled</Status>\
+                   <Expiration><Days>0</Days></Expiration></Rule></LifecycleConfiguration>";
+        assert_eq!(error_code_for(xml), S3ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn error_message_names_the_offending_element() {
+        let xml = "<LifecycleConfiguration><Rule><Status>Enabled</Status>\
+                   <Transition><Days>30</Days></Transition></Rule></LifecycleConfiguration>";
+        let err = validate_lifecycle_configuration(xml).expect_err("expected rejection");
+        assert!(matches!(err, LifecycleConfigError::Unsupported(_)));
+        assert!(lifecycle_config_error(err).message.contains("Transition"));
+    }
+
+    #[test]
+    fn supported_configuration_is_accepted() {
+        let xml = "<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status>\
+                   <Filter><Prefix>logs/</Prefix></Filter>\
+                   <Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>";
+        assert!(validate_lifecycle_configuration(xml).is_ok());
+    }
 }
 
 #[cfg(test)]

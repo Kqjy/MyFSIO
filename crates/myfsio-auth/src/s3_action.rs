@@ -12,13 +12,16 @@ pub const S3_ACTION_TABLE: &[(&str, &str)] = &[
     ("s3:getobjecttagging", "read"),
     ("s3:getobjectversiontagging", "read"),
     ("s3:getobjectacl", "read"),
+    ("s3:getobjectversionacl", "read"),
     ("s3:getobjectattributes", "read"),
+    ("s3:getobjectversionattributes", "read"),
     ("s3:headobject", "read"),
     ("s3:headbucket", "read"),
     ("s3:putobject", "write"),
     ("s3:createbucket", "write"),
     ("s3:putobjecttagging", "write"),
     ("s3:putobjectacl", "write"),
+    ("s3:putobjectversionacl", "write"),
     ("s3:createmultipartupload", "write"),
     ("s3:uploadpart", "write"),
     ("s3:completemultipartupload", "write"),
@@ -84,9 +87,6 @@ pub fn canonical_s3_action_name(name: &str) -> &str {
     match name {
         "s3:headobject" => "s3:getobject",
         "s3:headbucket" => "s3:listbucket",
-        "s3:getobjectversion" => "s3:getobject",
-        "s3:getobjectversiontagging" => "s3:getobjecttagging",
-        "s3:deleteobjectversion" => "s3:deleteobject",
         "s3:copyobject"
         | "s3:createmultipartupload"
         | "s3:uploadpart"
@@ -222,7 +222,7 @@ mod tests {
             "read",
             Some("s3:GetObject")
         ));
-        assert!(action_matches(
+        assert!(!action_matches(
             "s3:GetObjectVersion",
             "read",
             Some("s3:GetObject")
@@ -255,5 +255,95 @@ mod tests {
             Some("s3:GetBucketVersioning")
         ));
         assert!(action_matches("*", "write", Some("s3:PutObject")));
+    }
+
+    #[test]
+    fn version_scoped_actions_are_distinct_from_base_actions() {
+        assert!(!action_matches(
+            "s3:DeleteObject",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:DeleteObjectVersion",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(!action_matches(
+            "s3:DeleteObjectVersion",
+            "delete",
+            Some("s3:DeleteObject")
+        ));
+        assert!(!action_matches(
+            "s3:GetObject",
+            "read",
+            Some("s3:GetObjectVersion")
+        ));
+        assert!(!action_matches(
+            "s3:GetObjectTagging",
+            "read",
+            Some("s3:GetObjectVersionTagging")
+        ));
+        assert!(!action_matches(
+            "s3:GetObjectAcl",
+            "read",
+            Some("s3:GetObjectVersionAcl")
+        ));
+        assert!(action_matches(
+            "s3:GetObjectVersionAcl",
+            "read",
+            Some("s3:GetObjectVersionAcl")
+        ));
+        assert!(action_matches(
+            "s3:PutObjectVersionAcl",
+            "write",
+            Some("s3:PutObjectVersionAcl")
+        ));
+        assert!(action_matches(
+            "s3:GetObjectVersionAttributes",
+            "read",
+            Some("s3:GetObjectVersionAttributes")
+        ));
+    }
+
+    #[test]
+    fn coarse_and_wildcard_grants_still_cover_version_actions() {
+        assert!(action_matches("delete", "delete", Some("s3:DeleteObject")));
+        assert!(action_matches(
+            "delete",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches("read", "read", Some("s3:GetObjectVersion")));
+        assert!(action_matches(
+            "read",
+            "read",
+            Some("s3:GetObjectVersionTagging")
+        ));
+        assert!(action_matches(
+            "s3:Get*",
+            "read",
+            Some("s3:GetObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:Delete*",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:GetObjectVersion*",
+            "read",
+            Some("s3:GetObjectVersionAttributes")
+        ));
+        assert!(action_matches(
+            "*",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:*",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
     }
 }

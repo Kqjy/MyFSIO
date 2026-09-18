@@ -471,7 +471,7 @@ pub async fn create_bucket(
             BucketSubresource::Cors => config::put_cors(&state, &bucket, body).await,
             BucketSubresource::Encryption => config::put_encryption(&state, &bucket, body).await,
             BucketSubresource::Lifecycle => config::put_lifecycle(&state, &bucket, body).await,
-            BucketSubresource::Acl => config::put_acl(&state, &bucket, body).await,
+            BucketSubresource::Acl => config::put_acl(&state, &bucket, &headers, body).await,
             BucketSubresource::Policy => config::put_policy(&state, &bucket, body).await,
             BucketSubresource::Replication => config::put_replication(&state, &bucket, body).await,
             BucketSubresource::Website => config::put_website(&state, &bucket, body).await,
@@ -494,9 +494,10 @@ pub async fn create_bucket(
         };
     }
 
-    if let Err(resp) = canned_acl_value(&headers) {
-        return resp;
-    }
+    let acl_request = match header_acl_request(&headers) {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
 
     let body_bytes = match collect_body_limited(body, CONFIG_BODY_LIMIT).await {
         Ok(bytes) => bytes,
@@ -526,6 +527,14 @@ pub async fn create_bucket(
                 let lock_response = config::set_object_lock_enabled_default(&state, &bucket).await;
                 if !lock_response.status().is_success() {
                     return lock_response;
+                }
+            }
+            if let Some(request) = acl_request {
+                let (owner, _) = canonical_default_owner(&state);
+                let acl_response =
+                    config::set_bucket_acl(&state, &bucket, &request.into_acl(&owner)).await;
+                if !acl_response.status().is_success() {
+                    return acl_response;
                 }
             }
             (
@@ -934,12 +943,23 @@ pub fn object_method_default_action(method: &Method) -> &'static str {
     }
 }
 
-pub fn object_method_default_s3_action(method: &Method) -> &'static str {
+pub fn object_method_default_s3_action(method: &Method, version_scoped: bool) -> &'static str {
     match *method {
-        Method::GET | Method::HEAD => "s3:GetObject",
         Method::PUT | Method::POST => "s3:PutObject",
-        Method::DELETE => "s3:DeleteObject",
-        _ => "s3:GetObject",
+        Method::DELETE => {
+            if version_scoped {
+                "s3:DeleteObjectVersion"
+            } else {
+                "s3:DeleteObject"
+            }
+        }
+        _ => {
+            if version_scoped {
+                "s3:GetObjectVersion"
+            } else {
+                "s3:GetObject"
+            }
+        }
     }
 }
 
@@ -989,20 +1009,25 @@ impl ObjectSubresource {
         }
     }
 
-    pub fn s3_action(self, method: &Method) -> &'static str {
+    pub fn s3_action(self, method: &Method, version_scoped: bool) -> &'static str {
         if !self.is_dispatched_for(method) {
-            return object_method_default_s3_action(method);
+            return object_method_default_s3_action(method, version_scoped);
         }
         let read = matches!(*method, Method::GET | Method::HEAD);
         match self {
-            Self::Acl => {
-                if read {
-                    "s3:GetObjectAcl"
+            Self::Acl => match (read, version_scoped) {
+                (true, true) => "s3:GetObjectVersionAcl",
+                (true, false) => "s3:GetObjectAcl",
+                (false, true) => "s3:PutObjectVersionAcl",
+                (false, false) => "s3:PutObjectAcl",
+            },
+            Self::Attributes => {
+                if version_scoped {
+                    "s3:GetObjectVersionAttributes"
                 } else {
-                    "s3:PutObjectAcl"
+                    "s3:GetObjectAttributes"
                 }
             }
-            Self::Attributes => "s3:GetObjectAttributes",
             Self::LegalHold => {
                 if read {
                     "s3:GetObjectLegalHold"
@@ -1021,7 +1046,13 @@ impl ObjectSubresource {
             Self::Tagging => match *method {
                 Method::DELETE => "s3:DeleteObjectTagging",
                 Method::PUT | Method::POST => "s3:PutObjectTagging",
-                _ => "s3:GetObjectTagging",
+                _ => {
+                    if version_scoped {
+                        "s3:GetObjectVersionTagging"
+                    } else {
+                        "s3:GetObjectTagging"
+                    }
+                }
             },
             Self::UploadId => match *method {
                 Method::GET => "s3:ListMultipartUploadParts",
@@ -1031,6 +1062,17 @@ impl ObjectSubresource {
             Self::Uploads => "s3:PutObject",
         }
     }
+}
+
+pub fn query_has_version_id(query: Option<&str>) -> bool {
+    let Some(q) = query else {
+        return false;
+    };
+    q.split('&').filter(|p| !p.is_empty()).any(|part| {
+        part.split_once('=').is_some_and(|(raw_key, value)| {
+            !value.is_empty() && decode_query_key(raw_key) == "versionId"
+        })
+    })
 }
 
 pub fn parse_object_subresource(
@@ -1109,6 +1151,47 @@ fn unsupported_bucket_subresource(query: Option<&str>) -> Option<String> {
             .iter()
             .any(|(name, _)| *name == key_owned.as_str())
             || SUPPORTED_BUCKET_LIST_PARAMS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&key_owned))
+            || lower.starts_with("x-amz-")
+            || lower.starts_with("x-id");
+        if !known {
+            return Some(key_owned);
+        }
+    }
+    None
+}
+
+const SUPPORTED_OBJECT_PARAMS: &[&str] = &[
+    "versionId",
+    "partNumber",
+    "part-number-marker",
+    "max-parts",
+    "select-type",
+    "response-content-type",
+    "response-content-language",
+    "response-expires",
+    "response-cache-control",
+    "response-content-disposition",
+    "response-content-encoding",
+];
+
+fn unsupported_object_subresource(query: Option<&str>) -> Option<String> {
+    let q = query?;
+    if q.is_empty() {
+        return None;
+    }
+    for part in q.split('&').filter(|p| !p.is_empty()) {
+        let raw_key = part.split('=').next().unwrap_or("");
+        if raw_key.is_empty() {
+            continue;
+        }
+        let key_owned = decode_query_key(raw_key);
+        let lower = key_owned.to_ascii_lowercase();
+        let known = OBJECT_SUBRESOURCE_SELECTORS
+            .iter()
+            .any(|(name, _)| *name == key_owned.as_str())
+            || SUPPORTED_OBJECT_PARAMS
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(&key_owned))
             || lower.starts_with("x-amz-")
@@ -1765,6 +1848,12 @@ pub struct ObjectQuery {
     pub response_expires: Option<String>,
 }
 
+impl ObjectQuery {
+    pub fn effective_version_id(&self) -> Option<&str> {
+        self.version_id.as_deref().filter(|value| !value.is_empty())
+    }
+}
+
 fn apply_response_overrides(headers: &mut HeaderMap, query: &ObjectQuery) {
     if let Some(ref v) = query.response_content_type {
         if let Ok(val) = v.parse() {
@@ -2085,13 +2174,76 @@ const CANNED_ACL_VALUES: &[&str] = &[
     "aws-exec-read",
 ];
 
+enum HeaderAcl {
+    Canned(String),
+    Grants(Vec<crate::services::acl::AclGrant>),
+}
+
+impl HeaderAcl {
+    fn into_acl(self, owner: &str) -> crate::services::acl::Acl {
+        match self {
+            HeaderAcl::Canned(canned) => crate::services::acl::create_canned_acl(&canned, owner),
+            HeaderAcl::Grants(grants) => crate::services::acl::Acl {
+                owner: owner.to_string(),
+                grants,
+            },
+        }
+    }
+}
+
+fn header_acl_request(headers: &HeaderMap) -> Result<Option<HeaderAcl>, Response> {
+    let canned = canned_acl_value(headers)?;
+    let mut grants: Vec<crate::services::acl::AclGrant> = Vec::new();
+    for header in crate::services::acl::ACL_GRANT_HEADERS {
+        let Some(value) = headers.get(*header) else {
+            continue;
+        };
+        let Ok(raw) = value.to_str() else {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                format!("Invalid grantee list in {}", header),
+            )));
+        };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        match crate::services::acl::grants_from_header(header, raw) {
+            Ok(parsed) => {
+                for grant in parsed {
+                    if !grants.contains(&grant) {
+                        grants.push(grant);
+                    }
+                }
+            }
+            Err(message) => {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    message,
+                )));
+            }
+        }
+    }
+    if canned.is_some() && !grants.is_empty() {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "Specifying both Canned ACLs and Header Grants is not allowed",
+        )));
+    }
+    if !grants.is_empty() {
+        return Ok(Some(HeaderAcl::Grants(grants)));
+    }
+    Ok(canned.map(HeaderAcl::Canned))
+}
+
 fn apply_object_acl(
     headers: &HeaderMap,
     metadata: &mut HashMap<String, String>,
     owner: &str,
 ) -> Result<(), Response> {
-    let canned = canned_acl_value(headers)?.unwrap_or_else(|| "private".to_string());
-    let acl = crate::services::acl::create_canned_acl(&canned, owner);
+    let acl = match header_acl_request(headers)? {
+        Some(request) => request.into_acl(owner),
+        None => crate::services::acl::create_canned_acl("private", owner),
+    };
     crate::services::acl::store_object_acl(metadata, &acl);
     Ok(())
 }
@@ -2566,6 +2718,15 @@ pub async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(unsupported) = unsupported_object_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The object subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
+    }
     if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::PUT) {
         return resp;
     }
@@ -2576,7 +2737,7 @@ pub async fn put_object(
         .map(|p| p.user_id.clone())
         .unwrap_or_else(|| "myfsio".to_string());
     if query.tagging.is_some() {
-        if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
+        if query.effective_version_id().is_some() {
             return s3_error_response(S3Error::new(
                 S3ErrorCode::InvalidArgument,
                 "PUT Object Tagging with versionId is not supported on archived versions",
@@ -2589,7 +2750,15 @@ pub async fn put_object(
         return resp;
     }
     if query.acl.is_some() {
-        let resp = config::put_object_acl(&state, &bucket, &key, &headers, body).await;
+        let resp = config::put_object_acl(
+            &state,
+            &bucket,
+            &key,
+            query.effective_version_id(),
+            &headers,
+            body,
+        )
+        .await;
         if resp.status().is_success() {
             trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         }
@@ -2600,7 +2769,7 @@ pub async fn put_object(
             &state,
             &bucket,
             &key,
-            query.version_id.as_deref(),
+            query.effective_version_id(),
             principal_ref,
             &headers,
             body,
@@ -2612,9 +2781,14 @@ pub async fn put_object(
         return resp;
     }
     if query.legal_hold.is_some() {
-        let resp =
-            config::put_object_legal_hold(&state, &bucket, &key, query.version_id.as_deref(), body)
-                .await;
+        let resp = config::put_object_legal_hold(
+            &state,
+            &bucket,
+            &key,
+            query.effective_version_id(),
+            body,
+        )
+        .await;
         if resp.status().is_success() {
             trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         }
@@ -2936,23 +3110,32 @@ pub async fn get_object(
     raw_query: axum::extract::RawQuery,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(unsupported) = unsupported_object_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The object subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
+    }
     if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::GET) {
         return resp;
     }
     let key = normalize_object_key(key);
     if query.tagging.is_some() {
-        return config::get_object_tagging(&state, &bucket, &key, query.version_id.as_deref())
+        return config::get_object_tagging(&state, &bucket, &key, query.effective_version_id())
             .await;
     }
     if query.acl.is_some() {
-        return config::get_object_acl(&state, &bucket, &key).await;
+        return config::get_object_acl(&state, &bucket, &key, query.effective_version_id()).await;
     }
     if query.retention.is_some() {
-        return config::get_object_retention(&state, &bucket, &key, query.version_id.as_deref())
+        return config::get_object_retention(&state, &bucket, &key, query.effective_version_id())
             .await;
     }
     if query.legal_hold.is_some() {
-        return config::get_object_legal_hold(&state, &bucket, &key, query.version_id.as_deref())
+        return config::get_object_legal_hold(&state, &bucket, &key, query.effective_version_id())
             .await;
     }
     if query.attributes.is_some() {
@@ -2960,7 +3143,7 @@ pub async fn get_object(
             &state,
             &bucket,
             &key,
-            query.version_id.as_deref(),
+            query.effective_version_id(),
             &headers,
         )
         .await;
@@ -2969,7 +3152,7 @@ pub async fn get_object(
         return list_parts_handler(&state, &bucket, &key, upload_id, &query).await;
     }
 
-    let version_id = query.version_id.as_deref();
+    let version_id = query.effective_version_id();
 
     let range_header = headers
         .get("range")
@@ -3136,6 +3319,15 @@ pub async fn post_object(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(unsupported) = unsupported_object_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The object subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
+    }
     if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::POST) {
         return resp;
     }
@@ -3164,7 +3356,7 @@ pub async fn post_object(
         return select::post_select_object_content(&state, &bucket, &key, &headers, body).await;
     }
 
-    (StatusCode::METHOD_NOT_ALLOWED).into_response()
+    s3_error_response(S3Error::from_code(S3ErrorCode::MethodNotAllowed))
 }
 
 pub async fn delete_object(
@@ -3176,6 +3368,15 @@ pub async fn delete_object(
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(unsupported) = unsupported_object_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The object subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
+    }
     if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::DELETE) {
         return resp;
     }
@@ -3183,7 +3384,7 @@ pub async fn delete_object(
     let peer_marker = peer.as_ref().map(|e| &e.0);
     let principal_ref = principal.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
-        if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
+        if query.effective_version_id().is_some() {
             return s3_error_response(S3Error::new(
                 S3ErrorCode::InvalidArgument,
                 "DELETE Object Tagging with versionId is not supported on archived versions",
@@ -3206,7 +3407,7 @@ pub async fn delete_object(
     let bypass_governance =
         governance_bypass_allowed(&state, principal_ref, &bucket, Some(&key), &headers).await;
 
-    if let Some(version_id) = query.version_id.as_deref() {
+    if let Some(version_id) = query.effective_version_id() {
         if let Err(response) = ensure_object_version_lock_allows_delete(
             &state,
             &bucket,
@@ -3298,11 +3499,21 @@ pub async fn head_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(unsupported) = unsupported_object_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The object subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
+    }
     let key = normalize_object_key(key);
     let checksum_requested = checksum_mode_enabled(&headers);
-    let version_id = query.version_id.as_deref();
+    let version_id = query.effective_version_id();
     let result = match version_id {
         Some(version_id) => {
             state
@@ -5762,12 +5973,17 @@ async fn delete_objects_handler(
             async move {
                 let key = obj.key.clone();
                 let requested_vid = obj.version_id.clone();
+                let version_scoped = obj.version_id.as_deref().is_some_and(|v| !v.is_empty());
                 if let Err(err) = crate::middleware::authorize_action(
                     &state,
                     principal.as_ref(),
                     &bucket,
                     "delete",
-                    Some("s3:DeleteObject"),
+                    Some(if version_scoped {
+                        "s3:DeleteObjectVersion"
+                    } else {
+                        "s3:DeleteObject"
+                    }),
                     Some(&obj.key),
                     Some(true),
                     &crate::middleware::current_request_context(principal.as_ref()),
@@ -5923,7 +6139,7 @@ async fn range_get_handler_inner(
         state,
         bucket,
         key,
-        query.version_id.as_deref(),
+        query.effective_version_id(),
         window,
     )
     .await
@@ -7608,6 +7824,26 @@ mod tests {
     const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
     const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
+    #[test]
+    fn effective_version_id_agrees_with_auth_version_detection() {
+        for (raw, query) in [
+            (None, ""),
+            (Some(""), "versionId="),
+            (Some("v1"), "versionId=v1"),
+        ] {
+            let parsed = ObjectQuery {
+                version_id: raw.map(str::to_string),
+                ..Default::default()
+            };
+            assert_eq!(
+                parsed.effective_version_id().is_some(),
+                query_has_version_id(Some(query)),
+                "handler and auth disagree on version scoping for '{}'",
+                query
+            );
+        }
+    }
+
     fn test_state() -> (AppState, tempfile::TempDir) {
         test_state_with_strict_streaming(true)
     }
@@ -8212,6 +8448,398 @@ mod tests {
         assert!(body.contains("AllUsers"));
         assert!(body.contains("READ"));
         assert!(body.contains("myfsio"));
+    }
+
+    fn grant_request(
+        method: axum::http::Method,
+        uri: &str,
+        grants: &[(&str, &str)],
+        body: Body,
+    ) -> axum::http::Request<Body> {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY);
+        for (name, value) in grants {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(body).unwrap()
+    }
+
+    async fn response_text(response: Response) -> String {
+        String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn put_object_honors_grant_headers() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        let app = crate::create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants/photo.jpg",
+                &[
+                    ("x-amz-grant-read", "id=\"alice\", id=\"bob\""),
+                    (
+                        "x-amz-grant-write-acp",
+                        "uri=\"http://acs.amazonaws.com/groups/global/AuthenticatedUsers\"",
+                    ),
+                ],
+                Body::from("image"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/grants/photo.jpg?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("<ID>alice</ID>"), "got: {body}");
+        assert!(body.contains("<ID>bob</ID>"), "got: {body}");
+        assert!(body.contains("AuthenticatedUsers"), "got: {body}");
+        assert!(
+            body.contains("<Permission>READ</Permission>"),
+            "got: {body}"
+        );
+        assert!(
+            body.contains("<Permission>WRITE_ACP</Permission>"),
+            "got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_object_without_grant_headers_stays_private() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        let app = crate::create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(auth_request(
+                axum::http::Method::PUT,
+                "/grants/photo.jpg",
+                Body::from("image"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/grants/photo.jpg?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(
+            body.contains("<Permission>FULL_CONTROL</Permission>"),
+            "got: {body}"
+        );
+        assert!(!body.contains("AllUsers"), "got: {body}");
+        assert!(!body.contains("AuthenticatedUsers"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn put_object_rejects_canned_acl_combined_with_grant_header() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        let app = crate::create_router(state);
+
+        let response = app
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants/photo.jpg",
+                &[
+                    ("x-amz-acl", "public-read"),
+                    ("x-amz-grant-read", "id=\"alice\""),
+                ],
+                Body::from("image"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("InvalidRequest"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn put_object_rejects_invalid_grant_headers() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        let app = crate::create_router(state);
+
+        for value in [
+            "emailAddress=\"user@example.com\"",
+            "id=alice",
+            "team=\"alice\"",
+            "uri=\"http://acs.amazonaws.com/groups/s3/LogDelivery\"",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(grant_request(
+                    axum::http::Method::PUT,
+                    "/grants/photo.jpg",
+                    &[("x-amz-grant-read", value)],
+                    Body::from("image"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "value {value:?} should be rejected"
+            );
+            let body = response_text(response).await;
+            assert!(body.contains("InvalidArgument"), "got: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn put_object_acl_honors_grant_headers() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        state
+            .storage
+            .put_object(
+                "grants",
+                "photo.jpg",
+                Box::pin(std::io::Cursor::new(b"image".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        let app = crate::create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants/photo.jpg?acl",
+                &[(
+                    "x-amz-grant-full-control",
+                    "uri=\"http://acs.amazonaws.com/groups/global/AllUsers\"",
+                )],
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/grants/photo.jpg?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        let body = response_text(response).await;
+        assert!(body.contains("AllUsers"), "got: {body}");
+        assert!(
+            body.contains("<Permission>FULL_CONTROL</Permission>"),
+            "got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_object_acl_rejects_body_combined_with_grant_header() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        state
+            .storage
+            .put_object(
+                "grants",
+                "photo.jpg",
+                Box::pin(std::io::Cursor::new(b"image".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        let app = crate::create_router(state);
+
+        let xml = "<AccessControlPolicy><Owner><ID>myfsio</ID></Owner>\
+                   <AccessControlList/></AccessControlPolicy>";
+        let response = app
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants/photo.jpg?acl",
+                &[("x-amz-grant-read", "id=\"alice\"")],
+                Body::from(xml),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("InvalidRequest"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn put_bucket_acl_honors_grant_headers() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        let app = crate::create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants?acl",
+                &[(
+                    "x-amz-grant-read",
+                    "uri=\"http://acs.amazonaws.com/groups/global/AllUsers\"",
+                )],
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/grants?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("AllUsers"), "got: {body}");
+        assert!(
+            body.contains("<Permission>READ</Permission>"),
+            "got: {body}"
+        );
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/grants?list-type=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn put_bucket_acl_rejects_body_combined_with_grant_header() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("grants").await.unwrap();
+        let app = crate::create_router(state);
+
+        let xml = "<AccessControlPolicy><Owner><ID>myfsio</ID></Owner>\
+                   <AccessControlList/></AccessControlPolicy>";
+        let response = app
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants?acl",
+                &[("x-amz-grant-read", "id=\"alice\"")],
+                Body::from(xml),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("InvalidRequest"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn create_bucket_honors_grant_headers() {
+        let (state, _tmp) = test_state();
+        let app = crate::create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants",
+                &[(
+                    "x-amz-grant-read-acp",
+                    "uri=\"http://acs.amazonaws.com/groups/global/AuthenticatedUsers\"",
+                )],
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/grants?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("AuthenticatedUsers"), "got: {body}");
+        assert!(
+            body.contains("<Permission>READ_ACP</Permission>"),
+            "got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_bucket_rejects_invalid_grant_headers() {
+        let (state, _tmp) = test_state();
+        let app = crate::create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants",
+                &[("x-amz-grant-write", "emailAddress=\"user@example.com\"")],
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("InvalidArgument"), "got: {body}");
+
+        let response = app
+            .oneshot(grant_request(
+                axum::http::Method::PUT,
+                "/grants",
+                &[
+                    ("x-amz-acl", "private"),
+                    ("x-amz-grant-write", "id=\"alice\""),
+                ],
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_text(response).await;
+        assert!(body.contains("InvalidRequest"), "got: {body}");
     }
 
     #[tokio::test]

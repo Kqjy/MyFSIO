@@ -2130,7 +2130,6 @@ mod tests {
 
         for alias in [
             "s3:HeadObject",
-            "s3:GetObjectVersion",
             "s3:CopyObject",
             "s3:UploadPart",
             "s3:CompleteMultipartUpload",
