@@ -32,6 +32,16 @@ pub enum CryptoError {
     HkdfFailed(String),
 }
 
+fn resolve_chunk_size(chunk_size: Option<usize>) -> Result<usize, CryptoError> {
+    match chunk_size {
+        Some(0) => Err(CryptoError::EncryptionFailed(
+            "chunk size must be greater than zero".to_string(),
+        )),
+        Some(size) => Ok(size),
+        None => Ok(DEFAULT_CHUNK_SIZE),
+    }
+}
+
 fn read_exact_chunk<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -67,7 +77,7 @@ pub fn encrypt_stream_chunked(
         return Err(CryptoError::InvalidNonceSize(base_nonce.len()));
     }
 
-    let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
+    let chunk_size = resolve_chunk_size(chunk_size)?;
     let key_arr: [u8; 32] = key.try_into().unwrap();
     let nonce_arr: [u8; 12] = base_nonce.try_into().unwrap();
     let cipher = Aes256Gcm::new(&key_arr.into());
@@ -127,7 +137,7 @@ pub fn encrypt_reader_chunked(
         return Err(CryptoError::InvalidNonceSize(base_nonce.len()));
     }
 
-    let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
+    let chunk_size = resolve_chunk_size(chunk_size)?;
     let key_arr: [u8; 32] = key.try_into().unwrap();
     let nonce_arr: [u8; 12] = base_nonce.try_into().unwrap();
     let cipher = Aes256Gcm::new(&key_arr.into());
@@ -431,7 +441,7 @@ pub fn encrypt_part_block(
     part_number: u32,
     chunk_size: Option<usize>,
 ) -> Result<(u64, u32), CryptoError> {
-    let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
+    let chunk_size = resolve_chunk_size(chunk_size)?;
 
     let mut salt = [0u8; PART_BLOCK_SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -654,6 +664,67 @@ pub async fn decrypt_stream_chunked_async(
     })
     .await
     .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
+}
+
+#[cfg(test)]
+mod chunk_size_tests {
+    #[test]
+    fn zero_chunk_size_is_refused_instead_of_silently_encrypting_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.enc");
+        let plaintext = vec![7u8; 4096];
+        let key = [3u8; 32];
+        let nonce = [5u8; 12];
+
+        let err = super::encrypt_reader_chunked(
+            &mut plaintext.as_slice(),
+            &output,
+            &key,
+            &nonce,
+            Some(0),
+        );
+        let err = match err {
+            Ok(_) => panic!("a zero chunk size must be an error, not an empty object"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("chunk size must be greater than zero"),
+            "unexpected error: {}",
+            err
+        );
+
+        let input = dir.path().join("in.bin");
+        std::fs::write(&input, &plaintext).expect("write input");
+        assert!(
+            super::encrypt_stream_chunked(&input, &output, &key, &nonce, Some(0)).is_err(),
+            "encrypt_stream_chunked must refuse a zero chunk size"
+        );
+        assert!(
+            super::encrypt_part_block(&input, &output, &key, 1, Some(0)).is_err(),
+            "encrypt_part_block must refuse a zero chunk size"
+        );
+    }
+
+    #[test]
+    fn absent_chunk_size_still_uses_the_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("out.enc");
+        let plaintext = vec![9u8; 4096];
+        let outcome = super::encrypt_reader_chunked(
+            &mut plaintext.as_slice(),
+            &output,
+            &[3u8; 32],
+            &[5u8; 12],
+            None,
+        );
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(err) => panic!("default chunk size must encrypt: {}", err),
+        };
+        assert_eq!(outcome.plaintext_size, 4096);
+        assert_eq!(outcome.chunk_count, 1);
+    }
 }
 
 #[cfg(test)]

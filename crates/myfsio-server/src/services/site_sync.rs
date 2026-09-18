@@ -86,6 +86,7 @@ impl SiteSyncWorker {
         read_timeout: Duration,
         max_retries: u32,
         clock_skew_tolerance: f64,
+        encryption: Option<Arc<myfsio_crypto::encryption::EncryptionService>>,
     ) -> Self {
         let client_options = ClientOptions {
             connect_timeout,
@@ -101,6 +102,7 @@ impl SiteSyncWorker {
                 read_timeout,
                 max_attempts: max_retries,
             },
+            encryption,
         ));
         let bucket_stats = Mutex::new(load_stats(&storage_root));
         Self {
@@ -134,9 +136,9 @@ impl SiteSyncWorker {
         self.bucket_stats.lock().clone()
     }
 
-    fn save_stats(&self) {
+    fn save_stats(&self) -> std::io::Result<()> {
         let snapshot = self.bucket_stats.lock().clone();
-        save_stats(&self.storage_root, &snapshot);
+        save_stats(&self.storage_root, &snapshot)
     }
 
     fn record_failure(&self, bucket: &str, error: &str) {
@@ -181,7 +183,13 @@ impl SiteSyncWorker {
             }
         }
         if mutated {
-            self.save_stats();
+            if let Err(err) = self.save_stats() {
+                tracing::error!(
+                    path = %stats_path(&self.storage_root).display(),
+                    error = %err,
+                    "Failed to persist site sync stats; the dashboard counters will fall back to the last durable snapshot after a restart"
+                );
+            }
         }
     }
 
@@ -340,7 +348,8 @@ impl SiteSyncWorker {
         }
 
         sync_state.last_full_sync = Some(now_secs());
-        self.save_sync_state(&rule.bucket_name, &sync_state);
+        self.save_sync_state(&rule.bucket_name, &sync_state)
+            .map_err(|e| format!("save sync cursor failed: {}", e))?;
 
         self.replication
             .update_last_pull(&rule.bucket_name, now_secs());
@@ -490,23 +499,21 @@ impl SiteSyncWorker {
 
     fn load_sync_state(&self, bucket: &str) -> SyncState {
         let path = self.sync_state_path(bucket);
-        if !path.exists() {
-            return SyncState::default();
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-            Err(_) => SyncState::default(),
+        match read_sync_state(&path) {
+            Ok(state) => state,
+            Err(err) => {
+                preserve_unreadable_state(
+                    &path,
+                    &err.to_string(),
+                    "Site sync cursor is unreadable; preserved it and continued from an empty cursor, so this bucket will be fully re-scanned and conflicts re-resolved",
+                );
+                SyncState::default()
+            }
         }
     }
 
-    fn save_sync_state(&self, bucket: &str, state: &SyncState) {
-        let path = self.sync_state_path(bucket);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(state) {
-            let _ = std::fs::write(&path, text);
-        }
+    fn save_sync_state(&self, bucket: &str, state: &SyncState) -> std::io::Result<()> {
+        write_json_file(&self.sync_state_path(bucket), state)
     }
 }
 
@@ -547,25 +554,72 @@ fn stats_path(storage_root: &std::path::Path) -> PathBuf {
         .join("site_sync_stats.json")
 }
 
-fn load_stats(storage_root: &std::path::Path) -> HashMap<String, SiteSyncStats> {
-    let path = stats_path(storage_root);
-    if !path.exists() {
-        return HashMap::new();
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => HashMap::new(),
+fn read_sync_state(path: &std::path::Path) -> std::io::Result<SyncState> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(std::io::Error::other),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(SyncState::default()),
+        Err(err) => Err(err),
     }
 }
 
-fn save_stats(storage_root: &std::path::Path, stats: &HashMap<String, SiteSyncStats>) {
+fn read_stats(path: &std::path::Path) -> std::io::Result<HashMap<String, SiteSyncStats>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(std::io::Error::other),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(err) => Err(err),
+    }
+}
+
+fn write_json_file<T: Serialize>(path: &std::path::Path, value: &T) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    myfsio_common::fs_util::atomic_write_file(path, &bytes)
+}
+
+fn preserve_unreadable_state(path: &std::path::Path, reason: &str, outcome: &str) {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("site_sync_state.json");
+    let preserved = path.with_file_name(format!("{}.corrupt-{}", name, now_secs() as i64));
+    match std::fs::rename(path, &preserved) {
+        Ok(()) => tracing::error!(
+            path = %path.display(),
+            preserved_path = %preserved.display(),
+            reason,
+            "{}",
+            outcome
+        ),
+        Err(rename_error) => tracing::error!(
+            path = %path.display(),
+            reason,
+            rename_error = %rename_error,
+            "{} (the damaged file could not be preserved)",
+            outcome
+        ),
+    }
+}
+
+fn load_stats(storage_root: &std::path::Path) -> HashMap<String, SiteSyncStats> {
     let path = stats_path(storage_root);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    match read_stats(&path) {
+        Ok(stats) => stats,
+        Err(err) => {
+            preserve_unreadable_state(
+                &path,
+                &err.to_string(),
+                "Site sync stats are unreadable; preserved them and continued with empty counters",
+            );
+            HashMap::new()
+        }
     }
-    if let Ok(text) = serde_json::to_string_pretty(stats) {
-        let _ = std::fs::write(&path, text);
-    }
+}
+
+fn save_stats(
+    storage_root: &std::path::Path,
+    stats: &HashMap<String, SiteSyncStats>,
+) -> std::io::Result<()> {
+    write_json_file(&stats_path(storage_root), stats)
 }
 
 fn record_cycle_failure(
@@ -735,5 +789,114 @@ mod tests {
         assert_eq!(stats.deletions_applied, 2);
         assert!(stats.last_error.is_none());
         assert!(stats.last_error_at.is_none());
+    }
+
+    fn file_names(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn absent_sync_files_load_empty_without_failing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        assert!(load_stats(tmp.path()).is_empty());
+        let state =
+            read_sync_state(&tmp.path().join("site_sync_state.json")).expect("absent state");
+        assert!(state.synced_objects.is_empty());
+        assert!(state.last_full_sync.is_none());
+        assert!(!tmp.path().join(".myfsio.sys").exists());
+    }
+
+    #[test]
+    fn damaged_sync_stats_are_preserved_instead_of_silently_emptied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = stats_path(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create config dir");
+        std::fs::write(&path, "{not json").expect("write stats");
+
+        assert!(read_stats(&path).is_err());
+        assert!(load_stats(tmp.path()).is_empty());
+        assert!(!path.exists());
+        assert!(file_names(path.parent().unwrap())
+            .iter()
+            .any(|name| name.starts_with("site_sync_stats.json.corrupt-")));
+    }
+
+    #[test]
+    fn damaged_sync_cursor_is_preserved_instead_of_silently_emptied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join(".myfsio.sys")
+            .join("buckets")
+            .join("photos")
+            .join("site_sync_state.json");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create bucket dir");
+        std::fs::write(&path, "{not json").expect("write state");
+
+        let err = read_sync_state(&path).expect_err("damaged cursor must not load empty");
+        preserve_unreadable_state(&path, &err.to_string(), "test outcome");
+
+        assert!(!path.exists());
+        assert!(file_names(path.parent().unwrap())
+            .iter()
+            .any(|name| name.starts_with("site_sync_state.json.corrupt-")));
+    }
+
+    #[test]
+    fn sync_cursor_and_stats_round_trip_and_leave_no_temp_residue() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_path = tmp
+            .path()
+            .join(".myfsio.sys")
+            .join("buckets")
+            .join("photos")
+            .join("site_sync_state.json");
+        let state = SyncState {
+            synced_objects: HashMap::from([(
+                "a/b.txt".to_string(),
+                SyncedObjectInfo {
+                    last_synced_at: 10.0,
+                    remote_etag: "remote".to_string(),
+                    local_etag: "local".to_string(),
+                    source: "peer".to_string(),
+                },
+            )]),
+            last_full_sync: Some(1234.5),
+        };
+        write_json_file(&state_path, &state).expect("write state");
+
+        let mut stats: HashMap<String, SiteSyncStats> = HashMap::new();
+        stats.insert(
+            "photos".to_string(),
+            SiteSyncStats {
+                objects_pulled: 7,
+                ..SiteSyncStats::default()
+            },
+        );
+        save_stats(tmp.path(), &stats).expect("write stats");
+
+        let reloaded_state = read_sync_state(&state_path).expect("reload state");
+        assert_eq!(reloaded_state.last_full_sync, Some(1234.5));
+        assert_eq!(
+            reloaded_state
+                .synced_objects
+                .get("a/b.txt")
+                .expect("object")
+                .remote_etag,
+            "remote"
+        );
+        assert_eq!(load_stats(tmp.path())["photos"].objects_pulled, 7);
+
+        for dir in [
+            state_path.parent().unwrap(),
+            stats_path(tmp.path()).parent().unwrap(),
+        ] {
+            assert!(!file_names(dir).iter().any(|name| name.contains(".tmp-")));
+        }
     }
 }

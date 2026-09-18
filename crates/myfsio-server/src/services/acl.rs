@@ -49,6 +49,101 @@ impl Acl {
     }
 }
 
+pub const ACL_GRANT_HEADERS: &[&str] = &[
+    "x-amz-grant-full-control",
+    "x-amz-grant-read",
+    "x-amz-grant-write",
+    "x-amz-grant-read-acp",
+    "x-amz-grant-write-acp",
+];
+
+const GRANTEE_URI_ALL_USERS: &str = "http://acs.amazonaws.com/groups/global/AllUsers";
+const GRANTEE_URI_AUTHENTICATED_USERS: &str =
+    "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
+
+pub fn grants_from_header(header: &str, value: &str) -> Result<Vec<AclGrant>, String> {
+    let Some(permission) = permission_for_grant_header(header) else {
+        return Err(format!("Unsupported grant header: {}", header));
+    };
+    let mut grants: Vec<AclGrant> = Vec::new();
+    for (kind, identity) in parse_grantee_entries(header, value)? {
+        let grant = AclGrant {
+            grantee: grantee_from_entry(header, &kind, &identity)?,
+            permission: permission.to_string(),
+        };
+        if !grants.contains(&grant) {
+            grants.push(grant);
+        }
+    }
+    Ok(grants)
+}
+
+fn permission_for_grant_header(header: &str) -> Option<&'static str> {
+    match header.to_ascii_lowercase().as_str() {
+        "x-amz-grant-full-control" => Some(ACL_PERMISSION_FULL_CONTROL),
+        "x-amz-grant-read" => Some(ACL_PERMISSION_READ),
+        "x-amz-grant-write" => Some(ACL_PERMISSION_WRITE),
+        "x-amz-grant-read-acp" => Some(ACL_PERMISSION_READ_ACP),
+        "x-amz-grant-write-acp" => Some(ACL_PERMISSION_WRITE_ACP),
+        _ => None,
+    }
+}
+
+fn parse_grantee_entries(header: &str, value: &str) -> Result<Vec<(String, String)>, String> {
+    let malformed = || format!("Invalid grantee list in {}", header);
+    let mut entries = Vec::new();
+    let mut rest = value;
+    loop {
+        rest = rest.trim_start();
+        let Some(separator) = rest.find('=') else {
+            return Err(malformed());
+        };
+        let kind = rest[..separator].trim();
+        if kind.is_empty() || kind.contains(char::is_whitespace) {
+            return Err(malformed());
+        }
+        let Some(quoted) = rest[separator + 1..].trim_start().strip_prefix('"') else {
+            return Err(malformed());
+        };
+        let Some(end) = quoted.find('"') else {
+            return Err(malformed());
+        };
+        entries.push((kind.to_string(), quoted[..end].to_string()));
+        rest = quoted[end + 1..].trim_start();
+        if rest.is_empty() {
+            return Ok(entries);
+        }
+        let Some(next) = rest.strip_prefix(',') else {
+            return Err(malformed());
+        };
+        rest = next;
+    }
+}
+
+fn grantee_from_entry(header: &str, kind: &str, identity: &str) -> Result<String, String> {
+    let identity = identity.trim();
+    if kind.eq_ignore_ascii_case("id") {
+        if identity.is_empty() {
+            return Err(format!("Empty canonical user id in {}", header));
+        }
+        return Ok(identity.to_string());
+    }
+    if kind.eq_ignore_ascii_case("uri") {
+        return match identity {
+            GRANTEE_URI_ALL_USERS => Ok(GRANTEE_ALL_USERS.to_string()),
+            GRANTEE_URI_AUTHENTICATED_USERS => Ok(GRANTEE_AUTHENTICATED_USERS.to_string()),
+            other => Err(format!("Unsupported grantee group URI: {}", other)),
+        };
+    }
+    if kind.eq_ignore_ascii_case("emailAddress") {
+        return Err(format!(
+            "Email address grantees are not supported in {}",
+            header
+        ));
+    }
+    Err(format!("Unsupported grantee type: {}", kind))
+}
+
 pub fn create_canned_acl(canned_acl: &str, owner: &str) -> Acl {
     let owner_grant = AclGrant {
         grantee: owner.to_string(),
@@ -459,6 +554,136 @@ mod tests {
         assert!(actions.contains("read"));
         assert!(actions.contains("list"));
         assert!(!actions.contains("write"));
+    }
+
+    #[test]
+    fn grant_headers_map_to_their_permissions() {
+        let expected = [
+            ("x-amz-grant-full-control", ACL_PERMISSION_FULL_CONTROL),
+            ("x-amz-grant-read", ACL_PERMISSION_READ),
+            ("x-amz-grant-write", ACL_PERMISSION_WRITE),
+            ("x-amz-grant-read-acp", ACL_PERMISSION_READ_ACP),
+            ("x-amz-grant-write-acp", ACL_PERMISSION_WRITE_ACP),
+        ];
+        for (header, permission) in expected {
+            let grants = grants_from_header(header, "id=\"alice\"")
+                .unwrap_or_else(|err| panic!("{} should parse: {}", header, err));
+            assert_eq!(
+                grants,
+                vec![AclGrant {
+                    grantee: "alice".to_string(),
+                    permission: permission.to_string(),
+                }]
+            );
+        }
+        assert_eq!(ACL_GRANT_HEADERS.len(), expected.len());
+    }
+
+    #[test]
+    fn grant_header_parses_multiple_grantees() {
+        let grants =
+            grants_from_header("x-amz-grant-read", "id=\"alice\", id=\"bob\" ,id=\"carol\"")
+                .expect("multiple grantees must parse");
+        let grantees: Vec<&str> = grants.iter().map(|g| g.grantee.as_str()).collect();
+        assert_eq!(grantees, vec!["alice", "bob", "carol"]);
+        assert!(grants
+            .iter()
+            .all(|grant| grant.permission == ACL_PERMISSION_READ));
+    }
+
+    #[test]
+    fn grant_header_parses_group_uris() {
+        let grants = grants_from_header(
+            "x-amz-grant-write",
+            "uri=\"http://acs.amazonaws.com/groups/global/AllUsers\", \
+             uri=\"http://acs.amazonaws.com/groups/global/AuthenticatedUsers\"",
+        )
+        .expect("group URIs must parse");
+        let grantees: Vec<&str> = grants.iter().map(|g| g.grantee.as_str()).collect();
+        assert_eq!(
+            grantees,
+            vec![GRANTEE_ALL_USERS, GRANTEE_AUTHENTICATED_USERS]
+        );
+    }
+
+    #[test]
+    fn grant_header_deduplicates_repeated_grantees() {
+        let grants = grants_from_header("x-amz-grant-read", "id=\"alice\", id=\"alice\"")
+            .expect("repeated grantees must parse");
+        assert_eq!(grants.len(), 1);
+    }
+
+    #[test]
+    fn grant_header_is_case_insensitive_for_grantee_type() {
+        let grants = grants_from_header("X-Amz-Grant-Read", "ID=\"alice\"")
+            .expect("grantee type casing must not matter");
+        assert_eq!(grants[0].grantee, "alice");
+    }
+
+    #[test]
+    fn grant_header_rejects_email_address_grantee() {
+        let err = grants_from_header("x-amz-grant-read", "emailAddress=\"user@example.com\"")
+            .expect_err("email grantees are unsupported");
+        assert!(err.contains("Email address"), "unexpected message: {}", err);
+    }
+
+    #[test]
+    fn grant_header_rejects_unknown_grantee_type() {
+        let err = grants_from_header("x-amz-grant-read", "canonicalUser=\"alice\"")
+            .expect_err("unknown grantee types are rejected");
+        assert!(
+            err.contains("Unsupported grantee type"),
+            "unexpected message: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn grant_header_rejects_unknown_group_uri() {
+        for uri in [
+            "http://acs.amazonaws.com/groups/s3/LogDelivery",
+            "AllUsers",
+            "",
+        ] {
+            let err = grants_from_header("x-amz-grant-read", &format!("uri=\"{}\"", uri))
+                .expect_err("unsupported group URIs are rejected");
+            assert!(
+                err.contains("Unsupported grantee group URI"),
+                "unexpected message: {}",
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn grant_header_rejects_malformed_syntax() {
+        for value in [
+            "",
+            "   ",
+            "alice",
+            "id=alice",
+            "id=\"alice",
+            "id=\"alice\" id=\"bob\"",
+            "id=\"alice\",",
+            "=\"alice\"",
+            "id x=\"alice\"",
+        ] {
+            assert!(
+                grants_from_header("x-amz-grant-read", value).is_err(),
+                "value {:?} should be rejected",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn grant_header_rejects_empty_canonical_user_id() {
+        assert!(grants_from_header("x-amz-grant-read", "id=\"  \"").is_err());
+    }
+
+    #[test]
+    fn grant_header_rejects_unknown_header_name() {
+        assert!(grants_from_header("x-amz-grant-nothing", "id=\"alice\"").is_err());
     }
 
     #[test]

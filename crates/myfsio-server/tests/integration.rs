@@ -13,6 +13,13 @@ const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
 fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::TempDir) {
+    test_app_with_iam_and(iam_json, |_| {})
+}
+
+fn test_app_with_iam_and(
+    iam_json: serde_json::Value,
+    adjust: impl FnOnce(&mut myfsio_server::config::ServerConfig),
+) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::TempDir::new().unwrap();
     let iam_path = tmp.path().join(".myfsio.sys").join("config");
     std::fs::create_dir_all(&iam_path).unwrap();
@@ -64,6 +71,8 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
+    let mut config = config;
+    adjust(&mut config);
     let state = myfsio_server::state::AppState::new(config);
     let app = myfsio_server::create_router(state);
     (app, tmp)
@@ -583,6 +592,92 @@ fn streaming_sigv4_request(
     builder.body(Body::from(encoded)).unwrap()
 }
 
+fn presigned_object_get_uri(bucket: &str, key: &str, extra: &[(&str, &str)]) -> String {
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let credential = format!(
+        "{}/{}/us-east-1/s3/aws4_request",
+        TEST_ACCESS_KEY, date_stamp
+    );
+
+    let mut params: Vec<(String, String)> = vec![
+        (
+            "X-Amz-Algorithm".to_string(),
+            "AWS4-HMAC-SHA256".to_string(),
+        ),
+        ("X-Amz-Credential".to_string(), credential),
+        ("X-Amz-Date".to_string(), timestamp.clone()),
+        ("X-Amz-Expires".to_string(), "3600".to_string()),
+        ("X-Amz-SignedHeaders".to_string(), "host".to_string()),
+        (
+            "X-Amz-Security-Token".to_string(),
+            "dummy-session-token".to_string(),
+        ),
+        (
+            "X-Amz-Content-Sha256".to_string(),
+            "UNSIGNED-PAYLOAD".to_string(),
+        ),
+    ];
+    for (k, v) in extra {
+        params.push((k.to_string(), v.to_string()));
+    }
+
+    let canonical_uri = format!("/{}/{}", bucket, key);
+    let mut sorted_params = params.clone();
+    sorted_params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let canonical_query_string = sorted_params
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                myfsio_auth::sigv4::aws_uri_encode(k),
+                myfsio_auth::sigv4::aws_uri_encode(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let canonical_headers = "host:localhost\n";
+    let signed_headers_str = "host";
+    let payload_hash = "UNSIGNED-PAYLOAD";
+    let canonical_request = format!(
+        "GET\n{}\n{}\n{}\n{}\n{}",
+        canonical_uri, canonical_query_string, canonical_headers, signed_headers_str, payload_hash
+    );
+    let scope = format!("{}/us-east-1/s3/aws4_request", date_stamp);
+    let string_to_sign =
+        myfsio_auth::sigv4::build_string_to_sign(&timestamp, &scope, &canonical_request);
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(TEST_SECRET_KEY, &date_stamp, "us-east-1", "s3");
+    let signature = myfsio_auth::sigv4::compute_signature(&signing_key, &string_to_sign);
+
+    params.push(("X-Amz-Signature".to_string(), signature));
+
+    let query_string = params
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                myfsio_auth::sigv4::aws_uri_encode(k),
+                myfsio_auth::sigv4::aws_uri_encode(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    format!("/{}/{}?{}", bucket, key, query_string)
+}
+
+fn presigned_object_get_request(bucket: &str, key: &str, extra: &[(&str, &str)]) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(presigned_object_get_uri(bucket, key, extra))
+        .header("host", "localhost")
+        .body(Body::empty())
+        .unwrap()
+}
+
 const WEBSITE_INDEX_BODY: &str = "<!doctype html><h1>Home</h1>";
 
 fn website_server_config(
@@ -904,6 +999,7 @@ async fn test_ui_replication_endpoints_are_wired_and_operational() {
             pending_source_size: None,
             pending_source_etag: None,
             pending_part_size: None,
+            permanent: false,
         },
     );
     state.replication.failures.add(
@@ -920,6 +1016,7 @@ async fn test_ui_replication_endpoints_are_wired_and_operational() {
             pending_source_size: None,
             pending_source_etag: None,
             pending_part_size: None,
+            permanent: false,
         },
     );
 
@@ -1550,6 +1647,68 @@ async fn test_ui_pdf_preview_rejects_mismatched_magic() {
     let body = response_json(response).await;
     assert_eq!(body["preview_unavailable"], true);
     assert_eq!(body["error"], "Preview unavailable — Download to view");
+}
+
+#[tokio::test]
+async fn test_ui_bucket_detail_hides_buckets_the_user_cannot_list() {
+    let (state, _tmp) = test_ui_state();
+    state.storage.create_bucket("visible-bucket").await.unwrap();
+    state.storage.create_bucket("secret-bucket").await.unwrap();
+
+    let created = state
+        .iam
+        .create_user(
+            "scoped",
+            Some(vec![myfsio_auth::iam::IamPolicy::allow(
+                "visible-bucket",
+                &["list", "read"],
+            )]),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let scoped_key = created["access_key"].as_str().unwrap().to_string();
+
+    let (session_id, mut session) = state.sessions.create();
+    session.user_id = Some(scoped_key);
+    session.display_name = Some("scoped".to_string());
+    let csrf = session.csrf_token.clone();
+    state.sessions.save(&session_id, session);
+
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/buckets/secret-bucket",
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "a bucket the user cannot list must not render its detail page"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/ui/buckets")
+    );
+
+    let resp = app
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/buckets/visible-bucket",
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -2565,6 +2724,409 @@ async fn test_delete_bucket_unknown_subresource_returns_not_implemented() {
 }
 
 #[tokio::test]
+async fn test_put_object_unknown_subresource_returns_not_implemented_and_does_not_overwrite() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/obj-subresource-guard/k",
+            Body::from("original"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/obj-subresource-guard/k?restore",
+            Body::from("overwritten"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/obj-subresource-guard/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert_eq!(body, "original");
+}
+
+#[tokio::test]
+async fn test_get_object_unknown_subresource_returns_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/get-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/get-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/get-obj-subresource-guard/k?torrent",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+}
+
+#[tokio::test]
+async fn test_head_object_unknown_subresource_returns_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/head-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/head-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/head-obj-subresource-guard/k?restore",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn test_delete_object_unknown_subresource_returns_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/delete-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/delete-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/delete-obj-subresource-guard/k?restore",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/delete-obj-subresource-guard/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_post_object_unknown_subresource_returns_not_implemented_with_xml_body() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-subresource-guard/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::POST,
+            "/post-obj-subresource-guard/k?restore",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.starts_with("<?xml"));
+    assert!(body.contains("<Code>NotImplemented</Code>"));
+    assert!(body.contains("</Error>"));
+}
+
+#[tokio::test]
+async fn test_post_object_with_no_recognized_action_returns_s3_error_not_bare_405() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-bare-405",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/post-obj-bare-405/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::POST,
+            "/post-obj-bare-405/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.starts_with("<?xml"));
+    assert!(body.contains("<Code>MethodNotAllowed</Code>"));
+    assert!(body.contains("</Error>"));
+}
+
+#[tokio::test]
+async fn test_get_object_response_content_type_override_still_works() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/response-override-bucket",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/response-override-bucket/k",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/response-override-bucket/k?response-content-type=text%2Fplain",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/plain"
+    );
+}
+
+#[tokio::test]
+async fn test_list_parts_max_parts_and_part_number_marker_still_work() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/list-parts-paging",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/list-parts-paging/big.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    for part_number in 1..=2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!(
+                        "/list-parts-paging/big.bin?uploadId={}&partNumber={}",
+                        upload_id, part_number
+                    ))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from(vec![b'A'; 16]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            &format!(
+                "/list-parts-paging/big.bin?uploadId={}&max-parts=1&part-number-marker=0",
+                upload_id
+            ),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("ListPartsResult"));
+    assert!(body.contains("<PartNumber>1</PartNumber>"));
+    assert!(!body.contains("<PartNumber>2</PartNumber>"));
+    assert!(body.contains("<IsTruncated>true</IsTruncated>"));
+}
+
+#[tokio::test]
+async fn test_presigned_object_get_with_full_amz_param_set_still_works() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/presign-object-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/presign-object-guard/k.txt",
+            Body::from("presigned content"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(presigned_object_get_request(
+            "presign-object-guard",
+            "k.txt",
+            &[],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert_eq!(body, "presigned content");
+
+    let resp = app
+        .oneshot(presigned_object_get_request(
+            "presign-object-guard",
+            "k.txt",
+            &[("response-content-type", "text/plain")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/plain"
+    );
+}
+
+#[tokio::test]
 async fn test_get_nonexistent_object_returns_404() {
     let (app, _tmp) = test_app();
 
@@ -2990,6 +3552,229 @@ async fn test_copy_object() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"copy me");
+}
+
+#[tokio::test]
+async fn test_object_attributes_honors_version_id() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/attr-ver", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/attr-ver?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let first = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/attr-ver/obj.txt",
+            Body::from("first"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_version = first
+        .headers()
+        .get("x-amz-version-id")
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .expect("versioned put returns a version id");
+
+    let second = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/attr-ver/obj.txt",
+            Body::from("second-and-longer"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/attr-ver/obj.txt?attributes&versionId={}",
+                    first_version
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-object-attributes", "ObjectSize")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-version-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(first_version.as_str())
+    );
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<ObjectSize>5</ObjectSize>"), "{body}");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/attr-ver/obj.txt?attributes")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-object-attributes", "ObjectSize")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<ObjectSize>17</ObjectSize>"), "{body}");
+}
+
+#[tokio::test]
+async fn test_object_attributes_reports_plaintext_size_for_encrypted_objects() {
+    let (app, _tmp) = test_app_sse_c().await;
+    let app = app.into_service();
+    let plaintext = vec![b'z'; 4096];
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/attr-enc", Body::empty()),
+    )
+    .await
+    .unwrap();
+
+    let put = tower::ServiceExt::oneshot(
+        app.clone(),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/attr-enc/secret.bin")
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .header("x-amz-server-side-encryption", "AES256")
+            .body(Body::from(plaintext.clone()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let resp = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/attr-enc/secret.bin?attributes")
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .header("x-amz-object-attributes", "ObjectSize")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains(&format!("<ObjectSize>{}</ObjectSize>", plaintext.len())),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn test_complete_multipart_rejects_descending_part_order() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/mp-order", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/mp-order/ordered.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    let upload_id = extract_upload_id(&body);
+
+    let mut etags = Vec::new();
+    for (part_number, byte) in [(1u32, b'A'), (2u32, b'B')] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!(
+                        "/mp-order/ordered.bin?uploadId={}&partNumber={}",
+                        upload_id, part_number
+                    ))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from(vec![byte; 1024]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        etags.push(
+            resp.headers()
+                .get("etag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim_matches('"')
+                .to_string(),
+        );
+    }
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>2</PartNumber><ETag>\"{}\"</ETag></Part><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+        etags[1], etags[0]
+    );
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            &format!("/mp-order/ordered.bin?uploadId={}", upload_id),
+            Body::from(complete_xml),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>InvalidPartOrder</Code>"), "{body}");
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/mp-order/ordered.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -5426,6 +6211,298 @@ async fn test_object_acl() {
     assert!(body.contains("FULL_CONTROL"));
 }
 
+const ALL_USERS_URI: &str = "http://acs.amazonaws.com/groups/global/AllUsers";
+
+async fn acl_body(app: &axum::routing::RouterIntoService<Body>, uri: &str) -> String {
+    let resp =
+        tower::ServiceExt::oneshot(app.clone(), signed_request(Method::GET, uri, Body::empty()))
+            .await
+            .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "GET {} must succeed", uri);
+    String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+fn canned_acl_request(uri: &str, canned: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .header("x-amz-acl", canned)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_object_acl_is_version_scoped() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-ver-bucket", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/acl-ver-bucket?versioning")
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .body(Body::from(
+                "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    for payload in ["first", "second"] {
+        let resp = tower::ServiceExt::oneshot(
+            app.clone(),
+            signed_request(Method::PUT, "/acl-ver-bucket/doc.txt", Body::from(payload)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let list_body = acl_body(&app, "/acl-ver-bucket?versions").await;
+    let archived_version_id = list_body
+        .split("<Version>")
+        .skip(1)
+        .find(|block| block.contains("<IsLatest>false</IsLatest>"))
+        .and_then(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id))
+        })
+        .filter(|id| *id != "null")
+        .expect("archived version id")
+        .to_string();
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request(
+            &format!(
+                "/acl-ver-bucket/doc.txt?acl&versionId={}",
+                archived_version_id
+            ),
+            "public-read",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let archived_acl = acl_body(
+        &app,
+        &format!(
+            "/acl-ver-bucket/doc.txt?acl&versionId={}",
+            archived_version_id
+        ),
+    )
+    .await;
+    assert!(
+        archived_acl.contains(ALL_USERS_URI),
+        "the archived version must carry the ACL written against its versionId"
+    );
+
+    let current_acl = acl_body(&app, "/acl-ver-bucket/doc.txt?acl").await;
+    assert!(
+        !current_acl.contains(ALL_USERS_URI),
+        "a version-scoped ACL write must not touch the current version"
+    );
+
+    let put_current = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request("/acl-ver-bucket/doc.txt?acl", "authenticated-read"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_current.status(), StatusCode::OK);
+
+    let archived_acl_again = acl_body(
+        &app,
+        &format!(
+            "/acl-ver-bucket/doc.txt?acl&versionId={}",
+            archived_version_id
+        ),
+    )
+    .await;
+    assert!(
+        archived_acl_again.contains(ALL_USERS_URI),
+        "an unversioned ACL write must not overwrite an archived version's ACL"
+    );
+}
+
+#[tokio::test]
+async fn test_object_acl_empty_version_id_is_unversioned() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-empty-ver", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-empty-ver/doc.txt", Body::from("data")),
+    )
+    .await
+    .unwrap();
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request("/acl-empty-ver/doc.txt?acl&versionId=", "public-read"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        put_resp.status(),
+        StatusCode::OK,
+        "an empty versionId must behave as an unversioned write"
+    );
+
+    let via_empty = acl_body(&app, "/acl-empty-ver/doc.txt?acl&versionId=").await;
+    let via_plain = acl_body(&app, "/acl-empty-ver/doc.txt?acl").await;
+    assert_eq!(
+        via_empty, via_plain,
+        "an empty versionId must read the current version"
+    );
+    assert!(via_plain.contains(ALL_USERS_URI));
+}
+
+#[tokio::test]
+async fn test_object_acl_unknown_version_id_not_found() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-missing-ver", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-missing-ver/doc.txt", Body::from("data")),
+    )
+    .await
+    .unwrap();
+
+    let get_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(
+            Method::GET,
+            "/acl-missing-ver/doc.txt?acl&versionId=no-such-version",
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request(
+            "/acl-missing-ver/doc.txt?acl&versionId=no-such-version",
+            "public-read",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_object_acl_current_version_id_matches_unversioned() {
+    let (app, _tmp) = test_app();
+    let app = app.into_service();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-cur-ver", Body::empty()),
+    )
+    .await
+    .unwrap();
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/acl-cur-ver?versioning")
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .body(Body::from(
+                "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let put_obj = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, "/acl-cur-ver/doc.txt", Body::from("only")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_obj.status(), StatusCode::OK);
+    let current_version_id = put_obj.headers()["x-amz-version-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let put_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        canned_acl_request(
+            &format!("/acl-cur-ver/doc.txt?acl&versionId={}", current_version_id),
+            "public-read",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let via_version = acl_body(
+        &app,
+        &format!("/acl-cur-ver/doc.txt?acl&versionId={}", current_version_id),
+    )
+    .await;
+    let via_plain = acl_body(&app, "/acl-cur-ver/doc.txt?acl").await;
+    assert_eq!(
+        via_version, via_plain,
+        "the current version's versionId must address the same ACL as the unversioned path"
+    );
+    assert!(via_plain.contains(ALL_USERS_URI));
+
+    let head_resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::HEAD, "/acl-cur-ver/doc.txt", Body::empty()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        head_resp.status(),
+        StatusCode::OK,
+        "a version-scoped ACL write on the live version must not disturb the object"
+    );
+    assert_eq!(head_resp.headers()["content-length"].to_str().unwrap(), "4");
+}
+
 #[tokio::test]
 async fn test_object_legal_hold() {
     let (app, _tmp) = test_app();
@@ -6203,15 +7280,15 @@ async fn test_bucket_root_with_trailing_slash_works() {
 }
 
 #[tokio::test]
-async fn test_bucket_replication_roundtrip() {
-    let (app, _tmp) = test_app();
+async fn test_bucket_replication_reports_the_rule_actually_in_effect() {
+    let (app, state, _tmp) = test_app_and_state();
 
     app.clone()
         .oneshot(signed_request(Method::PUT, "/repl-bucket", Body::empty()))
         .await
         .unwrap();
 
-    let repl_xml = "<ReplicationConfiguration><Role>arn:aws:iam::123456789012:role/s3-repl</Role><Rule><ID>rule-1</ID></Rule></ReplicationConfiguration>";
+    let repl_xml = "<ReplicationConfiguration><Role>arn:aws:iam::123456789012:role/s3-repl</Role><Rule><ID>rule-1</ID><Status>Enabled</Status><Destination><Bucket>arn:aws:s3:::mirror</Bucket></Destination></Rule></ReplicationConfiguration>";
 
     let resp = app
         .clone()
@@ -6227,7 +7304,46 @@ async fn test_bucket_replication_roundtrip() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "PutBucketReplication must refuse rather than store XML that enables nothing"
+    );
+    assert!(
+        state.replication.get_rule("repl-bucket").is_none(),
+        "a refused PUT must not create a replication rule"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/repl-bucket?replication",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "GetBucketReplication must report no configuration when nothing is replicating"
+    );
+
+    state
+        .replication
+        .set_rule(myfsio_server::services::replication::ReplicationRule {
+            bucket_name: "repl-bucket".to_string(),
+            target_connection_id: "conn-1".to_string(),
+            target_bucket: "mirror".to_string(),
+            enabled: true,
+            mode: myfsio_server::services::replication::MODE_NEW_ONLY.to_string(),
+            created_at: None,
+            stats: Default::default(),
+            sync_deletions: true,
+            last_pull_at: None,
+            filter_prefix: Some("logs/".to_string()),
+        })
+        .expect("rule persists");
 
     let resp = app
         .clone()
@@ -6248,9 +7364,17 @@ async fn test_bucket_replication_roundtrip() {
             .to_vec(),
     )
     .unwrap();
-    assert!(body.contains("ReplicationConfiguration"));
+    assert!(body.contains("<ReplicationConfiguration"));
+    assert!(
+        body.contains("arn:aws:s3:::mirror"),
+        "the reported destination must be the live rule's target, got {}",
+        body
+    );
+    assert!(body.contains("<Status>Enabled</Status>"));
+    assert!(body.contains("<Prefix>logs/</Prefix>"));
 
     let resp = app
+        .clone()
         .oneshot(signed_request(
             Method::DELETE,
             "/repl-bucket?replication",
@@ -6259,6 +7383,20 @@ async fn test_bucket_replication_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        state.replication.get_rule("repl-bucket").is_none(),
+        "DeleteBucketReplication must stop the replication that was actually running"
+    );
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/repl-bucket?replication",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -11790,6 +12928,143 @@ fn etag_from_response(resp: &axum::response::Response) -> String {
         .to_string()
 }
 
+fn copy_source_sse_c_request(
+    method: Method,
+    uri: &str,
+    copy_source: &str,
+    key: Option<&[u8; 32]>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .header("x-amz-copy-source", copy_source);
+    if let Some(k) = key {
+        let (key_b64, md5_b64) = sse_c_triplet(k);
+        builder = builder
+            .header(
+                "x-amz-copy-source-server-side-encryption-customer-algorithm",
+                "AES256",
+            )
+            .header(
+                "x-amz-copy-source-server-side-encryption-customer-key",
+                key_b64,
+            )
+            .header(
+                "x-amz-copy-source-server-side-encryption-customer-key-MD5",
+                md5_b64,
+            );
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn test_copy_from_sse_c_source_requires_the_matching_customer_key() {
+    let (app, _tmp) = test_app_sse_c().await;
+    let app = app.into_service();
+
+    let key = [0x61u8; 32];
+    let wrong_key = [0x62u8; 32];
+    let bucket = "ssec-copy-gate";
+    let object = "secret.bin";
+    let plaintext: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, &format!("/{bucket}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+    let put = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}"),
+            Some(&key),
+            Body::from(plaintext.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let copy_source = format!("/{bucket}/{object}");
+    for (customer_key, expected_status, expected_code) in [
+        (None, StatusCode::BAD_REQUEST, "<Code>InvalidRequest</Code>"),
+        (
+            Some(&wrong_key),
+            StatusCode::FORBIDDEN,
+            "<Code>AccessDenied</Code>",
+        ),
+    ] {
+        let resp = tower::ServiceExt::oneshot(
+            app.clone(),
+            copy_source_sse_c_request(
+                Method::PUT,
+                &format!("/{bucket}/copied.bin"),
+                &copy_source,
+                customer_key,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), expected_status);
+        let body = String::from_utf8(body_bytes(resp).await).unwrap();
+        assert!(body.contains(expected_code), "{body}");
+    }
+
+    let init = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(
+            Method::POST,
+            &format!("/{bucket}/mpu-copied.bin?uploads"),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(init.status(), StatusCode::OK);
+    let upload_id = extract_upload_id(&String::from_utf8(body_bytes(init).await).unwrap());
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        copy_source_sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/mpu-copied.bin?partNumber=1&uploadId={upload_id}"),
+            &copy_source,
+            Some(&wrong_key),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        copy_source_sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/copied.bin"),
+            &copy_source,
+            Some(&key),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let got = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::GET, &format!("/{bucket}/copied.bin"), Body::empty()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(got.status(), StatusCode::OK);
+    assert_eq!(body_bytes(got).await, plaintext);
+}
+
 #[tokio::test]
 async fn test_sse_c_range_get_key_errors_match_whole_object_get() {
     let (app, _tmp) = test_app_sse_c().await;
@@ -14213,5 +15488,1139 @@ async fn test_ui_upload_translates_s3_error_to_json() {
         message.contains("QuotaExceeded"),
         "the S3 error code and message must reach the UI caller, got: {}",
         body
+    );
+}
+
+const COND_ACCESS_KEY: &str = "AKCONDUSER0000000000";
+const COND_SECRET_KEY: &str = "cond-user-secret";
+
+fn policy_test_iam() -> serde_json::Value {
+    serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            {
+                "user_id": "u-cond",
+                "display_name": "cond",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": COND_ACCESS_KEY,
+                    "secret_key": COND_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [
+                    {"bucket": "cond-bucket", "actions": ["list", "read", "write", "delete"]},
+                    {"bucket": "cond-bucket", "actions": ["delete"], "effect": "Deny", "prefix": "keep/"},
+                    {"bucket": "glob-*", "actions": ["list", "read", "write"]},
+                    {
+                        "bucket": "ip-bucket",
+                        "actions": ["read"],
+                        "condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
+                    }
+                ]
+            }
+        ]
+    })
+}
+
+fn cond_request(method: Method, uri: &str, body: Body) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", COND_ACCESS_KEY)
+        .header("x-secret-key", COND_SECRET_KEY)
+        .body(body)
+        .unwrap()
+}
+
+fn anon_request(method: Method, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn anon_request_from(method: Method, uri: &str, forwarded_for: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-forwarded-for", forwarded_for)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn put_policy_doc(
+    app: &axum::Router,
+    bucket: &str,
+    policy: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/{}?policy", bucket))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn seed_object(app: &axum::Router, bucket: &str, key: &str) {
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            &format!("/{}/{}", bucket, key),
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "seed {}/{}", bucket, key);
+}
+
+#[tokio::test]
+async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
+    let (app, _tmp) = test_app_with_iam_and(policy_test_iam(), |cfg| cfg.num_trusted_proxies = 1);
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/ip-bucket", Body::empty()))
+        .await
+        .unwrap();
+    seed_object(&app, "ip-bucket", "public/a.txt").await;
+    seed_object(&app, "ip-bucket", "private/b.txt").await;
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Allow",
+        "Principal": "*",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::ip-bucket/public/*",
+        "Condition": {"IpAddress": {"aws:SourceIp": ["10.0.0.0/8", "192.168.1.0/24"]}}
+      }]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "ip-bucket", policy).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let inside = app
+        .clone()
+        .oneshot(anon_request_from(
+            Method::GET,
+            "/ip-bucket/public/a.txt",
+            "10.20.30.40, 127.0.0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inside.status(), StatusCode::OK);
+
+    let outside = app
+        .clone()
+        .oneshot(anon_request_from(
+            Method::GET,
+            "/ip-bucket/public/a.txt",
+            "203.0.113.7, 127.0.0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+
+    let no_ip = app
+        .clone()
+        .oneshot(anon_request(Method::GET, "/ip-bucket/public/a.txt"))
+        .await
+        .unwrap();
+    assert_eq!(no_ip.status(), StatusCode::FORBIDDEN);
+
+    let private = app
+        .clone()
+        .oneshot(anon_request_from(
+            Method::GET,
+            "/ip-bucket/private/b.txt",
+            "10.20.30.40, 127.0.0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(private.status(), StatusCode::FORBIDDEN);
+
+    let iam_inside = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ip-bucket/private/b.txt")
+                .header("x-access-key", COND_ACCESS_KEY)
+                .header("x-secret-key", COND_SECRET_KEY)
+                .header("x-forwarded-for", "10.1.1.1, 127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(iam_inside.status(), StatusCode::OK);
+
+    let iam_outside = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ip-bucket/private/b.txt")
+                .header("x-access-key", COND_ACCESS_KEY)
+                .header("x-secret-key", COND_SECRET_KEY)
+                .header("x-forwarded-for", "198.51.100.9, 127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(iam_outside.status(), StatusCode::FORBIDDEN);
+
+    let status = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/ip-bucket?policyStatus",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        status
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<IsPublic>FALSE</IsPublic>"), "{}", body);
+}
+
+#[tokio::test]
+async fn test_bucket_policy_prefix_condition_and_secure_transport() {
+    let (app, _tmp) = test_app_with_iam(policy_test_iam());
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/prefix-bucket", Body::empty()))
+        .await
+        .unwrap();
+    seed_object(&app, "prefix-bucket", "public/a.txt").await;
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ListPublicOnly",
+          "Effect": "Allow",
+          "Principal": {"AWS": "*"},
+          "Action": "s3:ListBucket",
+          "Resource": "arn:aws:s3:::prefix-bucket",
+          "Condition": {"StringLike": {"s3:prefix": "public/*"}}
+        },
+        {
+          "Sid": "ReadRequiresTls",
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:GetObject",
+          "Resource": "arn:aws:s3:::prefix-bucket/public/*",
+          "Condition": {"Bool": {"aws:SecureTransport": "true"}}
+        }
+      ]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "prefix-bucket", policy).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let ok = app
+        .clone()
+        .oneshot(anon_request(
+            Method::GET,
+            "/prefix-bucket?list-type=2&prefix=public/",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    let wrong_prefix = app
+        .clone()
+        .oneshot(anon_request(
+            Method::GET,
+            "/prefix-bucket?list-type=2&prefix=private/",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_prefix.status(), StatusCode::FORBIDDEN);
+
+    let no_prefix = app
+        .clone()
+        .oneshot(anon_request(Method::GET, "/prefix-bucket?list-type=2"))
+        .await
+        .unwrap();
+    assert_eq!(no_prefix.status(), StatusCode::FORBIDDEN);
+
+    let plain = app
+        .clone()
+        .oneshot(anon_request(Method::GET, "/prefix-bucket/public/a.txt"))
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_bucket_policy_not_action_with_principal_arn() {
+    let (app, _tmp) = test_app_with_iam(policy_test_iam());
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/cond-bucket", Body::empty()))
+        .await
+        .unwrap();
+    seed_object(&app, "cond-bucket", "a.txt").await;
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Deny",
+        "Principal": {"AWS": "arn:aws:iam::123456789012:user/u-cond"},
+        "NotAction": ["s3:GetObject", "s3:ListBucket"],
+        "Resource": ["arn:aws:s3:::cond-bucket", "arn:aws:s3:::cond-bucket/*"]
+      }]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "cond-bucket", policy).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let get = app
+        .clone()
+        .oneshot(cond_request(
+            Method::GET,
+            "/cond-bucket/a.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+
+    let list = app
+        .clone()
+        .oneshot(cond_request(
+            Method::GET,
+            "/cond-bucket?list-type=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+
+    let put = app
+        .clone()
+        .oneshot(cond_request(
+            Method::PUT,
+            "/cond-bucket/new.txt",
+            Body::from("x"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::FORBIDDEN);
+
+    let admin_put = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/cond-bucket/new.txt",
+            Body::from("x"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(admin_put.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_iam_deny_statements_and_bucket_globs() {
+    let (app, _tmp) = test_app_with_iam(policy_test_iam());
+    for bucket in ["cond-bucket", "glob-2026", "other"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/{}", bucket),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+    }
+    seed_object(&app, "cond-bucket", "keep/x.txt").await;
+    seed_object(&app, "cond-bucket", "tmp/y.txt").await;
+
+    let kept = app
+        .clone()
+        .oneshot(cond_request(
+            Method::DELETE,
+            "/cond-bucket/keep/x.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(kept.status(), StatusCode::FORBIDDEN);
+
+    let tmp_delete = app
+        .clone()
+        .oneshot(cond_request(
+            Method::DELETE,
+            "/cond-bucket/tmp/y.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tmp_delete.status(), StatusCode::NO_CONTENT);
+
+    let glob_put = app
+        .clone()
+        .oneshot(cond_request(
+            Method::PUT,
+            "/glob-2026/a.txt",
+            Body::from("x"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(glob_put.status(), StatusCode::OK);
+
+    let other_put = app
+        .clone()
+        .oneshot(cond_request(Method::PUT, "/other/a.txt", Body::from("x")))
+        .await
+        .unwrap();
+    assert_eq!(other_put.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_put_bucket_policy_validation() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/val-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    async fn rejected(app: &axum::Router, policy: &str, needle: &str) {
+        let resp = put_policy_doc(app, "val-bucket", policy).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{}", policy);
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("<Code>MalformedPolicy</Code>"), "{}", body);
+        assert!(body.contains(needle), "expected {:?} in {}", needle, body);
+    }
+
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*","Condition":{"StringEqualz":{"s3:prefix":"x"}}}]}"#,
+        "Unsupported condition operator",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::other-bucket/*"}]}"#,
+        "does not belong to bucket",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","NotAction":"s3:PutObject","Resource":"arn:aws:s3:::val-bucket/*"}]}"#,
+        "both Action and NotAction",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Permit","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*"}]}"#,
+        "Effect must be Allow or Deny",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*"}]}"#,
+        "missing Principal",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*","Condition":{"IpAddress":{"aws:SourceIp":"10.0.0.0/33"}}}]}"#,
+        "invalid IP address",
+    )
+    .await;
+
+    let padding = "x".repeat(21 * 1024);
+    let oversized = format!(
+        r#"{{"Statement":[{{"Sid":"{}","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*"}}]}}"#,
+        padding
+    );
+    rejected(&app, &oversized, "maximum size").await;
+
+    let accepted = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Deny",
+          "NotPrincipal": {"AWS": ["arn:aws:iam::myfsio:user/u-test1234"]},
+          "Action": "s3:*",
+          "NotResource": "arn:aws:s3:::val-bucket/public/*",
+          "Condition": {
+            "Bool": {"aws:SecureTransport": false},
+            "ForAnyValue:StringEqualsIfExists": {"aws:TagKeys": ["env"]},
+            "DateLessThan": {"aws:CurrentTime": "2030-01-01T00:00:00Z"},
+            "NumericLessThanEquals": {"s3:max-keys": 100},
+            "Null": {"s3:x-amz-server-side-encryption": "true"},
+            "StringLike": {"s3:prefix": "home/${aws:username}/*"}
+          }
+        }
+      ]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "val-bucket", accepted).await.status(),
+        StatusCode::NO_CONTENT
+    );
+}
+
+const IAM_DELEGATE_AK: &str = "AKIAMDELEGATE0000000";
+const IAM_DELEGATE_SK: &str = "iam-delegate-secret-iam-delegate-secret";
+const IAM_ADMIN_SPARE_AK: &str = "AKIAMADMINSPARE00000";
+const IAM_ADMIN_SPARE_SK: &str = "iam-admin-spare-secret-iam-admin-spare";
+
+fn iam_delegation_app(delegated_actions: &[&str]) -> (axum::Router, tempfile::TempDir) {
+    test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [
+                    {
+                        "access_key": TEST_ACCESS_KEY,
+                        "secret_key": TEST_SECRET_KEY,
+                        "status": "active"
+                    },
+                    {
+                        "access_key": IAM_ADMIN_SPARE_AK,
+                        "secret_key": IAM_ADMIN_SPARE_SK,
+                        "status": "active"
+                    }
+                ],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            {
+                "user_id": "u-delegate",
+                "display_name": "delegate",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": IAM_DELEGATE_AK,
+                    "secret_key": IAM_DELEGATE_SK,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": delegated_actions, "prefix": "*"}]
+            }
+        ]
+    }))
+}
+
+fn delegate_request(method: Method, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", IAM_DELEGATE_AK)
+        .header("x-secret-key", IAM_DELEGATE_SK)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn iam_user_record(tmp: &tempfile::TempDir, user_id: &str) -> Value {
+    let raw = std::fs::read_to_string(
+        tmp.path()
+            .join(".myfsio.sys")
+            .join("config")
+            .join("iam.json"),
+    )
+    .unwrap();
+    let config: Value = serde_json::from_str(&raw).unwrap();
+    config["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|user| user["user_id"] == user_id)
+        .cloned()
+        .unwrap()
+}
+
+fn iam_access_keys(tmp: &tempfile::TempDir, user_id: &str) -> Vec<String> {
+    iam_user_record(tmp, user_id)["access_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key["access_key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn iam_create_key_delegate_cannot_mint_admin_credentials() {
+    let (app, tmp) = iam_delegation_app(&["iam:create_key"]);
+
+    let admin_targets = [
+        "/myfsio/admin/iam/users/u-test1234/access-keys".to_string(),
+        "/myfsio/admin/iam/users/u-test1234/keys".to_string(),
+        format!("/myfsio/admin/iam/users/{}/access-keys", TEST_ACCESS_KEY),
+    ];
+    for uri in admin_targets {
+        let resp = app
+            .clone()
+            .oneshot(delegate_request(Method::POST, &uri))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{}", uri);
+        let body = response_json(resp).await;
+        assert_eq!(body["error"]["code"], "AccessDenied", "{}", uri);
+        assert!(body.get("secret_key").is_none(), "{}", uri);
+    }
+
+    assert_eq!(
+        iam_access_keys(&tmp, "u-test1234"),
+        vec![TEST_ACCESS_KEY.to_string(), IAM_ADMIN_SPARE_AK.to_string()]
+    );
+}
+
+#[tokio::test]
+async fn iam_create_key_delegate_can_still_create_own_key() {
+    let (app, tmp) = iam_delegation_app(&["iam:create_key"]);
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-delegate/access-keys",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = response_json(resp).await;
+    let minted = body["access_key"].as_str().unwrap().to_string();
+    assert!(!body["secret_key"].as_str().unwrap().is_empty());
+
+    let keys = iam_access_keys(&tmp, "u-delegate");
+    assert_eq!(keys.len(), 2);
+    assert!(keys.contains(&minted));
+}
+
+#[tokio::test]
+async fn iam_create_key_admin_can_target_any_user() {
+    let (app, tmp) = iam_delegation_app(&["iam:create_key"]);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-delegate/access-keys",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(iam_access_keys(&tmp, "u-delegate").len(), 2);
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-test1234/access-keys",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(iam_access_keys(&tmp, "u-test1234").len(), 3);
+}
+
+#[tokio::test]
+async fn iam_delete_key_delegate_cannot_rotate_admin_keys() {
+    let (app, tmp) = iam_delegation_app(&["iam:delete_key"]);
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::DELETE,
+            &format!(
+                "/myfsio/admin/iam/users/u-test1234/access-keys/{}",
+                TEST_ACCESS_KEY
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "AccessDenied");
+
+    assert!(iam_access_keys(&tmp, "u-test1234").contains(&TEST_ACCESS_KEY.to_string()));
+}
+
+#[tokio::test]
+async fn iam_disable_user_delegate_cannot_lock_out_admin() {
+    let (app, tmp) = iam_delegation_app(&["iam:disable_user"]);
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-test1234/disable",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "AccessDenied");
+
+    assert_eq!(iam_user_record(&tmp, "u-test1234")["enabled"], true);
+}
+
+#[tokio::test]
+async fn iam_enable_user_delegate_cannot_unlock_admin() {
+    let (app, tmp) = iam_delegation_app(&["iam:disable_user"]);
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-test1234/enable",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "AccessDenied");
+
+    assert_eq!(iam_user_record(&tmp, "u-test1234")["enabled"], true);
+}
+
+#[tokio::test]
+async fn iam_list_users_delegate_sees_only_own_record() {
+    let (app, _tmp) = iam_delegation_app(&["iam:list_users"]);
+
+    let resp = app
+        .clone()
+        .oneshot(delegate_request(Method::GET, "/myfsio/admin/iam/users"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let users = body["users"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["user_id"], "u-delegate");
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/myfsio/admin/iam/users",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["users"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn iam_get_user_delegate_cannot_read_other_records() {
+    let (app, _tmp) = iam_delegation_app(&["iam:get_user"]);
+
+    let resp = app
+        .clone()
+        .oneshot(delegate_request(
+            Method::GET,
+            "/myfsio/admin/iam/users/u-test1234",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "AccessDenied");
+    assert!(body.get("access_keys").is_none());
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::GET,
+            "/myfsio/admin/iam/users/u-delegate",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["user_id"], "u-delegate");
+}
+
+#[tokio::test]
+async fn iam_get_policies_delegate_cannot_read_other_policies() {
+    let (app, _tmp) = iam_delegation_app(&["iam:get_policy"]);
+
+    let resp = app
+        .clone()
+        .oneshot(delegate_request(
+            Method::GET,
+            "/myfsio/admin/iam/users/u-test1234/policies",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "AccessDenied");
+    assert!(body.get("policies").is_none());
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::GET,
+            "/myfsio/admin/iam/users/u-delegate/policies",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert!(body["policies"].as_array().unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn version_scoped_object_actions_need_version_scoped_grants() {
+    const OBJ_DELETE_ACCESS_KEY: &str = "AKIAOBJECTDELETE0000";
+    const OBJ_DELETE_SECRET_KEY: &str = "object-delete-secret-key";
+    const VER_DELETE_ACCESS_KEY: &str = "AKIAVERSIONDELETE000";
+    const VER_DELETE_SECRET_KEY: &str = "version-delete-secret-key";
+    const COARSE_DELETE_ACCESS_KEY: &str = "AKIACOARSEDELETE0000";
+    const COARSE_DELETE_SECRET_KEY: &str = "coarse-delete-secret-key";
+    const OBJ_READ_ACCESS_KEY: &str = "AKIAOBJECTREAD000000";
+    const OBJ_READ_SECRET_KEY: &str = "object-read-secret-key";
+    const VER_READ_ACCESS_KEY: &str = "AKIAVERSIONREAD00000";
+    const VER_READ_SECRET_KEY: &str = "version-read-secret-key";
+
+    let scoped_user = |user_id: &str, access_key: &str, secret_key: &str, action: &str| {
+        serde_json::json!({
+            "user_id": user_id,
+            "display_name": user_id,
+            "enabled": true,
+            "access_keys": [{
+                "access_key": access_key,
+                "secret_key": secret_key,
+                "status": "active"
+            }],
+            "policies": [{
+                "bucket": "version-auth",
+                "actions": [action],
+                "prefix": "*"
+            }]
+        })
+    };
+
+    let (app, _tmp) = test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            scoped_user(
+                "u-objdel",
+                OBJ_DELETE_ACCESS_KEY,
+                OBJ_DELETE_SECRET_KEY,
+                "s3:DeleteObject"
+            ),
+            scoped_user(
+                "u-verdel",
+                VER_DELETE_ACCESS_KEY,
+                VER_DELETE_SECRET_KEY,
+                "s3:DeleteObjectVersion"
+            ),
+            scoped_user(
+                "u-coarsedel",
+                COARSE_DELETE_ACCESS_KEY,
+                COARSE_DELETE_SECRET_KEY,
+                "delete"
+            ),
+            scoped_user(
+                "u-objread",
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY,
+                "s3:GetObject"
+            ),
+            scoped_user(
+                "u-verread",
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY,
+                "s3:GetObjectVersion"
+            )
+        ]
+    }));
+
+    let as_user =
+        |method: Method, uri: &str, access_key: &'static str, secret_key: &'static str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("x-access-key", access_key)
+                .header("x-secret-key", secret_key)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/version-auth", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/version-auth?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    for payload in ["first", "second", "third"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/version-auth/doc.txt",
+                Body::from(payload),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let list_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/version-auth?versions",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let list_body = String::from_utf8(
+        list_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let archived: Vec<String> = list_body
+        .split("<Version>")
+        .skip(1)
+        .filter(|block| block.contains("<IsLatest>false</IsLatest>"))
+        .filter_map(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id.to_string()))
+        })
+        .filter(|id| id != "null")
+        .collect();
+    assert!(
+        archived.len() >= 2,
+        "expected two archived versions, got {:?}",
+        archived
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                &format!("/version-auth/doc.txt?versionId={}", archived[0]),
+                OBJ_DELETE_ACCESS_KEY,
+                OBJ_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:DeleteObject grant must not authorize a permanent version delete"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                &format!("/version-auth/doc.txt?versionId={}", archived[0]),
+                VER_DELETE_ACCESS_KEY,
+                VER_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT,
+        "an s3:DeleteObjectVersion grant must authorize a permanent version delete"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                &format!("/version-auth/doc.txt?versionId={}", archived[1]),
+                COARSE_DELETE_ACCESS_KEY,
+                COARSE_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT,
+        "the coarse 'delete' action must keep authorizing version deletes"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                "/version-auth/doc.txt",
+                VER_DELETE_ACCESS_KEY,
+                VER_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:DeleteObjectVersion grant must not authorize a plain delete-marker write"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::DELETE,
+                "/version-auth/doc.txt",
+                OBJ_DELETE_ACCESS_KEY,
+                OBJ_DELETE_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT,
+        "an s3:DeleteObject grant must still authorize a plain delete-marker write"
+    );
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/version-auth/read.txt",
+            Body::from("v1"),
+        ))
+        .await
+        .unwrap();
+    let head_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/version-auth/read.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let read_version_id = head_resp.headers()["x-amz-version-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                &format!("/version-auth/read.txt?versionId={}", read_version_id),
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:GetObject grant must not authorize a version-scoped read"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                &format!("/version-auth/read.txt?versionId={}", read_version_id),
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an s3:GetObjectVersion grant must authorize a version-scoped read"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                "/version-auth/read.txt?versionId=",
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an empty versionId must authorize as an ordinary GetObject and read the current version"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                "/version-auth/read.txt?versionId=",
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an empty versionId must not be treated as a version-scoped read"
+    );
+
+    assert_eq!(
+        app.oneshot(as_user(
+            Method::GET,
+            "/version-auth/read.txt",
+            VER_READ_ACCESS_KEY,
+            VER_READ_SECRET_KEY
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:GetObjectVersion grant must not authorize a current-object read"
     );
 }

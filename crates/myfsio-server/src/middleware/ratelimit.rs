@@ -303,7 +303,7 @@ fn too_many_requests(retry_after: u64, resource: &str) -> Response {
     response
 }
 
-fn client_ip(req: &Request, num_trusted_proxies: usize) -> Option<IpAddr> {
+pub(crate) fn client_ip(req: &Request, num_trusted_proxies: usize) -> Option<IpAddr> {
     if num_trusted_proxies > 0 {
         if let Some(value) = req
             .headers()

@@ -220,6 +220,7 @@
               <div class="d-flex flex-wrap gap-1" data-policy-badges>
                 {% for policy in user.policies %}
                   {% if policy.bucket == "*" %}{% set bucket_label = "All Buckets" %}{% else %}{% set bucket_label = policy.bucket %}{% endif %}
+                  {% set policy_effect = policy.effect | default(value="Allow") | lower %}
                   {% if "*" in policy.actions %}
                     {% set perm_label = "Full Access" %}
                   {% elif policy.actions|length >= full_access_actions_count %}
@@ -234,11 +235,11 @@
                     {% set policy_actions_count = policy.actions | length %}
                     {% set perm_label = "Custom (" ~ policy_actions_count ~ ")" %}
                   {% endif %}
-                  <span class="iam-perm-badge">
+                  <span class="iam-perm-badge{% if policy_effect == "deny" %} text-danger{% endif %}"{% if policy.condition is defined %} title="Conditional statement"{% endif %}>
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
                     </svg>
-                    {{ bucket_label }} · {{ perm_label }}
+                    {% if policy_effect == "deny" %}Deny · {% endif %}{{ bucket_label }} · {{ perm_label }}{% if policy.condition is defined %} · conditional{% endif %}
                   </span>
                 {% else %}
                   <span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>

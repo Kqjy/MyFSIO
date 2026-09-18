@@ -53,10 +53,6 @@ fn req(method: Method, uri: &str, body: Body) -> Request<Body> {
         .unwrap()
 }
 
-// Mirrors hoodik's wire shape: a client prefix like `/hoodik/` joined onto the
-// bucket path produces `//hoodik/...`, which axum's `{*key}` catch-all captures
-// WITH a leading slash. rust-s3's `is_not_found` only recognizes 404/NoSuchKey,
-// so a 400 on a missing key surfaces as "unexpected status 400".
 #[tokio::test]
 async fn leading_slash_key_behaves_like_clean_key() {
     let (app, _tmp) = app();

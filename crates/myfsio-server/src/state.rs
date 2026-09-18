@@ -94,6 +94,14 @@ pub fn build_storage_backend(config: &ServerConfig) -> Arc<FsStorageBackend> {
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
+        Self::new_with_services(config, None, None)
+    }
+
+    pub fn new_with_services(
+        config: ServerConfig,
+        encryption: Option<Arc<EncryptionService>>,
+        kms: Option<Arc<KmsService>>,
+    ) -> Self {
         let storage = build_storage_backend(&config);
         let iam = Arc::new(IamService::new_with_filesystem(
             config.iam_config_path.clone(),
@@ -248,6 +256,7 @@ impl AppState {
                         .saturating_mul(3600),
                 )
             }),
+            encryption.clone(),
         ));
         replication.clone().start_workers();
         if config.replication_healer_enabled {
@@ -269,6 +278,7 @@ impl AppState {
                 Duration::from_secs(config.site_sync_read_timeout_secs),
                 config.site_sync_max_retries,
                 config.site_sync_clock_skew_tolerance,
+                encryption.clone(),
             )))
         } else {
             None
@@ -286,6 +296,7 @@ impl AppState {
                     read_timeout: Duration::from_secs(config.site_sync_read_timeout_secs),
                     max_attempts: config.site_sync_max_retries,
                 },
+                encryption.clone(),
             )))
         };
 
@@ -347,8 +358,8 @@ impl AppState {
             config,
             storage,
             iam,
-            encryption: None,
-            kms: None,
+            encryption,
+            kms,
             gc,
             integrity,
             read_integrity,
@@ -377,8 +388,6 @@ impl AppState {
     }
 
     pub async fn new_with_encryption(config: ServerConfig) -> Result<Self, String> {
-        let mut state = Self::new(config.clone());
-
         let keys_dir = config.storage_root.join(".myfsio.sys").join("keys");
 
         let kms = if config.kms_enabled {
@@ -418,9 +427,7 @@ impl AppState {
             None
         };
 
-        state.encryption = encryption;
-        state.kms = kms;
-        Ok(state)
+        Ok(Self::new_with_services(config, encryption, kms))
     }
 }
 

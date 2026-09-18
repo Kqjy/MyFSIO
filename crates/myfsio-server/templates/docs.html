@@ -2914,7 +2914,7 @@ GET|PUT|DELETE /&lt;bucket&gt;?cors             # CORS config
 GET|PUT|DELETE /&lt;bucket&gt;?encryption       # Default encryption
 GET|PUT        /&lt;bucket&gt;?acl              # Bucket ACL
 GET|PUT|DELETE /&lt;bucket&gt;?tagging          # Bucket tags
-GET|PUT|DELETE /&lt;bucket&gt;?replication      # Replication rules
+GET|DELETE     /&lt;bucket&gt;?replication      # Replication rules (PUT returns 501; create rules in the Replication tab)
 GET|PUT        /&lt;bucket&gt;?logging          # Access logging
 GET|PUT        /&lt;bucket&gt;?notification     # Event notifications
 GET|PUT|DELETE /&lt;bucket&gt;?object-lock      # Object lock config

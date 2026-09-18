@@ -7,9 +7,10 @@ use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_storage::traits::StorageEngine;
 
 use crate::services::acl::{
-    acl_from_object_metadata, acl_from_xml_strict, acl_to_xml_with_lookup, create_canned_acl,
-    store_object_acl,
+    acl_from_bucket_config, acl_from_object_metadata, acl_from_xml_strict, acl_to_xml,
+    acl_to_xml_with_lookup, create_canned_acl, store_object_acl, Acl,
 };
+use crate::services::lifecycle::{validate_lifecycle_configuration, LifecycleConfigError};
 use crate::services::notifications::parse_notification_configurations;
 use crate::services::object_lock::{
     get_legal_hold, get_object_retention as retention_from_metadata,
@@ -259,7 +260,9 @@ pub async fn get_location(state: &AppState, _bucket: &str) -> Response {
     xml_response(StatusCode::OK, xml)
 }
 
-pub fn parse_encryption_config(value: &serde_json::Value) -> Option<(String, Option<String>)> {
+pub(crate) fn parse_encryption_config(
+    value: &serde_json::Value,
+) -> Option<(String, Option<String>)> {
     if let Some(obj) = value.as_object() {
         if let Some(alg) = obj
             .get("sse_algorithm")
@@ -475,8 +478,8 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
         Err(response) => return response,
     };
     let raw = String::from_utf8_lossy(&body_bytes).to_string();
-    if let Err(message) = validate_lifecycle_days(&raw) {
-        return xml_error_response(S3Error::new(S3ErrorCode::InvalidArgument, message));
+    if let Err(err) = validate_lifecycle_configuration(&raw) {
+        return xml_error_response(lifecycle_config_error(err));
     }
     let value = serde_json::Value::String(raw);
 
@@ -486,28 +489,13 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
     .await
 }
 
-fn validate_lifecycle_days(raw: &str) -> Result<(), String> {
-    if let Ok(doc) = roxmltree::Document::parse(raw) {
-        for node in doc.descendants().filter(|node| node.is_element()) {
-            let name = node.tag_name().name();
-            if name == "Days" || name == "NoncurrentDays" || name == "DaysAfterInitiation" {
-                let text = node.text().unwrap_or("").trim();
-                if text.is_empty() {
-                    continue;
-                }
-                let parsed: i64 = text
-                    .parse()
-                    .map_err(|_| format!("Lifecycle '{}' must be a positive integer", name))?;
-                if parsed < 1 {
-                    return Err(format!(
-                        "Lifecycle '{}' must be a positive integer (>= 1)",
-                        name
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
+fn lifecycle_config_error(err: LifecycleConfigError) -> S3Error {
+    let code = match err {
+        LifecycleConfigError::Malformed(_) => S3ErrorCode::MalformedXML,
+        LifecycleConfigError::Unsupported(_) => S3ErrorCode::NotImplemented,
+        LifecycleConfigError::Invalid(_) => S3ErrorCode::InvalidArgument,
+    };
+    S3Error::new(code, err.message())
 }
 
 pub async fn delete_lifecycle(state: &AppState, bucket: &str) -> Response {
@@ -614,20 +602,24 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
         Ok(v) => v,
         Err(_) => {
             return xml_error_response(S3Error::new(
-                S3ErrorCode::InvalidArgument,
+                S3ErrorCode::MalformedPolicy,
                 "Policy document must be JSON",
             ));
         }
     };
 
-    if let Some(clause) = policy_unsupported_clause(&policy) {
+    if body_bytes.len() > BUCKET_POLICY_MAX_BYTES {
         return xml_error_response(S3Error::new(
-            S3ErrorCode::InvalidArgument,
+            S3ErrorCode::MalformedPolicy,
             format!(
-                "Policy statements containing '{}' are not supported by this server",
-                clause
+                "Bucket policy exceeds the maximum size of {} bytes",
+                BUCKET_POLICY_MAX_BYTES
             ),
         ));
+    }
+
+    if let Err(reason) = validate_bucket_policy(&policy, bucket) {
+        return xml_error_response(S3Error::new(S3ErrorCode::MalformedPolicy, reason));
     }
 
     mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, move |config| {
@@ -636,18 +628,206 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
     .await
 }
 
-pub(crate) fn policy_unsupported_clause(policy: &serde_json::Value) -> Option<&'static str> {
-    let statements: Vec<&serde_json::Value> = match policy.get("Statement") {
-        Some(serde_json::Value::Array(items)) => items.iter().collect(),
-        Some(other) => vec![other],
-        None => return None,
+pub const BUCKET_POLICY_MAX_BYTES: usize = 20 * 1024;
+
+const STATEMENT_FIELDS: &[&str] = &[
+    "Sid",
+    "Effect",
+    "Principal",
+    "NotPrincipal",
+    "Action",
+    "NotAction",
+    "Resource",
+    "NotResource",
+    "Condition",
+];
+
+fn string_or_string_array(value: &serde_json::Value) -> Option<Vec<&str>> {
+    match value {
+        serde_json::Value::String(s) => Some(vec![s.as_str()]),
+        serde_json::Value::Array(items) => items.iter().map(|item| item.as_str()).collect(),
+        _ => None,
+    }
+}
+
+fn validate_principal_value(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(_) => Ok(()),
+        serde_json::Value::Array(items) => {
+            if items.iter().all(|item| item.is_string()) {
+                Ok(())
+            } else {
+                Err("Principal entries must be strings".to_string())
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                return Err("Principal must not be empty".to_string());
+            }
+            for (kind, inner) in map {
+                match kind.to_ascii_lowercase().as_str() {
+                    "aws" | "canonicaluser" => {}
+                    other => {
+                        return Err(format!(
+                            "Unsupported principal type '{}' (only AWS and CanonicalUser principals can match on this server)",
+                            other
+                        ))
+                    }
+                }
+                if string_or_string_array(inner).is_none() {
+                    return Err(format!(
+                        "Principal '{}' must be a string or array of strings",
+                        kind
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Err("Principal must be a string, array, or object".to_string()),
+    }
+}
+
+fn validate_statement(statement: &serde_json::Value, bucket: &str) -> Result<(), String> {
+    let serde_json::Value::Object(fields) = statement else {
+        return Err("Statement entries must be JSON objects".to_string());
     };
-    statements.into_iter().find_map(|statement| {
-        crate::middleware::UNSUPPORTED_POLICY_CLAUSES
-            .iter()
-            .find(|name| statement.get(**name).is_some_and(|value| !value.is_null()))
-            .copied()
-    })
+    for field in fields.keys() {
+        if !STATEMENT_FIELDS.contains(&field.as_str()) {
+            return Err(format!("Unknown statement field '{}'", field));
+        }
+    }
+    match fields.get("Effect").and_then(|v| v.as_str()) {
+        Some(effect)
+            if effect.eq_ignore_ascii_case("allow") || effect.eq_ignore_ascii_case("deny") => {}
+        Some(other) => return Err(format!("Effect must be Allow or Deny, got '{}'", other)),
+        None => return Err("Statement is missing Effect".to_string()),
+    }
+    if let Some(sid) = fields.get("Sid") {
+        if !sid.is_string() {
+            return Err("Sid must be a string".to_string());
+        }
+    }
+
+    let has = |name: &str| fields.get(name).is_some_and(|v| !v.is_null());
+    match (has("Principal"), has("NotPrincipal")) {
+        (true, true) => {
+            return Err("Statement may not have both Principal and NotPrincipal".to_string())
+        }
+        (false, false) => return Err("Statement is missing Principal".to_string()),
+        _ => {}
+    }
+    match (has("Action"), has("NotAction")) {
+        (true, true) => return Err("Statement may not have both Action and NotAction".to_string()),
+        (false, false) => return Err("Statement is missing Action".to_string()),
+        _ => {}
+    }
+    match (has("Resource"), has("NotResource")) {
+        (true, true) => {
+            return Err("Statement may not have both Resource and NotResource".to_string())
+        }
+        (false, false) => return Err("Statement is missing Resource".to_string()),
+        _ => {}
+    }
+
+    for name in ["Principal", "NotPrincipal"] {
+        if let Some(value) = fields.get(name).filter(|v| !v.is_null()) {
+            validate_principal_value(value).map_err(|e| format!("{}: {}", name, e))?;
+        }
+    }
+    for name in ["Action", "NotAction"] {
+        if let Some(value) = fields.get(name).filter(|v| !v.is_null()) {
+            let actions = string_or_string_array(value)
+                .ok_or_else(|| format!("{} must be a string or array of strings", name))?;
+            if actions.is_empty() {
+                return Err(format!("{} must not be empty", name));
+            }
+            for action in actions {
+                let trimmed = action.trim();
+                if trimmed.is_empty() {
+                    return Err(format!("{} entries must not be empty", name));
+                }
+                let lower = trimmed.to_ascii_lowercase();
+                let known_coarse = myfsio_auth::s3_action::S3_ACTION_TABLE
+                    .iter()
+                    .any(|(_, internal)| *internal == lower);
+                if !(trimmed == "*"
+                    || lower.starts_with("s3:")
+                    || known_coarse
+                    || lower == "create_bucket"
+                    || lower == "delete_bucket")
+                {
+                    return Err(format!("Unsupported action '{}'", trimmed));
+                }
+            }
+        }
+    }
+    for name in ["Resource", "NotResource"] {
+        if let Some(value) = fields.get(name).filter(|v| !v.is_null()) {
+            let resources = string_or_string_array(value)
+                .ok_or_else(|| format!("{} must be a string or array of strings", name))?;
+            if resources.is_empty() {
+                return Err(format!("{} must not be empty", name));
+            }
+            for resource in resources {
+                let trimmed = resource.trim();
+                let remainder = match trimmed {
+                    "*" => continue,
+                    other => other
+                        .strip_prefix("arn:aws:s3:::")
+                        .ok_or_else(|| format!("Invalid resource '{}'", trimmed))?,
+                };
+                let resource_bucket = remainder.split('/').next().unwrap_or("");
+                if resource_bucket.is_empty() {
+                    return Err(format!("Invalid resource '{}'", trimmed));
+                }
+                if !myfsio_auth::s3_action::wildcard_match(bucket, resource_bucket) {
+                    return Err(format!(
+                        "Resource '{}' does not belong to bucket '{}'",
+                        trimmed, bucket
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(condition) = fields.get("Condition").filter(|v| !v.is_null()) {
+        myfsio_auth::policy::validate_condition(condition)
+            .map_err(|e| format!("Condition: {}", e))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_bucket_policy(
+    policy: &serde_json::Value,
+    bucket: &str,
+) -> Result<(), String> {
+    let serde_json::Value::Object(fields) = policy else {
+        return Err("Policy document must be a JSON object".to_string());
+    };
+    for field in fields.keys() {
+        if !matches!(field.as_str(), "Version" | "Id" | "Statement") {
+            return Err(format!("Unknown policy field '{}'", field));
+        }
+    }
+    if let Some(version) = fields.get("Version") {
+        match version.as_str() {
+            Some("2012-10-17") | Some("2008-10-17") => {}
+            _ => return Err("Version must be \"2012-10-17\" or \"2008-10-17\"".to_string()),
+        }
+    }
+    let statements: Vec<&serde_json::Value> = match fields.get("Statement") {
+        Some(serde_json::Value::Array(items)) => items.iter().collect(),
+        Some(item @ serde_json::Value::Object(_)) => vec![item],
+        Some(_) => return Err("Statement must be an object or array of objects".to_string()),
+        None => return Err("Policy is missing Statement".to_string()),
+    };
+    if statements.is_empty() {
+        return Err("Statement must not be empty".to_string());
+    }
+    for (index, statement) in statements.into_iter().enumerate() {
+        validate_statement(statement, bucket)
+            .map_err(|e| format!("Statement {}: {}", index + 1, e))?;
+    }
+    Ok(())
 }
 
 pub async fn delete_policy(state: &AppState, bucket: &str) -> Response {
@@ -676,18 +856,15 @@ pub async fn get_policy_status(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn get_replication(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(config) => {
-            if let Some(replication) = &config.replication {
-                xml_response(StatusCode::OK, stored_xml(replication))
-            } else {
-                xml_error_response(S3Error::new(
-                    S3ErrorCode::ReplicationConfigurationNotFoundError,
-                    "The replication configuration was not found",
-                ))
-            }
-        }
-        Err(e) => storage_err(e),
+    if let Err(e) = state.storage.get_bucket_config(bucket).await {
+        return storage_err(e);
+    }
+    match state.replication.get_rule(bucket) {
+        Some(rule) => xml_response(StatusCode::OK, replication_configuration_xml(&rule)),
+        None => xml_error_response(S3Error::new(
+            S3ErrorCode::ReplicationConfigurationNotFoundError,
+            "The replication configuration was not found",
+        )),
     }
 }
 
@@ -704,18 +881,59 @@ pub async fn put_replication(state: &AppState, bucket: &str, body: Body) -> Resp
         ));
     }
 
-    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
-        config.replication = Some(serde_json::Value::String(body_str));
-    })
-    .await
+    if let Err(e) = state.storage.get_bucket_config(bucket).await {
+        return storage_err(e);
+    }
+
+    xml_error_response(S3Error::new(
+        S3ErrorCode::NotImplemented,
+        "Replication rules cannot be created through this API because a ReplicationConfiguration \
+         destination names only a bucket, while this server replicates to a named remote \
+         connection carrying its own endpoint and credentials. Create the rule through the \
+         management API or the bucket's Replication tab; GET and DELETE of this subresource \
+         report and remove the rule that is actually in effect.",
+    ))
 }
 
 pub async fn delete_replication(state: &AppState, bucket: &str) -> Response {
+    if let Err(e) = state.storage.get_bucket_config(bucket).await {
+        return storage_err(e);
+    }
+    if state.replication.get_rule(bucket).is_some() {
+        if let Err(reason) = state.replication.delete_rule(bucket) {
+            return xml_error_response(S3Error::new(S3ErrorCode::InternalError, reason));
+        }
+    }
     mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
         config.replication = None;
     })
     .await
+}
+
+fn replication_configuration_xml(rule: &crate::services::replication::ReplicationRule) -> String {
+    let status = if rule.enabled { "Enabled" } else { "Disabled" };
+    let prefix = rule.filter_prefix.clone().unwrap_or_default();
+    let delete_marker_status = if rule.sync_deletions {
+        "Enabled"
+    } else {
+        "Disabled"
+    };
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<ReplicationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+            "<Role></Role><Rule><ID>{}</ID><Status>{}</Status>",
+            "<Filter><Prefix>{}</Prefix></Filter>",
+            "<DeleteMarkerReplication><Status>{}</Status></DeleteMarkerReplication>",
+            "<Destination><Bucket>arn:aws:s3:::{}</Bucket></Destination>",
+            "</Rule></ReplicationConfiguration>"
+        ),
+        xml_escape(&rule.target_connection_id),
+        status,
+        xml_escape(&prefix),
+        delete_marker_status,
+        xml_escape(&rule.target_bucket),
+    )
 }
 
 fn policy_is_public(policy: &serde_json::Value) -> bool {
@@ -740,11 +958,24 @@ fn is_allow_public_statement(statement: &serde_json::Value) -> bool {
         return false;
     }
 
-    match statement.get("Principal") {
+    let principal_public = match statement.get("Principal") {
         Some(serde_json::Value::String(s)) => s == "*",
-        Some(serde_json::Value::Object(obj)) => obj.values().any(|v| v == "*"),
-        _ => false,
+        Some(serde_json::Value::Array(items)) => items.iter().any(|v| v == "*"),
+        Some(serde_json::Value::Object(obj)) => obj.values().any(|v| match v {
+            serde_json::Value::String(s) => s == "*",
+            serde_json::Value::Array(items) => items.iter().any(|item| item == "*"),
+            _ => false,
+        }),
+        _ => statement.get("NotPrincipal").is_some_and(|v| !v.is_null()),
+    };
+    if !principal_public {
+        return false;
     }
+
+    !statement
+        .get("Condition")
+        .filter(|v| !v.is_null())
+        .is_some_and(myfsio_auth::policy::condition_restricts_principal)
 }
 
 pub async fn get_acl(state: &AppState, bucket: &str) -> Response {
@@ -781,17 +1012,51 @@ fn default_owner_for(_state: &AppState) -> String {
     "myfsio".to_string()
 }
 
-pub async fn put_acl(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
-        Ok(bytes) => bytes,
-        Err(response) => return response,
-    };
-    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
-
+pub async fn set_bucket_acl(state: &AppState, bucket: &str, acl: &Acl) -> Response {
+    let value = serde_json::Value::String(acl_to_xml(acl));
     mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
         config.acl = Some(value);
     })
     .await
+}
+
+pub async fn put_acl(state: &AppState, bucket: &str, headers: &HeaderMap, body: Body) -> Response {
+    let acl_request = match super::header_acl_request(headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+
+    let Some(acl_request) = acl_request else {
+        let value = serde_json::Value::String(body_str);
+        return mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+            config.acl = Some(value);
+        })
+        .await;
+    };
+
+    if !body_str.trim().is_empty() {
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "Specifying both Canned ACLs and Header Grants is not allowed",
+        ));
+    }
+
+    let owner = match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => config
+            .acl
+            .as_ref()
+            .and_then(acl_from_bucket_config)
+            .map(|acl| acl.owner)
+            .unwrap_or_else(|| default_owner_for(state)),
+        Err(e) => return storage_err(e),
+    };
+
+    set_bucket_acl(state, bucket, &acl_request.into_acl(&owner)).await
 }
 
 pub async fn get_website(state: &AppState, bucket: &str) -> Response {
@@ -1610,6 +1875,7 @@ pub async fn put_object_acl(
     state: &AppState,
     bucket: &str,
     key: &str,
+    version_id: Option<&str>,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
@@ -1619,62 +1885,82 @@ pub async fn put_object_acl(
     };
     let body_str = String::from_utf8_lossy(&body_bytes);
     let body_trimmed = body_str.trim();
-    let canned_acl_header = headers
-        .get("x-amz-acl")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let acl_request = match super::header_acl_request(headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-    if !body_trimmed.is_empty() && canned_acl_header.is_some() {
+    if !body_trimmed.is_empty() && acl_request.is_some() {
         return xml_error_response(S3Error::new(
             S3ErrorCode::InvalidRequest,
             "Specifying both Canned ACLs and Header Grants is not allowed",
         ));
     }
 
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
-                Ok(metadata) => metadata,
-                Err(err) => return storage_err(err),
-            };
-            let existing_owner = acl_from_object_metadata(&metadata)
-                .map(|acl| acl.owner)
-                .unwrap_or_else(|| default_owner_for(state));
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
+    }
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
+        }
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let mut metadata = match metadata_res {
+        Ok(metadata) => metadata,
+        Err(err) => return storage_err(err),
+    };
+    let existing_owner = acl_from_object_metadata(&metadata)
+        .map(|acl| acl.owner)
+        .unwrap_or_else(|| default_owner_for(state));
 
-            let acl = if !body_trimmed.is_empty() {
-                match acl_from_xml_strict(body_trimmed) {
-                    Some(parsed) => {
-                        if parsed.owner != existing_owner {
-                            return xml_error_response(S3Error::new(
-                                S3ErrorCode::AccessDenied,
-                                "The Owner ID in the ACL does not match the existing object owner",
-                            ));
-                        }
-                        parsed
-                    }
-                    None => {
-                        return xml_error_response(S3Error::from_code(
-                            S3ErrorCode::MalformedACLError,
-                        ));
-                    }
+    let acl = if !body_trimmed.is_empty() {
+        match acl_from_xml_strict(body_trimmed) {
+            Some(parsed) => {
+                if parsed.owner != existing_owner {
+                    return xml_error_response(S3Error::new(
+                        S3ErrorCode::AccessDenied,
+                        "The Owner ID in the ACL does not match the existing object owner",
+                    ));
                 }
-            } else {
-                let canned = canned_acl_header.unwrap_or("private");
-                create_canned_acl(canned, &existing_owner)
-            };
+                parsed
+            }
+            None => {
+                return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedACLError));
+            }
+        }
+    } else {
+        match acl_request {
+            Some(request) => request.into_acl(&existing_owner),
+            None => create_canned_acl("private", &existing_owner),
+        }
+    };
 
-            store_object_acl(&mut metadata, &acl);
-            match state
+    store_object_acl(&mut metadata, &acl);
+    let write_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .put_object_version_metadata(bucket, key, vid, &metadata)
+                .await
+        }
+        None => {
+            state
                 .storage
                 .put_object_metadata(bucket, key, &metadata)
                 .await
-            {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(err) => storage_err(err),
-            }
         }
-        Err(e) => storage_err(e),
+    };
+    match write_res {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(err) => storage_err(err),
     }
 }
 
@@ -1901,26 +2187,42 @@ pub async fn put_object_legal_hold(
     }
 }
 
-pub async fn get_object_acl(state: &AppState, bucket: &str, key: &str) -> Response {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            let metadata = match state.storage.get_object_metadata(bucket, key).await {
-                Ok(metadata) => metadata,
-                Err(err) => return storage_err(err),
-            };
-            let owner = default_owner_for(state);
-            let acl = acl_from_object_metadata(&metadata)
-                .unwrap_or_else(|| create_canned_acl("private", &owner));
-            let lookup = |id: &str| {
-                state
-                    .iam
-                    .get_display_name(id)
-                    .unwrap_or_else(|| id.to_string())
-            };
-            xml_response(StatusCode::OK, acl_to_xml_with_lookup(&acl, lookup))
-        }
-        Err(e) => storage_err(e),
+pub async fn get_object_acl(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Response {
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
     }
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
+        }
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let metadata = match metadata_res {
+        Ok(metadata) => metadata,
+        Err(err) => return storage_err(err),
+    };
+    let owner = default_owner_for(state);
+    let acl =
+        acl_from_object_metadata(&metadata).unwrap_or_else(|| create_canned_acl("private", &owner));
+    let lookup = |id: &str| {
+        state
+            .iam
+            .get_display_name(id)
+            .unwrap_or_else(|| id.to_string())
+    };
+    xml_response(StatusCode::OK, acl_to_xml_with_lookup(&acl, lookup))
 }
 
 fn find_xml_text(doc: &roxmltree::Document<'_>, name: &str) -> Option<String> {
@@ -2037,6 +2339,58 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
     }
 
     tags
+}
+
+#[cfg(test)]
+mod lifecycle_xml_tests {
+    use super::lifecycle_config_error;
+    use crate::services::lifecycle::{validate_lifecycle_configuration, LifecycleConfigError};
+    use myfsio_common::error::S3ErrorCode;
+
+    fn error_code_for(raw: &str) -> S3ErrorCode {
+        let err = validate_lifecycle_configuration(raw).expect_err("expected rejection");
+        lifecycle_config_error(err).code
+    }
+
+    #[test]
+    fn malformed_xml_maps_to_malformed_xml() {
+        assert_eq!(
+            error_code_for("<LifecycleConfiguration>"),
+            S3ErrorCode::MalformedXML
+        );
+    }
+
+    #[test]
+    fn unsupported_element_maps_to_not_implemented() {
+        let xml = "<LifecycleConfiguration><Rule><Status>Enabled</Status>\
+                   <Filter><ObjectSizeGreaterThan>5368709120</ObjectSizeGreaterThan></Filter>\
+                   <Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>";
+        assert_eq!(error_code_for(xml), S3ErrorCode::NotImplemented);
+    }
+
+    #[test]
+    fn invalid_days_maps_to_invalid_argument() {
+        let xml = "<LifecycleConfiguration><Rule><Status>Enabled</Status>\
+                   <Expiration><Days>0</Days></Expiration></Rule></LifecycleConfiguration>";
+        assert_eq!(error_code_for(xml), S3ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn error_message_names_the_offending_element() {
+        let xml = "<LifecycleConfiguration><Rule><Status>Enabled</Status>\
+                   <Transition><Days>30</Days></Transition></Rule></LifecycleConfiguration>";
+        let err = validate_lifecycle_configuration(xml).expect_err("expected rejection");
+        assert!(matches!(err, LifecycleConfigError::Unsupported(_)));
+        assert!(lifecycle_config_error(err).message.contains("Transition"));
+    }
+
+    #[test]
+    fn supported_configuration_is_accepted() {
+        let xml = "<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status>\
+                   <Filter><Prefix>logs/</Prefix></Filter>\
+                   <Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>";
+        assert!(validate_lifecycle_configuration(xml).is_ok());
+    }
 }
 
 #[cfg(test)]

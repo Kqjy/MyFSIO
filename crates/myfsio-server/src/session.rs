@@ -28,6 +28,7 @@ pub struct SessionData {
     pub flash: Vec<FlashMessage>,
     pub extra: HashMap<String, String>,
     last_accessed: Instant,
+    revision: u64,
 }
 
 impl SessionData {
@@ -39,6 +40,7 @@ impl SessionData {
             flash: Vec::new(),
             extra: HashMap::new(),
             last_accessed: Instant::now(),
+            revision: 0,
         }
     }
 
@@ -138,13 +140,39 @@ impl SessionStore {
         Some(entry.clone())
     }
 
-    pub fn save(&self, id: &str, data: SessionData) {
+    pub fn save(&self, id: &str, data: SessionData) -> bool {
         let mut guard = self.sessions.write();
-        if !guard.contains_key(id) {
-            self.enforce_capacity(&mut guard);
-        }
+        let current_revision = match guard.get(id) {
+            Some(existing) => {
+                if existing.revision > data.revision {
+                    return false;
+                }
+                existing.revision
+            }
+            None => {
+                self.enforce_capacity(&mut guard);
+                data.revision
+            }
+        };
         let mut updated = data;
         updated.last_accessed = Instant::now();
+        updated.revision = current_revision.saturating_add(1);
+        guard.insert(id.to_string(), updated);
+        true
+    }
+
+    pub fn save_authoritative(&self, id: &str, data: SessionData) {
+        let mut guard = self.sessions.write();
+        let current_revision = match guard.get(id) {
+            Some(existing) => existing.revision.max(data.revision),
+            None => {
+                self.enforce_capacity(&mut guard);
+                data.revision
+            }
+        };
+        let mut updated = data;
+        updated.last_accessed = Instant::now();
+        updated.revision = current_revision.saturating_add(1);
         guard.insert(id.to_string(), updated);
     }
 
@@ -216,6 +244,46 @@ mod tests {
         store.save(&id, data);
         assert_eq!(store.len(), 1);
         assert!(store.get(&id).is_some());
+    }
+
+    #[test]
+    fn a_stale_snapshot_cannot_overwrite_a_newer_save() {
+        let store = store(16);
+        let mut signed_in = SessionData::new();
+        signed_in.user_id = Some("AKIAADMIN".to_string());
+        store.save("sid", signed_in);
+
+        let stale = store.get("sid").expect("loaded");
+
+        let mut logged_out = store.get("sid").expect("loaded");
+        logged_out.user_id = None;
+        store.save_authoritative("sid", logged_out);
+
+        assert!(!store.save("sid", stale), "a stale write must be refused");
+        assert!(
+            store.get("sid").expect("present").user_id.is_none(),
+            "a concurrent request must not resurrect a logged-out session"
+        );
+    }
+
+    #[test]
+    fn an_authoritative_save_wins_over_a_concurrent_newer_write() {
+        let store = store(16);
+        let mut signed_in = SessionData::new();
+        signed_in.user_id = Some("AKIAADMIN".to_string());
+        store.save("sid", signed_in);
+
+        let logout_snapshot = store.get("sid").expect("loaded");
+
+        let mut concurrent = store.get("sid").expect("loaded");
+        concurrent.push_flash("info", "still working");
+        assert!(store.save("sid", concurrent));
+
+        let mut logged_out = logout_snapshot;
+        logged_out.user_id = None;
+        store.save_authoritative("sid", logged_out);
+
+        assert!(store.get("sid").expect("present").user_id.is_none());
     }
 
     #[test]

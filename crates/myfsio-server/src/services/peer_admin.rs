@@ -589,7 +589,7 @@ impl PeerAdminClient {
         if self.allow_internal_endpoints {
             return Ok(());
         }
-        crate::handlers::ui_api::guard_external_endpoint_async(endpoint)
+        crate::services::endpoint_guard::guard_external_endpoint_async(endpoint)
             .await
             .map_err(|reason| {
                 format!(

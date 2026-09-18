@@ -18,7 +18,13 @@ pub fn create_secret_file(path: &Path) -> io::Result<File> {
 pub fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = create_secret_file(path)?;
     file.write_all(contents)?;
-    file.flush()
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    match path.parent() {
+        Some(parent) => fsync_dir(parent),
+        None => Ok(()),
+    }
 }
 
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {
@@ -173,5 +179,16 @@ mod tests {
         restrict_secret_permissions(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn directory_fsync_and_permission_tightening_are_no_ops_off_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, b"material").unwrap();
+        assert!(fsync_dir(dir.path()).is_ok());
+        assert!(restrict_secret_permissions(&path).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), b"material");
     }
 }

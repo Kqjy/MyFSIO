@@ -223,6 +223,17 @@ sudo ./scripts/install.sh --binary ./target/release/myfsio-server
 
 The installer copies the binary into `/opt/myfsio/myfsio`, writes `/opt/myfsio/myfsio.env`, and can register a `myfsio.service` unit.
 
+## Platform support
+
+Linux is the production target. It is the only platform with the full durability guarantees: directory fsync backs the rename namespace, and secret-bearing files (`iam.json` and its backups, `.secret`, `.connections_key`, `connections.json`, `kms_master.key`, `kms_keys.json`, `master.key`) are created owner-only (`0600`).
+
+Windows and macOS build and pass the test suite and are supported for development and evaluation. On Windows two guarantees are reduced:
+
+- Directory fsync is a no-op, so rename-namespace durability falls back to NTFS journaling. File contents are still fsynced before a PUT is acknowledged.
+- Secret-permission tightening is a no-op; secret files inherit the ACL of the directory that holds them. Restrict the ACL on the data directory yourself.
+
+The server logs a single warning about both at startup on non-Unix platforms. See [Credential and secret files](docs.md#credential-and-secret-files) and [Durability model](docs.md#durability-model) in `docs.md`.
+
 ## Testing
 
 Run the Rust test suite from the workspace:

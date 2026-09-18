@@ -95,11 +95,18 @@ If you are running a release build instead of `cargo run`, replace the `cargo ru
 At startup, the server tries to load environment files from these locations when they exist:
 
 1. `/opt/myfsio/myfsio.env`
-2. `.env` in the current directory
-3. `myfsio.env` in the current directory
-4. `.env` and `myfsio.env` in a few parent directories
+2. `.env` and `myfsio.env` in a few parent directories, most distant first
+3. `.env` in the current directory
+4. `myfsio.env` in the current directory
 
 That makes local development and systemd installs behave consistently.
+
+Precedence is explicit: **variables already set in the process environment always win**. Anything a
+file would have changed is restored afterwards, and the ignored names are listed on stderr at
+startup. Among the files themselves, the nearest one wins — a file in the current directory
+overrides one in a parent directory, which overrides `/opt/myfsio/myfsio.env`. A stray `.env` in a
+parent directory can therefore no longer replace `SECRET_KEY`, `STORAGE_ROOT`, or a security switch
+that the systemd unit or container set explicitly.
 
 ## 6. Verified Configuration Reference
 
@@ -170,6 +177,9 @@ The web UI uses 1024-byte binary units consistently and labels them `KiB`, `MiB`
 - The generated secret is only echoed when it was generated. The first-run banner still prints the access key and the file location, but when `ADMIN_SECRET_KEY` supplied the value the secret line reads `(from ADMIN_SECRET_KEY)` rather than repeating the secret to stdout and the console scrollback.
 - The server generates its own `.secret` when one is needed. Previously only the Linux installer created `.myfsio.sys/config/.secret`, so a bare `myfsio-server serve` without `SECRET_KEY` ran with no secret at all and stored IAM credentials as plaintext. The resolution path now generates and persists a random 32-byte base64 secret when the environment variable is unset and the file is missing or empty, and reuses it afterwards. If the secret cannot be persisted the server keeps running without one rather than encrypting against a key that would be lost on restart. The placeholder `dev-secret-key` is rejected from both sources; a `.secret` containing it is left on disk untouched and logged as a warning, so deleting the file is all that is needed to get a real one generated.
 - Writes to secret files are atomic. `iam.json`, `connections.json`, `.connections_key`, `kms_keys.json`, and a generated `.secret` are all written to a uniquely named temp file in the same directory, fsynced, renamed into place, and followed by a parent-directory fsync on Unix, so a crash mid-write cannot truncate a credential or key store. `connections.json` previously used a single fixed temp name, which could collide between concurrent saves.
+- A reload that cannot produce a valid configuration revokes the cached credentials instead of keeping them. If `iam.json` is deleted, becomes unparseable, is encrypted but undecryptable, or is encrypted with no `SECRET_KEY` configured, the in-memory credential maps are cleared and every request is rejected until a valid configuration is readable again. A transient read error (a permission blip, a rename race) keeps the cache for a 10-second grace window and then fails closed the same way. Previously any of these failures returned early, leaving the last good snapshot in memory, so credentials revoked by deleting or replacing the file kept authenticating until a valid reload or a restart.
+- Newly created encryption and KMS master keys are fsynced before use. Both `kms_master.key` and `master.key` are flushed, `sync_all`ed, and followed by a parent-directory fsync on Unix, so a power loss right after first creation cannot leave objects encrypted under a key that never reached the disk.
+- An unusable `.connections_key` is preserved, never overwritten. Key material that is not valid 32-byte base64 is renamed to `.connections_key.corrupt-<timestamp>` before a replacement is generated, so the original can be restored to recover existing connection secrets. A key file that cannot be read at all (a permission error) is left completely alone and the process falls back to an in-memory key for the session rather than replacing the file on disk.
 - Secret-bearing files are created owner-only (`0600`) on Unix: `iam.json` and its `.bak-...` backups, `.myfsio.sys/keys/kms_master.key`, `.myfsio.sys/keys/kms_keys.json`, `.myfsio.sys/keys/master.key`, `.myfsio.sys/config/.connections_key`, and `.myfsio.sys/config/connections.json`. Existing `kms_master.key`, `master.key`, `.connections_key`, and `.secret` files are tightened to `0600` best-effort when they are read, so deployments created before this change are corrected on the next start. On Windows the permission step is a no-op and files inherit directory ACLs.
 
 ### Rate limiting
@@ -240,6 +250,12 @@ These limits gate S3 object data reads and writes only. Admin and UI requests, H
 | `METRICS_STORAGE_REFRESH_MINUTES` | `30` | Interval for refreshing total stored bytes in system metrics; minimum 5 |
 
 ### Replication and site sync
+
+Replication rules live in `.myfsio.sys/config/replication_rules.json` and are created through the web UI's Replication tab or the management API, because a rule names a **remote connection** (endpoint plus credentials) and not just a bucket. The standard S3 subresource reflects that:
+
+- `PUT /<bucket>?replication` returns `501 NotImplemented`. A `ReplicationConfiguration` destination names only a bucket ARN, which cannot identify which configured connection to replicate through. Earlier releases accepted the XML with `200 OK` and stored it in the bucket configuration where nothing ever read it, so replication was reported as enabled while nothing replicated.
+- `GET /<bucket>?replication` renders the rule that is **actually in effect**, or `ReplicationConfigurationNotFoundError` when nothing is replicating. It no longer echoes back a stored blob that had no bearing on what the engine was doing.
+- `DELETE /<bucket>?replication` deletes the live rule, so it genuinely stops replication for the bucket. Earlier releases returned `204` while a UI-created rule kept replicating.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -388,6 +404,8 @@ The target site mounts a parallel route set under `/myfsio/admin/peer/`:
 
 These accept **only** peer principals carrying valid attestation. Each request is dedup'd by `(origin_site_id, idempotency_key)` for `RELAY_IDEMPOTENCY_TTL_SECONDS`; replays return the cached response with header `x-myfsio-idempotent-replay: true`. Attestation failure is `403`; `MYFSIO_CLUSTER_PSK` not configured returns `503`.
 
+> **Trust boundary.** An inbound relay request that passes both attestations is executed as a **synthetic admin of the destination node**: the `x-myfsio-admin-user` header names the origin admin for the audit log only, and is never resolved against the destination's own IAM. There is no per-user proof — `x-myfsio-admin-attest` is HMAC'd with the same cluster PSK as `x-myfsio-cluster-attest` — so it grants no privilege separation between admins of the origin site. In practice, **a peer credential plus `MYFSIO_CLUSTER_PSK` is equivalent to full IAM control of every node in the cluster**, including minting an access key for a destination admin via `POST /myfsio/admin/peer/iam/users/{admin}/access-keys`. Self-scoping of delegated `iam:*` grants applies to direct admin-API callers, not to this path. Treat the PSK as a cluster-wide root secret: distribute it only to nodes you fully trust, keep peer endpoints on HTTPS (`PEER_REQUIRE_HTTPS=true`), and rotate it whenever a node or peer credential is decommissioned.
+
 > **Idempotent replay caveat.** The cached response is returned verbatim and the underlying action is **not** re-executed against current state. If something else mutated the target between the original call and a replay, the replay body still reflects the *original* outcome — not the live state. Treat the replay body as proof the action was applied at least once, not as a fresh status read. Use a follow-up `GET` if you need to confirm current state. Reusing the same key with a different method/path/body returns `409 InvalidArgument`.
 
 #### Audit log
@@ -473,6 +491,10 @@ A corrupt `_index.json` or sidecar now **fails closed**: affected objects return
 
 ### Durability model
 
+**Cluster configuration writes are atomic and acknowledged only after they land.** Replication rules, the site registry, website-domain mappings, the site-sync cursor and stats, per-bucket access-logging configuration, metrics snapshots and lifecycle history are written through `atomic_write_file` / `atomic_write_secret_file` (unique temp file, `write_all`, `sync_all`, rename, parent directory fsync) and their results are propagated instead of discarded; a mutator whose write fails rolls back its in-memory change so memory and disk cannot diverge. Previously each of these used `std::fs::write`, which truncates the live file before writing, with the result discarded — a disk-full write, an interruption, or two replication workers rewriting the rules file concurrently could leave unparseable JSON while every caller was told the change succeeded.
+
+On the read side these stores no longer treat "damaged" as "empty". A missing file still loads as an empty store silently (unchanged first-run behavior), but a file that exists and cannot be read or parsed is logged at `error!` and preserved as `<name>.corrupt-<timestamp>` instead of being silently replaced by defaults and then overwritten by the next write. Before this, a truncated `replication_rules.json` meant every replication rule in the cluster vanished at the next restart with the UI reporting "no rules configured" as though none had ever existed; the site registry and website-domain stores lost every peer and every domain mapping the same way.
+
 MyFSIO has an explicit durability deviation from Amazon S3 compatibility. PUT object file contents are fsynced before MyFSIO acknowledges the request. Namespace durability for the rename and directory entry remains platform-dependent. On Windows, directory fsync is a no-op, so the namespace portion of that durability sequence does not receive the same guarantee as it does on platforms that support directory fsync.
 
 A completed multipart upload in the default `segments` layout receives the same treatment: every part file is fsynced when it is uploaded, and the complete fsyncs the segment files' directory entries, the new segment directory's own entry, and the sparse stub before acknowledging. A failed fsync fails the CompleteMultipartUpload (which remains retryable) rather than acknowledging an upload whose namespace entries may not survive power loss.
@@ -505,6 +527,8 @@ Current Rust behavior:
 - Default interval is 3600 seconds
 - Evaluates bucket lifecycle configuration and applies expiration and multipart abort rules
 - A `Days` expiration rule expires objects older than that many days. A `Date` expiration rule does nothing until the date has passed, and from then on expires every object matching the rule filter regardless of age, as AWS does. Previously the configured date was used directly as the age cutoff, so a rule dated in the future deleted every matching object on the next cycle.
+- Expiration pages through the whole bucket, 1000 keys per listing page, until the rule's prefix is exhausted. It previously examined a single unpaginated page, so in a bucket with more matching keys than one page the objects past it could never expire.
+- A lifecycle expiration on a bucket with an active replication rule enqueues the delete for replication, the same as a client-issued DeleteObject. Previously the service wrote straight to storage, so the object stayed alive on the replication target forever.
 
 At the moment, the interval is hardcoded through `LifecycleConfig::default()` rather than exposed as an environment variable.
 
@@ -605,6 +629,8 @@ Snapshots are stored in `data/.myfsio.sys/config/operation_metrics.json`.
 
 Empty operation windows are not persisted. The Metrics UI zero-fills gaps in charts, and `/ui/metrics/operations/error-summary?hours=1|6|24` merges the live window with persisted snapshots so S3 API error codes remain visible after snapshot rollover. Recent in-memory error details are exposed at `/ui/metrics/operations/errors?limit=N&code=X&bucket=Y`.
 
+The Operations tab splits errors into server (`5xx`) and client (`4xx`) counts rather than a single total, because a 4xx is usually a caller problem while a 5xx is the server's. Its Recent errors feed pulls the whole 256-entry ring buffer and groups repeated failures client-side by error code, method, bucket and status, so one misbehaving client collapses into a single expandable row carrying its repeat count, first/last seen, latest key and request ID; a toggle switches back to ungrouped individual events, and severity buttons plus per-code chips filter both views. Above it, a request-health bar renders one colored tick per operation snapshot — green for clean, amber when only 4xx appeared, red for any 5xx, neutral for windows with no traffic — over a selectable 1h, 6h or 24h range, merging adjacent snapshots into at most 96 ticks on the longer ranges and appending the live window as the final tick.
+
 ## 9. Encryption and KMS
 
 Object encryption and built-in KMS are both optional.
@@ -615,12 +641,18 @@ ENCRYPTION_ENABLED=true KMS_ENABLED=true cargo run -p myfsio-server --
 
 Notes:
 
+- **Configuration is validated on every start, not only under `--check-config`.** `serve` runs the same validation and exits non-zero on any `CRITICAL:` issue, logging each one. Previously validation ran only when the operator explicitly asked for it, so a critical misconfiguration — a zero `ENCRYPTION_CHUNK_SIZE_BYTES`, a zero `KMS_GENERATE_DATA_KEY_MIN_BYTES` (which made `GenerateDataKey` return a zero-length key with `200 OK`), inverted presigned-URL or KMS min/max bounds, identical API and UI bind addresses, a non-positive `GC_INTERVAL_HOURS`, a negative `BUCKET_CONFIG_CACHE_TTL_SECONDS`, or an uncreatable storage root or IAM config directory — started a server that either crashed later or served requests wrongly. Warnings and informational issues remain `--check-config`-only.
 - If `ENCRYPTION_ENABLED=true` and `SECRET_KEY` is not configured, the server still starts, but `--check-config` warns that secure-at-rest config encryption is unavailable.
 - If `ENCRYPTION_ENABLED=true` or `KMS_ENABLED=true` and the corresponding subsystem fails to initialize, the server logs the reason and exits non-zero instead of starting. Starting without it would silently store objects unencrypted while still returning `200 OK`.
 - A bucket configured with default encryption fails its writes with `InternalError` if the encryption service is unavailable or its stored configuration cannot be parsed, rather than falling back to writing plaintext.
 - KMS and the object encryption master key live under `data/.myfsio.sys/keys/`.
 - Encrypted PUTs stream the client body straight through the encryptor into a temp file and commit the ciphertext atomically; plaintext is never installed at the live key path. Encrypted GETs (full, ranged, and SSE-C multipart) decrypt chunk-by-chunk while streaming the response instead of materializing a decrypted temp file. Objects written by older builds without `x-amz-encryption-plaintext-size` metadata fall back to temp-file decryption.
 - One remaining non-atomic window: SSE-S3/SSE-KMS multipart uploads encrypt after CompleteMultipartUpload commits the assembled object; a crash inside that window can leave the assembled plaintext live. Per-part SSE-C multipart uploads are not affected.
+- **Every reader that moves object bytes decrypts first.** Paths that read the physical backing file used to hand the stored ciphertext to a consumer that treated it as object content:
+  - `UploadPartCopy` from an encrypted source now decrypts the source (requiring the `x-amz-copy-source-server-side-encryption-customer-*` headers for an SSE-C source, exactly as `CopyObject` does) and stages plaintext as the part, so `x-amz-copy-source-range` is resolved against **plaintext** offsets and the part ETag is the plaintext MD5. Previously the raw ciphertext was copied byte-for-byte: the completed object's body was ciphertext under a plausible ETag, an encrypted destination encrypted it a second time, and the SSE-C "customer key required to read this object" gate could be bypassed by copying the stored bytes into an object with the SSE-C marker stripped.
+  - Replication decrypts an SSE-S3/SSE-KMS source before uploading it. Sources it cannot decrypt — SSE-C (the server holds no key), an encrypted object in the segments layout, or any encrypted object when the encryption service is unavailable — are **refused** and recorded as a replication failure with `EncryptedSourceUnsupported` rather than shipping ciphertext to the target. Previously an encrypted object replicated as raw ciphertext with the nonce and wrapped data key stripped, producing a replica nobody could decrypt, and the up-to-date check compared the plaintext MD5 against the target's ciphertext MD5 so every reconcile pass re-uploaded the whole object.
+  - Bidirectional site sync applies the destination bucket's default encryption to objects it pulls from a peer, through the same resolution the normal PUT path uses. A pull into a bucket configured for default encryption when the encryption service is unavailable fails rather than landing plaintext. Previously the pull wrote straight to storage and bypassed bucket encryption entirely.
+- `ENCRYPTION_CHUNK_SIZE_BYTES=0` is refused at the encryption boundary rather than silently producing empty objects. With a zero chunk size the encrypting reader allocated a zero-length buffer, reported EOF without ever reading the request body, and committed a 0-byte object with `200 OK` and the MD5 of the empty string while the client believed its upload succeeded. All three encrypt entry points now return an error, and `serve` refuses to start on the misconfiguration (see below).
 
 ### Write integrity and conditional writes
 
@@ -628,6 +660,7 @@ Notes:
 - Aws-chunked uploads honor `x-amz-trailer`, require every declared trailer, and verify checksum trailers against the decoded body. Truncated trailer sections return `IncompleteBody`; malformed or mismatched trailers return `InvalidRequest`.
 - Streaming SigV4 validates each chunk signature in sequence, including the final zero-length chunk. `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` also validates the signed canonical trailer block. `STREAMING-UNSIGNED-PAYLOAD-TRAILER` performs checksum-trailer verification without chunk signatures.
 - GET and HEAD return stored `x-amz-checksum-*` headers only when `x-amz-checksum-mode: ENABLED` is requested. GetObjectAttributes returns its checksum element unconditionally.
+- GetObjectAttributes honors `versionId` and answers about that version, echoing `x-amz-version-id`. `ObjectSize` reports the plaintext size, so an encrypted object no longer reports the size of its ciphertext on disk.
 - `If-Match` / `If-None-Match` / `If-Unmodified-Since` / `If-Modified-Since` on PutObject and CompleteMultipartUpload are re-evaluated inside the storage commit lock, so concurrent conditional writes cannot both succeed (`412 PreconditionFailed` on conflict).
 - Object lock (retention and legal hold) is enforced at the storage commit for destructive operations: unversioned overwrite/delete, suspended-versioning null-version replacement, and version deletion. This covers internal writers (replication, site sync, lifecycle) in addition to the S3 API.
 - Bucket quotas are checked under a per-bucket commit lock, so concurrent uploads to different keys cannot race past the limit. When the listing index and its counters are live, quota projection and bucket statistics are O(1) and perform no recursive directory walk. If the index is disabled, unavailable, dirty, or rebuilding, MyFSIO falls back to the existing recursive statistics walk and its 60-second cache. A versioned overwrite adds a stored copy because the prior live object becomes an archived version. With suspended versioning, a non-null live version remains counted when archived, while the replaced live null version and any archived null version purged by the commit are removed from the projection. Creating a delete marker frees no quota; purging the stored object version frees its bytes and object count.
@@ -765,13 +798,15 @@ Select now works on SSE-S3 and SSE-KMS objects for CSV and JSON input — the sc
   Bucket and object selectors are now each resolved by one parser shared between the middleware and every dispatcher, so the two layers cannot disagree. A request carrying more than one recognized selector is rejected with `InvalidArgument` at authorization time, before the operation is dispatched. A selector that the dispatcher for that method does not implement returns `MethodNotAllowed` rather than falling through to the method's default operation — notably `PUT /<bucket>?location`, `?policyStatus`, `?versions`, `?uploads` and `?delete`, which previously **created the bucket**; `GET /<bucket>?delete`, which previously returned an object listing; `POST /<bucket>?<anything but delete>`; and `PUT`/`DELETE` of an object with `?attributes`, `?select` or `?uploads`. When a selector is not implemented for the requested method, authorization uses that method's default action, so it is never weaker than what the request could perform.
 
   Two bucket selectors that authorization did not previously recognize at all now have their own IAM actions instead of falling through to the method default (`create_bucket` on PUT): `?ownershipControls` requires `ownership_controls` and `?publicAccessBlock` requires `public_access_block`. Grant these explicitly to any non-admin principal that manages those settings.
+- **CompleteMultipartUpload validates the order the client sent.** The request parser no longer sorts `<Part>` elements before the ascending-order check, so a body listing parts `2, 1` returns `InvalidPartOrder` as AWS does instead of being silently reordered and completed. Duplicate part numbers were already rejected.
+- **Web UI sessions cannot be resurrected by a concurrent request.** Each stored session carries a revision; a request that saves a snapshot older than what is stored is discarded rather than overwriting it, and signing out saves authoritatively so it always wins. Previously every request blindly wrote its own snapshot back at the end, so an older in-flight request finishing after a sign-out restored the authenticated session under the same session id.
 - **Governance-retention bypass is a permission, not a header.** `x-amz-bypass-governance-retention: true` is only honored for an admin principal or for a principal granted the `bypass_governance` IAM action (or `s3:BypassGovernanceRetention` in a bucket policy) on the bucket and key being modified. An unauthorized caller, including an anonymous one on a public bucket, is treated as if the header were absent: a `GOVERNANCE`-locked object then refuses the delete, overwrite or retention change, while unlocked objects are unaffected. This is enforced on `DeleteObject`, versioned deletes, `POST /<bucket>?delete` (per key, so a prefix-scoped policy applies key by key), `PutObject`, `CopyObject`, POST form uploads, `CompleteMultipartUpload` and `PutObjectRetention`. `COMPLIANCE` retention remains absolute and no permission overrides it. The web UI never bypasses governance retention.
 - **A narrow S3 action grant no longer authorizes its whole method class.** Authorization now carries the exact S3 action a request maps to (for example `s3:GetObjectTagging` for `GET /<bucket>/<key>?tagging`, `s3:GetObjectAcl` for `?acl`, `s3:PutObjectTagging` for a tagging write) and matches it against the policy's `Action` when the policy names a specific `s3:*` action. Previously every action was first collapsed to a coarse internal verb (`read`/`write`/`delete`/…), so a policy granting only `s3:GetObjectTagging` also authorized `GetObject`, `GetObjectAcl` and every other read-class operation on the same resource. A bucket policy that names an exact action is now scoped to that action; wildcards (`s3:*`, `s3:Get*`) and the coarse internal names still behave as before, and IAM user policies (which grant coarse actions) are unchanged. Method-family aliases are treated as equivalent to their data action — `s3:HeadObject`≡`s3:GetObject`, `s3:UploadPart`/`s3:CopyObject`≡`s3:PutObject`, `s3:GetObjectVersion`≡`s3:GetObject`, `s3:ListParts`≡`s3:ListMultipartUploadParts` — so a `GetObject` grant still covers the HEAD and multipart-read paths as AWS does.
 - **A prefix-scoped wildcard policy is no longer an admin policy.** A principal is admin only when a policy grants `"bucket": "*"` with `"actions": ["*"]` and an unrestricted prefix (`"*"` or empty). Previously the prefix was ignored, so `{"bucket": "*", "actions": ["*"], "prefix": "home/"}` (a legitimate "everything under this prefix, in any bucket" grant) produced an admin principal that skipped every later check, including its own prefix scoping and admin-only APIs. Such a principal is now evaluated by the normal policy loop and stays confined to its prefix.
 - **Bucket-policy resource keys match case-sensitively.** S3 object keys are case-sensitive, so the key segment of a `Resource` ARN is compared case-sensitively: `arn:aws:s3:::b/public/*` matches `public/x` but not `PUBLIC/secret`. The bucket segment stays case-insensitive, since a policy may spell the bucket name in mixed case, and `Action` matching stays case-insensitive as AWS does.
 - **Case-aliased object keys fail closed on a case-insensitive filesystem.** S3 keys are case-sensitive, but Windows/NTFS (and macOS by default) resolve paths case-insensitively, so `temp/secret` and `TEMP/secret` would name the same file on disk while a prefix-scoped policy treats them as distinct — a principal confined to `temp/` could otherwise read or overwrite another principal's `TEMP/secret`. On startup the backend probes whether its storage filesystem is case-insensitive; when it is, object reads, metadata reads and mutations, object-lock updates, archived-version operations, and prefix-directory listings verify that the real on-disk casing of the key matches the request and return `NoSuchKey` when it does not, and a `PutObject`/copy/multipart-complete whose key differs only by case from existing content is rejected with `InvalidKey` rather than silently overwriting it. On a case-sensitive filesystem (typical Linux `ext4`/`xfs`) the probe finds nothing to guard and the checks are skipped.
 - **Virtual-host addressing is resolved before routing, preserving the subresource.** When a request's `Host` header names an existing bucket (`<bucket>.<host>`), the URI is rewritten to path style (`/<key>` ⇒ `/<bucket>/<key>`) in one middleware ahead of routing, carrying the original query string with it. Previously the rewrite happened partly in per-handler fallbacks that dropped the query and re-dispatched with a cleared subresource, so a virtual-host request could be authorized as one operation and executed as another, and a multi-segment key was split so the first path segment was treated as the bucket. Registered website-hosting domains (when `WEBSITE_HOSTING_ENABLED`) keep GET and HEAD requests on the website path instead of rewriting them.
-- **Bucket policies fail closed on unsupported clauses.** `Condition`, `NotPrincipal`, `NotAction`, and `NotResource` are not evaluated by this server. `PutBucketPolicy` (and the UI policy editor) now reject statements containing them with `InvalidArgument`. For policies already stored, a matching `Allow` carrying such a clause grants nothing, and a `Deny` carrying one denies. Previously these clauses were silently ignored, so a restrictive-looking policy could be permissive.
+- **Bucket policies evaluate `Condition`, `NotPrincipal`, `NotAction`, and `NotResource`.** Earlier releases rejected these clauses on `PutBucketPolicy` and failed closed on stored ones. They are now evaluated with AWS semantics (see [Bucket Policy Reference](#17-bucket-policy-reference)). `PutBucketPolicy` and the UI editor validate the whole document — unknown statement fields, unknown condition operators, malformed CIDRs, resources that name another bucket, both `Action` and `NotAction` in one statement, or a document over 20 KB are rejected with `400 MalformedPolicy`. A stored statement whose condition the server cannot evaluate (unknown operator) never matches.
 - **Presigned URLs must sign their `x-amz-*` headers.** A presigned request carrying an `x-amz-*` header that is not listed in `X-Amz-SignedHeaders` is rejected with `SignatureDoesNotMatch`. This prevents a URL bearer from adding `x-amz-copy-source`, `x-amz-acl`, `x-amz-bypass-governance-retention`, SSE, or user-metadata headers the signer never authorized. Only `x-amz-content-sha256`, `x-amz-date`, and `x-amz-decoded-content-length` are exempt, since they affect body framing only. SDKs that attach unsigned checksum headers to presigned PUTs will need to include them in the signature, as they already must against AWS.
 - **Reserved metadata keys are dropped.** User metadata keys beginning with `__` or `x-amz-` collide with internal storage and encryption metadata and are discarded on PutObject, CopyObject, POST form uploads, UI multipart initiation, and objects pulled from a peer. Ordinary `x-amz-meta-<name>` metadata is unaffected.
 - **A ranged GET of an SSE-C object validates the customer key like any other read.** `GET` with a `Range` header (or `partNumber`) on an SSE-C object returns `400 InvalidRequest` when the `x-amz-server-side-encryption-customer-*` headers are absent and `403 AccessDenied` when the supplied key does not match the one the object was written with — the same responses the whole-object `GET` has always returned. Previously only the whole-object path checked, so a ranged read failed inside the decryptor and surfaced as `500 InternalError` carrying an internal error string.
@@ -822,25 +857,31 @@ For a route-level view, inspect:
 
 ## 16. IAM Policy Reference
 
-IAM users and their policies live in the file named by `IAM_CONFIG` (default `.myfsio.sys/config/iam.json`) and are managed from the UI at `/ui/iam` or the `/myfsio/admin/iam/...` API. Each user carries a list of policy statements; every statement grants (never denies) a set of actions on a bucket scope:
+IAM users and their policies live in the file named by `IAM_CONFIG` (default `.myfsio.sys/config/iam.json`) and are managed from the UI at `/ui/iam` or the `/myfsio/admin/iam/...` API. Each user carries a list of policy statements; every statement grants or denies a set of actions on a bucket scope:
 
 ```json
 {
   "bucket": "my-bucket",
   "prefix": "reports/*",
-  "actions": ["list", "read", "write"]
+  "actions": ["list", "read", "write"],
+  "effect": "Allow",
+  "condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
 }
 ```
 
-- `bucket` — an exact bucket name, or `"*"` for every bucket. Partial wildcards (`my-*`) are not supported.
-- `prefix` — object-key scope for object-level actions. Empty or `"*"` means all keys; anything else is a leading-prefix match (a trailing `*` is allowed and ignored, so `reports/` and `reports/*` are equivalent). The prefix does not constrain bucket-level actions.
-- `actions` — the action names below, `"*"` for everything, or a namespace wildcard such as `iam:*` / `system:*`.
+- `bucket` — an exact bucket name, `"*"` for every bucket, or a glob (`logs-*`, `tenant-?-data`; `*` and `?` only, matched case-insensitively).
+- `prefix` — object-key scope for object-level actions. Empty or `"*"` means all keys; a plain prefix with an optional trailing `*` is a leading-prefix match (`reports/` ≡ `reports/*`); a value with a `*` or `?` elsewhere (`*/public/*`, `img-??.png`) is a case-sensitive glob over the whole key. The prefix does not constrain bucket-level actions.
+- `actions` — the action names below, `"*"` for everything, a namespace wildcard such as `iam:*` / `system:*`, or AWS-style names (`s3:GetObject`, `s3:Get*`). An exact `s3:` name grants only that operation (plus its method aliases — `s3:GetObject` covers HEAD and `GetObjectVersion`); coarse names grant their whole class.
+- `effect` — `Allow` (default, omitted when saved) or `Deny`. An explicit Deny wins over every Allow, exactly as in AWS.
+- `condition` — optional AWS-style condition block, evaluated with the same operators and keys as bucket policies (see [Conditions](#conditions)). A statement whose condition is false is skipped, whether it is an Allow or a Deny.
 
-Authorization is default-deny: a request is allowed if the user is enabled, not expired, and **any** statement matches the bucket, the action, and (for object operations) the key. Grants from a bucket policy or ACL are evaluated in addition to IAM — an explicit bucket-policy `Deny` always wins.
+Authorization is default-deny: a request is allowed if the user is enabled, not expired, no matching `Deny` statement applies, and **any** `Allow` statement matches the bucket, the action, the key (for object operations), and its condition. Grants from a bucket policy or ACL are evaluated in addition to IAM — an explicit bucket-policy `Deny` always wins. Statements are validated on save (UI and admin API): an unknown `effect` or an invalid `condition` is rejected.
+
+Web UI requests carry only principal-derived condition keys (`aws:username`, `aws:userid`, `aws:CurrentTime`, …), not request-derived ones like `aws:SourceIp`, so an Allow conditioned on `aws:SourceIp` grants nothing through the UI and a `NotIpAddress` Deny denies there.
 
 ### Admin
 
-A user is an **admin** exactly when one statement is `{"bucket": "*", "actions": ["*"]}` with an unrestricted prefix (`"*"` or empty). Admins skip all further authorization and are the only principals who can use the management-only UI/admin surfaces: IAM administration, connections, sites and peer credentials, website domains, replication wizards, metrics settings, and the audit log. A policy that merely lists every named action is *not* an admin policy — it grants exactly those actions and nothing else.
+A user is an **admin** exactly when one statement is `{"bucket": "*", "actions": ["*"]}` with an unrestricted prefix (`"*"` or empty), no `condition`, and the user has no `Deny` statements at all. Admins skip all further authorization and are the only principals who can use the management-only UI/admin surfaces: IAM administration, connections, sites and peer credentials, website domains, replication wizards, metrics settings, and the audit log. A policy that merely lists every named action is *not* an admin policy — it grants exactly those actions and nothing else; adding a `Deny` or a `condition` to a full grant turns the user into a regular (if broadly permitted) principal whose requests are evaluated statement by statement.
 
 ### Data actions
 
@@ -860,7 +901,7 @@ Each bucket subresource requires its own action: `share` (ACLs, `?acl`), `policy
 
 ### Namespaced actions
 
-- `iam:<op>` — delegated IAM reads/maintenance on the admin API: `iam:list_users`, `iam:get_user`, `iam:get_policy`, `iam:create_key`, `iam:delete_key`, `iam:disable_user`. `iam:*` grants the namespace.
+- `iam:<op>` — delegated IAM reads/maintenance on the admin API: `iam:list_users`, `iam:get_user`, `iam:get_policy`, `iam:create_key`, `iam:delete_key`, `iam:disable_user`. `iam:*` grants the namespace. The three **mutating** actions (`iam:create_key`, `iam:delete_key`, `iam:disable_user`, which also covers enable) are **self-scoped for non-admins**: the grant lets the holder manage their own credentials and nothing else. A non-admin targeting another user gets `403 Not permitted to manage this user`, and the refusal is uniform so it cannot be used to probe which user ids exist. Admins are unaffected and may still target any user. Without this scoping a delegated `iam:create_key` was full privilege escalation: the holder could mint an access key for the admin user, receive its secret in the `201` body, and inherit the admin's policies.
 - `system:<op>` — maintenance endpoints and their UI buttons: `system:gc_read`, `system:gc_run`, `system:integrity_read`, `system:integrity_run`. `system:*` grants the namespace.
 
 Namespaced and system-level actions are evaluated without a bucket, so they must appear in a statement whose `bucket` is `"*"` (statement prefix is ignored for them).
@@ -869,4 +910,106 @@ Namespaced and system-level actions are evaluated without a bucket, so they must
 
 The UI enforces the same actions as the S3 API for bucket-scoped operations: creating and deleting buckets (`create_bucket` / `delete_bucket`) and every bucket-configuration card on the bucket detail page — versioning, encryption (still requires `ENCRYPTION_ENABLED`), quota, website, bucket policy, ACLs (`share`), CORS, lifecycle, and the replication tab (`replication`). The corresponding buttons, forms, and tabs are hidden or shown read-only when the permission is absent, and the endpoints themselves return `403` with the missing action named. Earlier releases required full admin for all of these UI surfaces even when the IAM policy granted the actions; the S3 API honored the policy all along.
 
+The bucket detail page is gated by the same visibility check the bucket overview uses: a signed-in principal who cannot list a bucket is redirected back to `/ui/buckets` instead of rendering it. Previously only the overview filtered the bucket list, so any signed-in user who guessed or knew a bucket name could open its detail page and read usage, quotas, versioning and encryption state, multipart-upload metadata, and the replication target — object bodies and policy editing were gated separately and were never exposed.
+
 Server-wide management surfaces remain admin-only regardless of policy actions: IAM administration pages, saved connections, sites and peer credentials, website-domain mappings, metrics settings, the replication wizard, and the audit log.
+
+## 17. Bucket Policy Reference
+
+Bucket policies use the AWS JSON policy language and are set with `PUT /<bucket>?policy`, the UI policy editor, or the Private/Public presets. A request is allowed when IAM allows it **or** a bucket-policy statement allows it **or** a bucket ACL grant covers it — unless any bucket-policy statement explicitly denies it, in which case the request fails with `AccessDenied` regardless of IAM (admin principals included, if the Deny's `Principal` matches them).
+
+### Supported elements
+
+| Element | Notes |
+|---------|-------|
+| `Version` | Optional; `2012-10-17` or `2008-10-17` |
+| `Id`, `Sid` | Optional, free-form |
+| `Effect` | `Allow` or `Deny` (required) |
+| `Principal` / `NotPrincipal` | `"*"`, `{"AWS": "*"}`, an access key, a user id (`u-…`), or an IAM-style ARN `arn:aws:iam::<any-account>:user/<name>` where `<name>` matches the user id, display name, or access key (globs allowed). `arn:aws:iam::<any-account>:root` matches every authenticated user. `{"CanonicalUser": …}` is an alias for the same forms; `Service` and `Federated` principals are rejected on save. Exactly one of the two is required |
+| `Action` / `NotAction` | `*`, `s3:*`, exact S3 actions (`s3:GetObject`), globs (`s3:Get*`), or the coarse internal names (`read`, `write`, …). Exact names are scoped to that operation plus its method aliases. Exactly one of the two is required |
+| `Resource` / `NotResource` | `"*"`, `arn:aws:s3:::<bucket>` for bucket-level operations, or `arn:aws:s3:::<bucket>/<key-pattern>` for object-level ones. The bucket segment must name the policy's own bucket (globs accepted); the key segment is a case-sensitive glob. Policy variables (`${aws:username}`, `${aws:userid}`, `${*}`, `${?}`, `${$}`) are substituted. Exactly one of the two is required |
+| `Condition` | See below. Optional |
+
+Anything else — unknown statement fields, `Principal` types other than the ones above, resources outside the bucket, a document over 20 KB — is rejected on `PutBucketPolicy` with `400 MalformedPolicy`.
+
+### Conditions
+
+A `Condition` block is a map of operator → condition key → value(s). All operators must be true; within an operator all keys must match; within a key, a positive operator matches if **any** listed value matches and a negated operator (`StringNotEquals`, `NotIpAddress`, …) only if **none** do. A missing request key fails positive operators and satisfies negated ones; append `IfExists` to make a positive operator pass when the key is absent. Prefix an operator with `ForAnyValue:` / `ForAllValues:` for multi-valued keys (`aws:TagKeys`, `s3:RequestObjectTagKeys`). `Null` tests key presence (`"true"` = must be absent).
+
+A stored condition the evaluator cannot interpret (unknown operator, empty block, empty value list) makes a `Deny` statement deny and an `Allow` statement grant nothing; `PutBucketPolicy` rejects such documents up front. An unresolvable policy variable (for example `${aws:username}` on an anonymous request) makes the statement not match, for negated operators too.
+
+Operators: `StringEquals`, `StringNotEquals`, `StringEqualsIgnoreCase`, `StringNotEqualsIgnoreCase`, `StringLike`, `StringNotLike`, `NumericEquals` / `NotEquals` / `LessThan` / `LessThanEquals` / `GreaterThan` / `GreaterThanEquals`, `DateEquals` / `NotEquals` / `LessThan` / `LessThanEquals` / `GreaterThan` / `GreaterThanEquals` (RFC 3339 or epoch seconds), `Bool`, `BinaryEquals`, `IpAddress`, `NotIpAddress` (IPv4/IPv6 CIDR or single address; IPv4-mapped IPv6 is normalised), `ArnEquals`, `ArnLike`, `ArnNotEquals`, `ArnNotLike`, `Null`. Operator names are case-insensitive; an unknown operator is rejected on save and never matches if already stored.
+
+Condition keys populated per request (keys are case-insensitive):
+
+| Key | Value |
+|-----|-------|
+| `aws:SourceIp` | Client IP after `NUM_TRUSTED_PROXIES` resolution (`X-Forwarded-For` / `X-Real-IP` behind a trusted proxy, else the socket peer). Absent when unknown, so an `IpAddress` Allow grants nothing without a resolvable client IP |
+| `aws:SecureTransport` | `true` when the request arrived over TLS or, behind a trusted proxy, with `X-Forwarded-Proto: https`; otherwise `false` |
+| `aws:CurrentTime`, `aws:EpochTime` | Request time (RFC 3339 / epoch seconds) |
+| `aws:username`, `aws:userid`, `aws:PrincipalArn`, `aws:PrincipalType`, `aws:PrincipalAccount` | Display name, user id, `arn:aws:iam::myfsio:user/<user-id>`, `User` or `Anonymous`, `myfsio` |
+| `myfsio:accesskey` | Access key used to sign the request |
+| `aws:Referer`, `aws:UserAgent`, `aws:RequestedRegion` | Request headers / configured `AWS_REGION` |
+| `aws:TagKeys`, `aws:RequestTag/<key>`, `s3:RequestObjectTagKeys`, `s3:RequestObjectTag/<key>` | From the `x-amz-tagging` header on the request |
+| `s3:ExistingObjectTag/<key>` | Tags already stored on the target object (loaded only when a policy references the key; absent for a key that does not exist yet; a storage error while loading them fails the request with `AccessDenied`) |
+| `s3:prefix`, `s3:delimiter`, `s3:max-keys`, `s3:VersionId` | Query parameters of the request |
+| `s3:x-amz-*` | Every `x-amz-*` request header, e.g. `s3:x-amz-acl`, `s3:x-amz-server-side-encryption`, `s3:x-amz-copy-source`, `s3:x-amz-storage-class`, `s3:x-amz-metadata-directive` |
+| `s3:object-lock-mode`, `s3:object-lock-retain-until-date`, `s3:object-lock-legal-hold` | From the corresponding `x-amz-object-lock-*` headers |
+| `s3:authType`, `s3:signatureversion`, `s3:signatureAge` | `REST-HEADER` / `REST-QUERY-STRING`, `AWS4-HMAC-SHA256`, milliseconds since the signed `X-Amz-Date` |
+
+Condition keys that are not listed are simply absent. Requests made through the web UI carry only the principal and time keys.
+
+Both `aws:SourceIp` and `aws:SecureTransport` trust forwarding headers purely on `NUM_TRUSTED_PROXIES`. Only set it when clients cannot reach the server except through that proxy (bind `HOST` to the proxy's interface or firewall the port); a directly reachable server with `NUM_TRUSTED_PROXIES>0` lets any caller forge both keys.
+
+### Public detection
+
+`GET /<bucket>?policyStatus` and the UI treat a policy as public when an `Allow` statement names `Principal: "*"` (or uses `NotPrincipal`) without a condition that pins the caller — `aws:SourceIp`, `aws:userid`, `aws:username`, `aws:PrincipalArn`, `myfsio:accesskey`, and the other AWS source/principal keys, with a positive operator and a value other than `*` / `0.0.0.0/0`. A `Referer` or `SecureTransport` condition does not make a policy private.
+
+### Examples
+
+Allow a user to manage only their home prefix:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::myfsio:user/*"},
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::team",
+      "Condition": {"StringLike": {"s3:prefix": "home/${aws:username}/*"}}
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::myfsio:user/*"},
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::team/home/${aws:username}/*"
+    }
+  ]
+}
+```
+
+Public reads from an office network only, and refuse plaintext writes:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::assets/*",
+      "Condition": {"IpAddress": {"aws:SourceIp": ["203.0.113.0/24", "2001:db8::/32"]}}
+    },
+    {
+      "Effect": "Deny",
+      "Principal": "*",
+      "NotAction": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::assets", "arn:aws:s3:::assets/*"],
+      "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+    }
+  ]
+}
+```

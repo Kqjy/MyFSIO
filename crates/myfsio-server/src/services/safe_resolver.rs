@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use reqwest::dns::{Addrs, Name as ReqwestName, Resolve, Resolving};
 
-use crate::handlers::ui_api::reject_internal_ip;
+use crate::services::endpoint_guard::reject_internal_ip;
 
 #[derive(Clone, Debug)]
 pub struct SafeResolver {

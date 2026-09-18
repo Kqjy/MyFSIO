@@ -149,16 +149,22 @@ impl SystemMetricsService {
     }
 
     async fn save_history(&self) {
-        let history = self.history.read().await;
-        let data = json!({ "history": *history });
-        if let Some(parent) = self.history_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
-        let tmp = self.history_path.with_extension("json.tmp");
-        if std::fs::write(&tmp, serialized).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.history_path);
-        }
+        let serialized = {
+            let history = self.history.read().await;
+            let data = json!({ "history": *history });
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        };
+        let history_path = self.history_path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = history_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp = history_path.with_extension("json.tmp");
+            if std::fs::write(&tmp, serialized).is_ok() {
+                let _ = std::fs::rename(&tmp, &history_path);
+            }
+        })
+        .await;
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {

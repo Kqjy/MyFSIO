@@ -4,18 +4,24 @@ pub const S3_ACTION_TABLE: &[(&str, &str)] = &[
     ("s3:listbucketversions", "list"),
     ("s3:listmultipartuploads", "list"),
     ("s3:listparts", "list"),
+    ("s3:listbucketmultipartuploads", "list"),
+    ("s3:listmultipartuploadparts", "list"),
+    ("s3:getbucketlocation", "list"),
     ("s3:getobject", "read"),
     ("s3:getobjectversion", "read"),
     ("s3:getobjecttagging", "read"),
     ("s3:getobjectversiontagging", "read"),
     ("s3:getobjectacl", "read"),
-    ("s3:getbucketversioning", "read"),
+    ("s3:getobjectversionacl", "read"),
+    ("s3:getobjectattributes", "read"),
+    ("s3:getobjectversionattributes", "read"),
     ("s3:headobject", "read"),
     ("s3:headbucket", "read"),
     ("s3:putobject", "write"),
     ("s3:createbucket", "write"),
     ("s3:putobjecttagging", "write"),
-    ("s3:putbucketversioning", "write"),
+    ("s3:putobjectacl", "write"),
+    ("s3:putobjectversionacl", "write"),
     ("s3:createmultipartupload", "write"),
     ("s3:uploadpart", "write"),
     ("s3:completemultipartupload", "write"),
@@ -26,12 +32,41 @@ pub const S3_ACTION_TABLE: &[(&str, &str)] = &[
     ("s3:deletebucket", "delete"),
     ("s3:deleteobjecttagging", "delete"),
     ("s3:bypassgovernanceretention", "bypass_governance"),
-    ("s3:putobjectacl", "share"),
     ("s3:putbucketacl", "share"),
     ("s3:getbucketacl", "share"),
     ("s3:putbucketpolicy", "policy"),
     ("s3:getbucketpolicy", "policy"),
     ("s3:deletebucketpolicy", "policy"),
+    ("s3:getbucketpolicystatus", "policy"),
+    ("s3:getbucketversioning", "versioning"),
+    ("s3:putbucketversioning", "versioning"),
+    ("s3:getbuckettagging", "tagging"),
+    ("s3:putbuckettagging", "tagging"),
+    ("s3:deletebuckettagging", "tagging"),
+    ("s3:getencryptionconfiguration", "encryption"),
+    ("s3:putencryptionconfiguration", "encryption"),
+    ("s3:deleteencryptionconfiguration", "encryption"),
+    ("s3:getbucketquota", "quota"),
+    ("s3:putbucketquota", "quota"),
+    ("s3:getbucketobjectlockconfiguration", "object_lock"),
+    ("s3:putbucketobjectlockconfiguration", "object_lock"),
+    ("s3:getobjectretention", "object_lock"),
+    ("s3:putobjectretention", "object_lock"),
+    ("s3:getobjectlegalhold", "object_lock"),
+    ("s3:putobjectlegalhold", "object_lock"),
+    ("s3:getbucketnotification", "notification"),
+    ("s3:putbucketnotification", "notification"),
+    ("s3:getbucketlogging", "logging"),
+    ("s3:putbucketlogging", "logging"),
+    ("s3:getbucketwebsite", "website"),
+    ("s3:putbucketwebsite", "website"),
+    ("s3:deletebucketwebsite", "website"),
+    ("s3:getbucketownershipcontrols", "ownership_controls"),
+    ("s3:putbucketownershipcontrols", "ownership_controls"),
+    ("s3:deletebucketownershipcontrols", "ownership_controls"),
+    ("s3:getbucketpublicaccessblock", "public_access_block"),
+    ("s3:putbucketpublicaccessblock", "public_access_block"),
+    ("s3:deletebucketpublicaccessblock", "public_access_block"),
     ("s3:getreplicationconfiguration", "replication"),
     ("s3:putreplicationconfiguration", "replication"),
     ("s3:deletereplicationconfiguration", "replication"),
@@ -52,9 +87,6 @@ pub fn canonical_s3_action_name(name: &str) -> &str {
     match name {
         "s3:headobject" => "s3:getobject",
         "s3:headbucket" => "s3:listbucket",
-        "s3:getobjectversion" => "s3:getobject",
-        "s3:getobjectversiontagging" => "s3:getobjecttagging",
-        "s3:deleteobjectversion" => "s3:deleteobject",
         "s3:copyobject"
         | "s3:createmultipartupload"
         | "s3:uploadpart"
@@ -63,6 +95,11 @@ pub fn canonical_s3_action_name(name: &str) -> &str {
         "s3:listparts" => "s3:listmultipartuploadparts",
         "s3:getbucketlifecycle" => "s3:getlifecycleconfiguration",
         "s3:putbucketlifecycle" => "s3:putlifecycleconfiguration",
+        "s3:getbucketnotificationconfiguration" => "s3:getbucketnotification",
+        "s3:putbucketnotificationconfiguration" => "s3:putbucketnotification",
+        "s3:getbucketencryption" => "s3:getencryptionconfiguration",
+        "s3:putbucketencryption" => "s3:putencryptionconfiguration",
+        "s3:deletebucketencryption" => "s3:deleteencryptionconfiguration",
         other => other,
     }
 }
@@ -185,7 +222,7 @@ mod tests {
             "read",
             Some("s3:GetObject")
         ));
-        assert!(action_matches(
+        assert!(!action_matches(
             "s3:GetObjectVersion",
             "read",
             Some("s3:GetObject")
@@ -218,5 +255,95 @@ mod tests {
             Some("s3:GetBucketVersioning")
         ));
         assert!(action_matches("*", "write", Some("s3:PutObject")));
+    }
+
+    #[test]
+    fn version_scoped_actions_are_distinct_from_base_actions() {
+        assert!(!action_matches(
+            "s3:DeleteObject",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:DeleteObjectVersion",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(!action_matches(
+            "s3:DeleteObjectVersion",
+            "delete",
+            Some("s3:DeleteObject")
+        ));
+        assert!(!action_matches(
+            "s3:GetObject",
+            "read",
+            Some("s3:GetObjectVersion")
+        ));
+        assert!(!action_matches(
+            "s3:GetObjectTagging",
+            "read",
+            Some("s3:GetObjectVersionTagging")
+        ));
+        assert!(!action_matches(
+            "s3:GetObjectAcl",
+            "read",
+            Some("s3:GetObjectVersionAcl")
+        ));
+        assert!(action_matches(
+            "s3:GetObjectVersionAcl",
+            "read",
+            Some("s3:GetObjectVersionAcl")
+        ));
+        assert!(action_matches(
+            "s3:PutObjectVersionAcl",
+            "write",
+            Some("s3:PutObjectVersionAcl")
+        ));
+        assert!(action_matches(
+            "s3:GetObjectVersionAttributes",
+            "read",
+            Some("s3:GetObjectVersionAttributes")
+        ));
+    }
+
+    #[test]
+    fn coarse_and_wildcard_grants_still_cover_version_actions() {
+        assert!(action_matches("delete", "delete", Some("s3:DeleteObject")));
+        assert!(action_matches(
+            "delete",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches("read", "read", Some("s3:GetObjectVersion")));
+        assert!(action_matches(
+            "read",
+            "read",
+            Some("s3:GetObjectVersionTagging")
+        ));
+        assert!(action_matches(
+            "s3:Get*",
+            "read",
+            Some("s3:GetObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:Delete*",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:GetObjectVersion*",
+            "read",
+            Some("s3:GetObjectVersionAttributes")
+        ));
+        assert!(action_matches(
+            "*",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
+        assert!(action_matches(
+            "s3:*",
+            "delete",
+            Some("s3:DeleteObjectVersion")
+        ));
     }
 }
