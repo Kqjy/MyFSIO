@@ -83,10 +83,12 @@ pub async fn relay_inbound_layer(
                                 message: &str,
                                 status: StatusCode,
                                 origin_site_id: Option<String>,
-                                admin_user_id: Option<String>|
-     -> Response {
+                                admin_user_id: Option<String>| {
         let status_code = status.as_u16();
-        state.audit_log.record(AuditEntry {
+        let code = code.to_string();
+        let message = message.to_string();
+        let audit_log = state.audit_log.clone();
+        let entry = AuditEntry {
             ts: chrono::Utc::now().to_rfc3339(),
             correlation_id: correlation_id.clone(),
             origin_site_id,
@@ -103,10 +105,13 @@ pub async fn relay_inbound_layer(
             } else {
                 Some(idempotency_key.clone())
             },
-            error: Some(message.to_string()),
+            error: Some(message.clone()),
             attribution: Some(ATTRIBUTION_REJECTED.to_string()),
-        });
-        json_error(code, message, status)
+        };
+        async move {
+            audit_log.record_async(entry).await;
+            json_error(&code, &message, status)
+        }
     };
 
     let peer_principal = match req.extensions().get::<Principal>() {
@@ -126,7 +131,8 @@ pub async fn relay_inbound_layer(
                 } else {
                     Some(admin_user.clone())
                 },
-            );
+            )
+            .await;
         }
     };
     let peer_site_id = peer_principal.peer_site_id().unwrap_or("").to_string();
@@ -148,7 +154,8 @@ pub async fn relay_inbound_layer(
                 } else {
                     Some(admin_user.clone())
                 },
-            );
+            )
+            .await;
         }
     };
 
@@ -173,7 +180,8 @@ pub async fn relay_inbound_layer(
             } else {
                 Some(admin_user.clone())
             },
-        );
+        )
+        .await;
     }
 
     if origin_site != peer_site_id {
@@ -183,7 +191,8 @@ pub async fn relay_inbound_layer(
             StatusCode::FORBIDDEN,
             Some(origin_site.clone()),
             Some(admin_user.clone()),
-        );
+        )
+        .await;
     }
 
     if !verify_cluster_attest(
@@ -199,7 +208,8 @@ pub async fn relay_inbound_layer(
             StatusCode::FORBIDDEN,
             Some(origin_site.clone()),
             Some(admin_user.clone()),
-        );
+        )
+        .await;
     }
 
     let path_with_query = req
@@ -224,7 +234,8 @@ pub async fn relay_inbound_layer(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Some(origin_site.clone()),
                 Some(admin_user.clone()),
-            );
+            )
+            .await;
         }
     };
     let body_sha256_hex = {
@@ -250,7 +261,8 @@ pub async fn relay_inbound_layer(
             StatusCode::FORBIDDEN,
             Some(origin_site.clone()),
             Some(admin_user.clone()),
-        );
+        )
+        .await;
     }
 
     let request_fingerprint = {
@@ -281,33 +293,44 @@ pub async fn relay_inbound_layer(
     };
     let _inflight_guard = inflight_handle.lock.lock().await;
 
-    {
+    let cached_replay = {
         let mut cache = state.relay_idempotency_cache.lock();
-        if let Some(entry) = cache.get(&idemp_cache_key) {
-            if entry.stored_at.elapsed() < ttl {
+        match cache.get(&idemp_cache_key) {
+            Some(entry) if entry.stored_at.elapsed() < ttl => {
                 if entry.request_fingerprint != request_fingerprint {
-                    return record_relay_failure(
-                        "InvalidArgument",
-                        "x-myfsio-idempotency-key was previously used with a different method/path/body within the TTL window. Use a fresh idempotency key for distinct operations.",
-                        StatusCode::CONFLICT,
-                        Some(origin_site.clone()),
-                        Some(admin_user.clone()),
-                    );
+                    Some(Err(()))
+                } else {
+                    let status = StatusCode::from_u16(entry.status)
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    Some(Ok((status, entry.body.clone())))
                 }
-                let status =
-                    StatusCode::from_u16(entry.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                let body_bytes = entry.body.clone();
-                return (
-                    status,
-                    [
-                        ("content-type", "application/json"),
-                        ("x-myfsio-idempotent-replay", "true"),
-                    ],
-                    body_bytes,
-                )
-                    .into_response();
             }
+            _ => None,
         }
+    };
+
+    match cached_replay {
+        Some(Err(())) => {
+            return record_relay_failure(
+                "InvalidArgument",
+                "x-myfsio-idempotency-key was previously used with a different method/path/body within the TTL window. Use a fresh idempotency key for distinct operations.",
+                StatusCode::CONFLICT,
+                Some(origin_site.clone()),
+                Some(admin_user.clone()),
+            ).await;
+        }
+        Some(Ok((status, body_bytes))) => {
+            return (
+                status,
+                [
+                    ("content-type", "application/json"),
+                    ("x-myfsio-idempotent-replay", "true"),
+                ],
+                body_bytes,
+            )
+                .into_response();
+        }
+        None => {}
     }
 
     let synthetic_admin = Principal {
@@ -341,7 +364,8 @@ pub async fn relay_inbound_layer(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Some(origin_site.clone()),
                 Some(admin_user.clone()),
-            );
+            )
+            .await;
         }
     };
     let status_code = parts.status.as_u16();
@@ -365,26 +389,29 @@ pub async fn relay_inbound_layer(
     } else {
         "error"
     };
-    state.audit_log.record(AuditEntry {
-        ts: chrono::Utc::now().to_rfc3339(),
-        correlation_id,
-        origin_site_id: Some(origin_site),
-        admin_user_id: Some(admin_user),
-        action: format!("{} {}", method, path),
-        method,
-        path,
-        target: AuditTarget::Local,
-        result: result.to_string(),
-        status_code,
-        peer_ip,
-        idempotency_key: Some(idempotency_key),
-        error: if result == "error" {
-            Some(String::from_utf8_lossy(&body_vec).to_string())
-        } else {
-            None
-        },
-        attribution: Some(ATTRIBUTION_CLAIMED_BY_ORIGIN.to_string()),
-    });
+    state
+        .audit_log
+        .record_async(AuditEntry {
+            ts: chrono::Utc::now().to_rfc3339(),
+            correlation_id,
+            origin_site_id: Some(origin_site),
+            admin_user_id: Some(admin_user),
+            action: format!("{} {}", method, path),
+            method,
+            path,
+            target: AuditTarget::Local,
+            result: result.to_string(),
+            status_code,
+            peer_ip,
+            idempotency_key: Some(idempotency_key),
+            error: if result == "error" {
+                Some(String::from_utf8_lossy(&body_vec).to_string())
+            } else {
+                None
+            },
+            attribution: Some(ATTRIBUTION_CLAIMED_BY_ORIGIN.to_string()),
+        })
+        .await;
 
     Response::from_parts(parts, Body::from(body_vec))
 }
@@ -553,26 +580,29 @@ pub async fn relay_outbound(
             } else {
                 "error"
             };
-            state.audit_log.record(AuditEntry {
-                ts: chrono::Utc::now().to_rfc3339(),
-                correlation_id: correlation_id.clone(),
-                origin_site_id: Some(local_site_id),
-                admin_user_id: Some(principal.user_id.clone()),
-                action: format!("relay {} {}", method_str, target_path),
-                method: method_str,
-                path: format!("/myfsio/admin/relay/{}/{}", site_id, sub_path),
-                target: AuditTarget::Outbound,
-                result: outcome.to_string(),
-                status_code: status_u16,
-                peer_ip: None,
-                idempotency_key: Some(idempotency_key.clone()),
-                error: if outcome == "error" {
-                    Some(String::from_utf8_lossy(&body).to_string())
-                } else {
-                    None
-                },
-                attribution: Some(ATTRIBUTION_VERIFIED.to_string()),
-            });
+            state
+                .audit_log
+                .record_async(AuditEntry {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    correlation_id: correlation_id.clone(),
+                    origin_site_id: Some(local_site_id),
+                    admin_user_id: Some(principal.user_id.clone()),
+                    action: format!("relay {} {}", method_str, target_path),
+                    method: method_str,
+                    path: format!("/myfsio/admin/relay/{}/{}", site_id, sub_path),
+                    target: AuditTarget::Outbound,
+                    result: outcome.to_string(),
+                    status_code: status_u16,
+                    peer_ip: None,
+                    idempotency_key: Some(idempotency_key.clone()),
+                    error: if outcome == "error" {
+                        Some(String::from_utf8_lossy(&body).to_string())
+                    } else {
+                        None
+                    },
+                    attribution: Some(ATTRIBUTION_VERIFIED.to_string()),
+                })
+                .await;
 
             let mut response = Response::new(Body::from(body));
             *response.status_mut() = status;
@@ -601,22 +631,25 @@ pub async fn relay_outbound(
             response
         }
         Err(e) => {
-            state.audit_log.record(AuditEntry {
-                ts: chrono::Utc::now().to_rfc3339(),
-                correlation_id: correlation_id.clone(),
-                origin_site_id: Some(local_site_id),
-                admin_user_id: Some(principal.user_id.clone()),
-                action: format!("relay {} {}", method_str, target_path),
-                method: method_str,
-                path: format!("/myfsio/admin/relay/{}/{}", site_id, sub_path),
-                target: AuditTarget::Outbound,
-                result: "error".to_string(),
-                status_code: 502,
-                peer_ip: None,
-                idempotency_key: Some(idempotency_key),
-                error: Some(e.clone()),
-                attribution: Some(ATTRIBUTION_VERIFIED.to_string()),
-            });
+            state
+                .audit_log
+                .record_async(AuditEntry {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    correlation_id: correlation_id.clone(),
+                    origin_site_id: Some(local_site_id),
+                    admin_user_id: Some(principal.user_id.clone()),
+                    action: format!("relay {} {}", method_str, target_path),
+                    method: method_str,
+                    path: format!("/myfsio/admin/relay/{}/{}", site_id, sub_path),
+                    target: AuditTarget::Outbound,
+                    result: "error".to_string(),
+                    status_code: 502,
+                    peer_ip: None,
+                    idempotency_key: Some(idempotency_key),
+                    error: Some(e.clone()),
+                    attribution: Some(ATTRIBUTION_VERIFIED.to_string()),
+                })
+                .await;
             json_error(
                 "BadGateway",
                 &format!("Relay failed: {}", e),

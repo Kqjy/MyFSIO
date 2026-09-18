@@ -235,12 +235,13 @@ pub async fn ui_admin_audit_layer(
             &path,
             status,
             None,
-        );
+        )
+        .await;
     }
     response
 }
 
-pub fn audit_admin_action(
+pub async fn audit_admin_action(
     state: &AppState,
     session: &SessionHandle,
     action: &str,
@@ -260,7 +261,7 @@ pub fn audit_admin_action(
     };
     state
         .audit_log
-        .record(crate::services::audit_log::AuditEntry {
+        .record_async(crate::services::audit_log::AuditEntry {
             ts: chrono::Utc::now().to_rfc3339(),
             correlation_id: uuid::Uuid::new_v4().to_string(),
             origin_site_id: None,
@@ -275,7 +276,8 @@ pub fn audit_admin_action(
             idempotency_key: None,
             error,
             attribution: Some(crate::services::audit_log::ATTRIBUTION_VERIFIED.to_string()),
-        });
+        })
+        .await;
 }
 
 pub async fn require_admin(

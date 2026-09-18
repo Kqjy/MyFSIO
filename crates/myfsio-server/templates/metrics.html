@@ -283,90 +283,137 @@
 
 {% if operation_metrics_enabled %}
 <div class="tab-pane fade" id="operationsTab" role="tabpanel">
-  <div class="row g-3 mb-4">
-    <div class="col-6 col-md-4 col-xl">
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body p-3">
+      <div class="ops-strip">
+        <div>
+          <div class="ops-l">Requests</div>
+          <div class="ops-v" id="opTotalRequests">&mdash;</div>
+          <div class="small text-muted"><span id="opReqPerSec">&mdash;</span> req/s</div>
+        </div>
+        <div>
+          <div class="ops-l">Success</div>
+          <div class="ops-v text-success" id="opSuccessRate">&mdash;</div>
+          <div class="small text-muted" id="opSuccessCount">&mdash;</div>
+        </div>
+        <div>
+          <div class="ops-l">Server errors</div>
+          <div class="ops-v text-danger" id="opServerErrors">&mdash;</div>
+          <div class="small text-muted">5xx</div>
+        </div>
+        <div>
+          <div class="ops-l">Client errors</div>
+          <div class="ops-v text-warning" id="opClientErrors">&mdash;</div>
+          <div class="small text-muted">4xx</div>
+        </div>
+        <div>
+          <div class="ops-l">Latency</div>
+          <div class="ops-v" style="color: #8b5cf6;"><span id="opP95Latency">&mdash;</span> <span class="fs-6 fw-normal text-muted">p95</span></div>
+          <div class="small text-muted">avg <span id="opAvgLatency">&mdash;</span></div>
+        </div>
+        <div>
+          <div class="ops-l">Transfer</div>
+          <div class="ops-v fs-5 pt-1"><span id="opBytesIn">&mdash;</span> <span class="fs-6 fw-normal text-muted">in</span> &middot; <span id="opBytesOut">&mdash;</span> <span class="fs-6 fw-normal text-muted">out</span></div>
+        </div>
+      </div>
+      <hr class="my-3">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 small text-muted mb-1">
+        <div class="d-flex align-items-center gap-2">
+          <select class="form-select form-select-sm" id="opHealthRange" style="width: auto;">
+            <option value="1" selected>Last 1h</option>
+            <option value="6">Last 6h</option>
+            <option value="24">Last 24h</option>
+          </select>
+          <span id="opHealthScale"></span>
+        </div>
+        <span>
+          <span style="color: #10b981;">&#9632;</span> ok
+          <span style="color: #f59e0b;" class="ms-2">&#9632;</span> 4xx
+          <span style="color: #ef4444;" class="ms-2">&#9632;</span> 5xx
+          <span class="ms-2 opacity-50">&#9632;</span> no traffic
+        </span>
+      </div>
+      <div class="ops-health" id="opHealthBar"></div>
+      <div class="d-flex justify-content-between small text-muted mt-1" id="opHealthLabels">
+        <span id="opHealthStart"></span>
+        <span id="opHealthMid"></span>
+        <span id="opHealthEnd"></span>
+      </div>
+      <div class="small text-muted d-none" id="opHealthEmpty"></div>
+    </div>
+  </div>
+
+  <div class="row g-4 mb-4">
+    <div class="col-lg-8">
       <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1" id="opTotalRequests">&mdash;</h4>
-          <small class="text-muted">Requests</small>
+        <div class="card-header bg-transparent border-0 pt-3 px-3 pb-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <h6 class="text-muted small fw-bold text-uppercase mb-0">Recent errors</h6>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Severity filter">
+            <input type="radio" class="btn-check" name="opSeverity" id="opSeverityAll" value="all" autocomplete="off" checked>
+            <label class="btn btn-outline-secondary" for="opSeverityAll">All</label>
+            <input type="radio" class="btn-check" name="opSeverity" id="opSeverity5" value="5xx" autocomplete="off">
+            <label class="btn btn-outline-secondary" for="opSeverity5">Server 5xx</label>
+            <input type="radio" class="btn-check" name="opSeverity" id="opSeverity4" value="4xx" autocomplete="off">
+            <label class="btn btn-outline-secondary" for="opSeverity4">Client 4xx</label>
+          </div>
+        </div>
+        <div class="px-3 pb-2 d-flex flex-wrap gap-2 d-none" id="opCodeChips"></div>
+        <div class="ops-feed ops-feed-scroll border-top" id="opErrorFeed">
+          <div class="text-muted small text-center py-4">Loading recent errors...</div>
+        </div>
+        <div class="px-3 py-2 border-top text-center d-none" id="opFeedMoreWrap">
+          <button type="button" class="btn btn-link btn-sm text-decoration-none p-0" id="opFeedMore"></button>
+        </div>
+        <div class="card-footer bg-transparent d-flex justify-content-between align-items-center flex-wrap gap-2 small text-muted mt-auto">
+          <span id="recentErrorsStatus">Loading...</span>
+          <a href="#" class="text-decoration-none" id="opGroupToggle">Show individual events</a>
         </div>
       </div>
     </div>
-    <div class="col-6 col-md-4 col-xl">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1 text-success" id="opSuccessRate">&mdash;</h4>
-          <small class="text-muted">Success</small>
+    <div class="col-lg-4">
+      <div class="card shadow-sm border-0 mb-4">
+        <div class="card-body p-3">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+            <div class="d-flex align-items-center gap-2">
+              <h6 class="text-muted small fw-bold text-uppercase mb-0">Top error codes</h6>
+              <span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;" title="Errors from the S3 API listener only; UI errors are excluded">API Only</span>
+            </div>
+            <select class="form-select form-select-sm" id="errorSummaryRange" style="width: auto;">
+              <option value="1" selected>1h</option>
+              <option value="6">6h</option>
+              <option value="24">24h</option>
+            </select>
+          </div>
+          <div id="errorCodesBody">
+            <div class="text-muted small text-center py-4">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16">
+                <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                <path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/>
+              </svg>
+              <div>No S3 API errors</div>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1 text-danger" id="opErrorCount">&mdash;</h4>
-          <small class="text-muted">Errors</small>
-        </div>
-      </div>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1 text-info" id="opReqPerSec">&mdash;</h4>
-          <small class="text-muted">Req/s</small>
-        </div>
-      </div>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1" id="opAvgLatency" style="color: #6366f1;">&mdash;</h4>
-          <small class="text-muted">Avg Latency</small>
-        </div>
-      </div>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1" id="opP95Latency" style="color: #8b5cf6;">&mdash;</h4>
-          <small class="text-muted">P95 Latency</small>
-        </div>
-      </div>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1 text-primary" id="opBytesIn">&mdash;</h4>
-          <small class="text-muted">Bytes In</small>
-        </div>
-      </div>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3 text-center">
-          <h4 class="fw-bold mb-1 text-secondary" id="opBytesOut">&mdash;</h4>
-          <small class="text-muted">Bytes Out</small>
+      <div class="card shadow-sm border-0">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Errors by bucket</h6>
+          <div id="errorBucketsBody">
+            <div class="text-muted small">No bucket-scoped errors</div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
+  <h6 class="text-muted small fw-bold text-uppercase mb-3">Traffic</h6>
   <div class="row g-4 mb-4">
     <div class="col-lg-4">
       <div class="card shadow-sm border-0 h-100">
         <div class="card-body p-3">
-          <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Method</h6>
-          <div style="height: 220px; display: flex; align-items: center; justify-content: center;">
-            <canvas id="methodChart"></canvas>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="col-lg-4">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3">
-          <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Status</h6>
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Method and Status</h6>
           <div style="height: 220px;">
-            <canvas id="statusChart"></canvas>
+            <canvas id="methodStatusChart"></canvas>
           </div>
         </div>
       </div>
@@ -381,81 +428,14 @@
         </div>
       </div>
     </div>
-  </div>
-
-  <div class="row g-4 mb-4">
-    <div class="col-lg-6">
+    <div class="col-lg-4">
       <div class="card shadow-sm border-0 h-100">
         <div class="card-body p-3">
           <h6 class="text-muted small fw-bold text-uppercase mb-3">Latency by Endpoint</h6>
-          <div style="height: 200px;">
+          <div style="height: 220px;">
             <canvas id="latencyEndpointChart"></canvas>
           </div>
         </div>
-      </div>
-    </div>
-    <div class="col-lg-6">
-      <div class="card shadow-sm border-0 h-100">
-        <div class="card-body p-3">
-          <div class="d-flex justify-content-between align-items-start mb-3">
-            <h6 class="text-muted small fw-bold text-uppercase mb-0">S3 Error Codes</h6>
-            <div class="d-flex align-items-center gap-2">
-              <select class="form-select form-select-sm" id="errorSummaryRange" style="width: auto;">
-                <option value="1" selected>Last hour</option>
-                <option value="6">Last 6h</option>
-                <option value="24">Last 24h</option>
-              </select>
-              <span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;" title="Errors from the S3 API listener only; UI errors are excluded">API Only</span>
-            </div>
-          </div>
-          <div style="min-height: 170px; max-height: 200px; overflow-y: auto;">
-            <div class="d-flex border-bottom pb-2 mb-2" style="font-size: 0.75rem;">
-              <div class="text-muted fw-semibold" style="flex: 1;">Code</div>
-              <div class="text-muted fw-semibold text-end" style="width: 60px;">Count</div>
-              <div class="text-muted fw-semibold text-end" style="width: 100px;">Distribution</div>
-            </div>
-            <div id="errorCodesBody">
-              <div class="text-muted small text-center py-4">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/>
-                </svg>
-                <div>No S3 API errors</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card shadow-sm border-0 mb-4">
-    <div class="card-header bg-transparent border-0 pt-3 px-3 d-flex justify-content-between align-items-center">
-      <h6 class="text-muted small fw-bold text-uppercase mb-0">Recent Errors</h6>
-      <div class="d-flex align-items-center gap-2">
-        <span class="badge bg-danger-subtle text-danger d-none" id="recentErrorsFilter"></span>
-        <button class="btn btn-outline-secondary btn-sm d-none" type="button" id="clearRecentErrorFilter">Clear</button>
-        <span class="small text-muted" id="recentErrorsStatus">Loading...</span>
-      </div>
-    </div>
-    <div class="card-body p-0">
-      <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0">
-          <thead>
-            <tr class="small text-muted">
-              <th class="ps-3">Time</th>
-              <th>Code</th>
-              <th>Method</th>
-              <th>Bucket/Key</th>
-              <th>Status</th>
-              <th>Request ID</th>
-              <th class="text-end pe-3">Latency</th>
-            </tr>
-          </thead>
-          <tbody id="recentErrorsBody">
-            <tr><td colspan="7" class="text-muted text-center py-4">Loading recent errors...</td></tr>
-          </tbody>
-        </table>
       </div>
     </div>
   </div>
@@ -987,8 +967,7 @@ try {
 function bootstrapOperationsSection() {
 (function() {
   var chartsAvailable = typeof Chart !== 'undefined';
-  var methodChart = null;
-  var statusChart = null;
+  var methodStatusChart = null;
   var endpointChart = null;
   var latencyEndpointChart = null;
   var trendReqRate = null;
@@ -999,16 +978,37 @@ function bootstrapOperationsSection() {
   var opStatus = document.getElementById('opStatus');
   var opTrendStatus = document.getElementById('opTrendStatus');
   var opHistoryRange = document.getElementById('opHistoryRange');
+  var opHealthRange = document.getElementById('opHealthRange');
   var errorSummaryRange = document.getElementById('errorSummaryRange');
-  var recentErrorsBody = document.getElementById('recentErrorsBody');
   var recentErrorsStatus = document.getElementById('recentErrorsStatus');
-  var recentErrorsFilter = document.getElementById('recentErrorsFilter');
-  var clearRecentErrorFilter = document.getElementById('clearRecentErrorFilter');
+  var opErrorFeed = document.getElementById('opErrorFeed');
+  var opCodeChips = document.getElementById('opCodeChips');
+  var opFeedMore = document.getElementById('opFeedMore');
+  var opFeedMoreWrap = document.getElementById('opFeedMoreWrap');
+  var opGroupToggle = document.getElementById('opGroupToggle');
   var opTimer = null;
   var trendTimer = null;
   var opTrendTimestamps = [];
   var recentErrorsTimer = null;
-  var selectedErrorCode = null;
+  var selectedCode = null;
+  var severityFilter = 'all';
+  var groupedMode = true;
+  var feedExpanded = Object.create(null);
+  var GROUP_PAGE = 5;
+  var EVENT_PAGE = 25;
+  var groupLimit = GROUP_PAGE;
+  var eventLimit = EVENT_PAGE;
+  var recentErrorsData = { errors: [], total_buffered: 0 };
+  var statusByCode = Object.create(null);
+  var lastErrorSummary = null;
+  var healthBars = [];
+  var healthIntervalMinutes = 5;
+  var healthBucketMinutes = 5;
+  var latestWindowBar = null;
+  var HEALTH_RANGE_KEY = 'myfsioOpsHealthRange';
+  var HEALTH_MAX_BARS = 95;
+  var SERVER_ERROR_CODES = ['InternalError', 'ServiceUnavailable', 'SlowDown', 'NotImplemented'];
+  var EMPTY_ERRORS_HTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>No recent errors</div></div>';
   var operationsLoadInFlight = false;
   var operationsLoadSucceeded = false;
   var esc = window.UICore && window.UICore.escapeHtml ? window.UICore.escapeHtml : function(value) {
@@ -1020,11 +1020,6 @@ function bootstrapOperationsSection() {
     opStatus.textContent = 'Charts unavailable: Chart.js failed to load.';
   }
 
-  var methodColors = {
-    'GET': '#3b82f6', 'PUT': '#10b981', 'POST': '#f59e0b',
-    'DELETE': '#ef4444', 'HEAD': '#6b7280', 'OPTIONS': '#06b6d4'
-  };
-  var statusColors = { '2xx': '#10b981', '3xx': '#06b6d4', '4xx': '#f59e0b', '5xx': '#ef4444' };
   var endpointColors = {
     'object': '#3b82f6', 'bucket': '#10b981', 'ui': '#6b7280',
     'service': '#06b6d4', 'kms': '#f59e0b'
@@ -1056,31 +1051,27 @@ function bootstrapOperationsSection() {
 
   function initOpCharts() {
     if (!chartsAvailable) return;
-    var mCtx = document.getElementById('methodChart');
-    var sCtx = document.getElementById('statusChart');
+    var msCtx = document.getElementById('methodStatusChart');
     var eCtx = document.getElementById('endpointChart');
     var leCtx = document.getElementById('latencyEndpointChart');
 
-    if (mCtx) {
-      methodChart = new Chart(mCtx, {
-        type: 'doughnut',
-        data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          cutout: '55%',
-          plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 }, padding: 12 } } }
-        }
-      });
-    }
-
-    if (sCtx) {
-      statusChart = new Chart(sCtx, {
+    if (msCtx) {
+      methodStatusChart = new Chart(msCtx, {
         type: 'bar',
-        data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderRadius: 4 }] },
+        data: {
+          labels: [],
+          datasets: [
+            { label: 'Success', data: [], backgroundColor: '#10b981', borderRadius: 4 },
+            { label: 'Errors', data: [], backgroundColor: '#ef4444', borderRadius: 4 }
+          ]
+        },
         options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { display: false } },
-          scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
+          responsive: true, maintainAspectRatio: false, indexAxis: 'y', animation: false,
+          plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } },
+          scales: {
+            x: { stacked: true, beginAtZero: true, ticks: { precision: 0 } },
+            y: { stacked: true }
+          }
         }
       });
     }
@@ -1181,10 +1172,16 @@ function bootstrapOperationsSection() {
         var stats = data.stats;
         var totals = stats.totals || {};
 
+        var statusClasses = stats.by_status_class || {};
+        var hasStatusClasses = Object.keys(statusClasses).length > 0;
+        var serverErrors = hasStatusClasses ? (statusClasses['5xx'] || 0) : 0;
+        var clientErrors = hasStatusClasses ? (statusClasses['4xx'] || 0) : (totals.error_count || 0);
+
         setText('opTotalRequests', (totals.count || 0).toLocaleString());
-        var rate = totals.count > 0 ? ((totals.success_count / totals.count) * 100).toFixed(1) : '0.0';
-        setText('opSuccessRate', rate + '%');
-        setText('opErrorCount', (totals.error_count || 0).toLocaleString());
+        setText('opSuccessRate', totals.count > 0 ? ((totals.success_count / totals.count) * 100).toFixed(1) + '%' : '—');
+        setText('opSuccessCount', (totals.success_count || 0).toLocaleString() + ' ok');
+        setText('opServerErrors', serverErrors.toLocaleString());
+        setText('opClientErrors', clientErrors.toLocaleString());
         var rps = stats.window_seconds > 0 ? (totals.count || 0) / stats.window_seconds : 0;
         setText('opReqPerSec', rps.toFixed(2));
         setText('opAvgLatency', (totals.latency_avg_ms || 0).toFixed(1) + 'ms');
@@ -1192,20 +1189,22 @@ function bootstrapOperationsSection() {
         setText('opBytesIn', formatBytes(totals.bytes_in || 0));
         setText('opBytesOut', formatBytes(totals.bytes_out || 0));
 
-        if (methodChart && stats.by_method) {
-          var methods = Object.keys(stats.by_method);
-          methodChart.data.labels = methods;
-          methodChart.data.datasets[0].data = methods.map(function(m) { return stats.by_method[m].count; });
-          methodChart.data.datasets[0].backgroundColor = methods.map(function(m) { return methodColors[m] || '#6b7280'; });
-          methodChart.update('none');
-        }
+        var windowEnd = Date.now();
+        latestWindowBar = {
+          start: new Date(windowEnd - (stats.window_seconds || 0) * 1000).toISOString(),
+          end: new Date(windowEnd).toISOString(),
+          total: totals.count || 0,
+          c4: clientErrors,
+          c5: serverErrors
+        };
+        renderHealthBar();
 
-        if (statusChart && stats.by_status_class) {
-          var statuses = Object.keys(stats.by_status_class).sort();
-          statusChart.data.labels = statuses;
-          statusChart.data.datasets[0].data = statuses.map(function(s) { return stats.by_status_class[s]; });
-          statusChart.data.datasets[0].backgroundColor = statuses.map(function(s) { return statusColors[s] || '#6b7280'; });
-          statusChart.update('none');
+        if (methodStatusChart && stats.by_method) {
+          var methods = Object.keys(stats.by_method).sort();
+          methodStatusChart.data.labels = methods;
+          methodStatusChart.data.datasets[0].data = methods.map(function(m) { return stats.by_method[m].success_count || 0; });
+          methodStatusChart.data.datasets[1].data = methods.map(function(m) { return stats.by_method[m].error_count || 0; });
+          methodStatusChart.update('none');
         }
 
         if (endpointChart && stats.by_endpoint) {
@@ -1251,14 +1250,26 @@ function bootstrapOperationsSection() {
     return rows.slice(0, 5).map(function(row) { return row[0] + ': ' + row[1]; }).join(', ');
   }
 
+  function isServerErrorCode(code) {
+    if (Object.prototype.hasOwnProperty.call(statusByCode, code)) return statusByCode[code] >= 500;
+    return SERVER_ERROR_CODES.indexOf(code) !== -1;
+  }
+
+  function selectErrorCode(code) {
+    selectedCode = code || null;
+    groupLimit = GROUP_PAGE;
+    eventLimit = EVENT_PAGE;
+    renderErrorFeed();
+    updateErrorCodeSelection();
+  }
+
   function attachErrorCodeClicks() {
     var errorBody = document.getElementById('errorCodesBody');
     if (!errorBody) return;
     errorBody.querySelectorAll('[data-error-code]').forEach(function(row) {
       row.addEventListener('click', function() {
-        selectedErrorCode = row.getAttribute('data-error-code') || null;
-        updateRecentFilterLabel();
-        loadRecentErrors(true);
+        var code = row.getAttribute('data-error-code');
+        selectErrorCode(selectedCode === code ? null : code);
       });
     });
   }
@@ -1267,37 +1278,64 @@ function bootstrapOperationsSection() {
     var errorBody = document.getElementById('errorCodesBody');
     if (!errorBody) return;
     errorBody.querySelectorAll('[data-error-code]').forEach(function(row) {
-      var isSelected = selectedErrorCode === row.getAttribute('data-error-code');
-      row.classList.toggle('active', isSelected);
-      row.classList.toggle('bg-danger-subtle', isSelected);
+      row.classList.toggle('ops-bar-active', selectedCode === row.getAttribute('data-error-code'));
     });
   }
 
   function renderErrorSummary(summary) {
+    lastErrorSummary = summary;
     var errorBody = document.getElementById('errorCodesBody');
-    if (!errorBody) return;
-    var errorCodes = Object.entries(summary.error_codes || {});
-    errorCodes.sort(function(a, b) { return b[1] - a[1]; });
-    var totalErrors = summary.total_errors || errorCodes.reduce(function(sum, entry) { return sum + entry[1]; }, 0);
-    errorCodes = errorCodes.slice(0, 10);
-    if (errorCodes.length === 0) {
-      errorBody.innerHTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>No S3 API errors</div></div>';
-      return;
+    if (errorBody) {
+      var summaryCodes = summary.error_codes || {};
+      var errorCodes = Object.keys(summaryCodes).map(function(code) { return [code, summaryCodes[code]]; });
+      errorCodes.sort(function(a, b) { return b[1] - a[1]; });
+      var totalErrors = summary.total_errors || errorCodes.reduce(function(sum, entry) { return sum + entry[1]; }, 0);
+      errorCodes = errorCodes.slice(0, 8);
+      if (errorCodes.length === 0) {
+        errorBody.innerHTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>No S3 API errors</div></div>';
+      } else {
+        errorBody.innerHTML = errorCodes.map(function(entry) {
+          var code = entry[0];
+          var count = entry[1];
+          var pct = totalErrors > 0 ? Math.round((count / totalErrors) * 100) : 0;
+          var title = bucketTitleForCode(code, summary.error_buckets || {});
+          var server = isServerErrorCode(code);
+          return '<button type="button" class="ops-bar-row ops-bar-btn" data-error-code="' + esc(code) + '" title="' + esc(title) + '">' +
+            '<code class="text-truncate ' + (server ? 'text-danger' : 'text-body') + '">' + esc(code) + '</code>' +
+            '<span class="text-muted">' + count.toLocaleString() + ' · ' + pct + '%</span>' +
+            '<span class="progress"><span class="progress-bar ' + (server ? 'bg-danger' : 'bg-warning') + '" style="width: ' + pct + '%"></span></span>' +
+            '</button>';
+        }).join('');
+        attachErrorCodeClicks();
+        updateErrorCodeSelection();
+      }
     }
-    errorBody.innerHTML = errorCodes.map(function(entry) {
-      var code = entry[0];
-      var count = entry[1];
-      var pct = totalErrors > 0 ? Math.round((count / totalErrors) * 100) : 0;
-      var title = bucketTitleForCode(code, summary.error_buckets || {});
-      var selectedClass = selectedErrorCode === code ? ' active bg-danger-subtle' : '';
-      return '<button type="button" class="btn btn-link text-decoration-none w-100 px-0 py-1 text-start' + selectedClass + '" data-error-code="' + esc(code) + '" title="' + esc(title) + '">' +
-        '<span class="d-flex align-items-center" style="font-size: 0.8rem;">' +
-        '<span style="flex: 1;"><code class="text-danger">' + esc(code) + '</code></span>' +
-        '<span class="text-end fw-semibold text-body" style="width: 60px;">' + count.toLocaleString() + '</span>' +
-        '<span style="width: 100px; padding-left: 10px;"><span class="progress" style="height: 6px;"><span class="progress-bar bg-danger" style="width: ' + pct + '%"></span></span></span>' +
-        '</span></button>';
-    }).join('');
-    attachErrorCodeClicks();
+
+    var bucketBody = document.getElementById('errorBucketsBody');
+    if (bucketBody) {
+      var errorBuckets = summary.error_buckets || {};
+      var buckets = Object.keys(errorBuckets).map(function(name) {
+        var perCode = errorBuckets[name] || {};
+        var sum = Object.keys(perCode).reduce(function(acc, code) { return acc + perCode[code]; }, 0);
+        return [name, sum];
+      });
+      buckets.sort(function(a, b) { return b[1] - a[1]; });
+      buckets = buckets.slice(0, 6);
+      if (buckets.length === 0) {
+        bucketBody.innerHTML = '<div class="text-muted small">No bucket-scoped errors</div>';
+      } else {
+        var maxBucket = buckets[0][1];
+        bucketBody.innerHTML = buckets.map(function(entry, index) {
+          var label = entry[0] === '(other)' ? 'other buckets' : entry[0];
+          var pct = maxBucket > 0 ? Math.round((entry[1] / maxBucket) * 100) : 0;
+          return '<div class="ops-bar-row' + (index === buckets.length - 1 ? ' mb-0' : '') + '">' +
+            '<span class="text-truncate" title="' + esc(label) + '">' + esc(label) + '</span>' +
+            '<span class="text-muted">' + entry[1].toLocaleString() + '</span>' +
+            '<span class="progress"><span class="progress-bar bg-secondary" style="width: ' + pct + '%"></span></span>' +
+            '</div>';
+        }).join('');
+      }
+    }
   }
 
   function loadErrorSummary() {
@@ -1323,57 +1361,327 @@ function bootstrapOperationsSection() {
       });
   }
 
-  function updateRecentFilterLabel() {
-    if (recentErrorsFilter) {
-      if (selectedErrorCode) {
-        recentErrorsFilter.textContent = 'Code: ' + selectedErrorCode;
-        recentErrorsFilter.classList.remove('d-none');
-      } else {
-        recentErrorsFilter.textContent = '';
-        recentErrorsFilter.classList.add('d-none');
-      }
-    }
-    if (clearRecentErrorFilter) clearRecentErrorFilter.classList.toggle('d-none', !selectedErrorCode);
-    updateErrorCodeSelection();
+  function opRelativeTime(timestamp) {
+    var then = new Date(timestamp).getTime();
+    if (isNaN(then)) return '—';
+    var diff = Math.max(0, Date.now() - then) / 1000;
+    if (diff < 60) return Math.floor(diff) + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
   }
 
-  function renderRecentErrors(data) {
-    if (!recentErrorsBody) return;
-    var errors = data.errors || [];
-    if (errors.length === 0) {
-      recentErrorsBody.innerHTML = '<tr><td colspan="7" class="text-muted text-center py-4">No recent errors</td></tr>';
-      if (recentErrorsStatus) recentErrorsStatus.textContent = (data.total_buffered || 0) + ' buffered';
+  function buildErrorGroups(errors) {
+    var map = Object.create(null);
+    var order = [];
+    errors.forEach(function(err) {
+      var groupKey = 'g|' + err.code + '|#|' + err.method + '|#|' + (err.bucket || '') + '|#|' + err.status;
+      var group = map[groupKey];
+      if (!group) {
+        group = {
+          key: groupKey,
+          code: err.code,
+          method: err.method,
+          bucket: err.bucket || '',
+          status: err.status,
+          count: 0,
+          firstTs: err.timestamp,
+          lastTs: err.timestamp,
+          keyName: '',
+          requestId: '',
+          latency: 0,
+          maxLatency: 0,
+          source: '',
+          seenKeys: Object.create(null),
+          distinctKeys: 0
+        };
+        map[groupKey] = group;
+        order.push(group);
+      }
+      var latency = Number(err.latency_ms) || 0;
+      var ts = new Date(err.timestamp).getTime();
+      group.count += 1;
+      if (latency > group.maxLatency) group.maxLatency = latency;
+      if (ts < new Date(group.firstTs).getTime()) group.firstTs = err.timestamp;
+      if (group.count === 1 || ts >= new Date(group.lastTs).getTime()) {
+        group.lastTs = err.timestamp;
+        group.keyName = err.key || '';
+        group.requestId = err.request_id || '';
+        group.latency = latency;
+        group.source = err.source || '';
+      }
+      if (err.key && !Object.prototype.hasOwnProperty.call(group.seenKeys, err.key)) {
+        group.seenKeys[err.key] = true;
+        group.distinctKeys += 1;
+      }
+    });
+    order.sort(function(a, b) {
+      var sa = Number(a.status) >= 500 ? 1 : 0;
+      var sb = Number(b.status) >= 500 ? 1 : 0;
+      if (sa !== sb) return sb - sa;
+      return new Date(b.lastTs).getTime() - new Date(a.lastTs).getTime();
+    });
+    return order;
+  }
+
+  function buildErrorEvents(errors) {
+    return errors.map(function(err) {
+      var latency = Number(err.latency_ms) || 0;
+      return {
+        key: 'e|' + err.timestamp + '|#|' + err.code + '|#|' + (err.request_id || '') + '|#|' + err.method + '|#|' + (err.key || ''),
+        code: err.code,
+        method: err.method,
+        bucket: err.bucket || '',
+        status: err.status,
+        count: 1,
+        firstTs: err.timestamp,
+        lastTs: err.timestamp,
+        keyName: err.key || '',
+        requestId: err.request_id || '',
+        latency: latency,
+        maxLatency: latency,
+        source: err.source || '',
+        distinctKeys: err.key ? 1 : 0
+      };
+    });
+  }
+
+  function feedRowHtml(item) {
+    var isServer = Number(item.status) >= 500;
+    var statusClass = isServer ? 'bg-danger-subtle text-danger' : 'bg-warning-subtle text-warning-emphasis';
+    var target;
+    if (!item.bucket) target = '—';
+    else if (item.distinctKeys > 1) target = item.bucket + '/… · ' + item.distinctKeys + ' distinct keys';
+    else if (item.keyName) target = item.bucket + '/' + item.keyName;
+    else target = item.bucket;
+    var lastSeen = formatEventTimestamp(item.lastTs);
+    var details = '';
+    if (item.keyName) details += '<dt>Latest key</dt><dd><code>' + esc(item.keyName) + '</code></dd>';
+    details += '<dt>Request ID</dt><dd><code>' + esc(item.requestId || '—') + '</code></dd>';
+    if (item.count > 1) details += '<dt>First seen</dt><dd>' + esc(formatEventTimestamp(item.firstTs).full) + '</dd>';
+    details += '<dt>Last seen</dt><dd>' + esc(lastSeen.full) + '</dd>';
+    var latencyText = item.latency.toFixed(1) + ' ms';
+    if (item.count > 1) latencyText += ' · max ' + item.maxLatency.toFixed(1) + ' ms';
+    details += '<dt>Latency</dt><dd>' + esc(latencyText) + '</dd>';
+    details += '<dt>Source</dt><dd>' + esc(item.source || '—') + '</dd>';
+    return '<details data-feed-key="' + esc(item.key) + '"' + (feedExpanded[item.key] ? ' open' : '') + '>' +
+      '<summary>' +
+      '<span class="ops-dot ' + (isServer ? 'ops-dot-5' : 'ops-dot-4') + '"></span>' +
+      '<div style="min-width: 0;">' +
+      '<div class="ops-line1">' +
+      '<code class="fw-semibold ' + (isServer ? 'text-danger' : 'text-body') + '">' + esc(item.code) + '</code>' +
+      '<span class="badge ' + statusClass + '">' + esc(item.status) + '</span>' +
+      '<span class="badge bg-secondary-subtle text-secondary">' + esc(item.method) + '</span>' +
+      (item.source && item.source !== 'api' ? '<span class="badge bg-info-subtle text-info-emphasis">' + esc(item.source) + '</span>' : '') +
+      '</div>' +
+      '<div class="ops-line2" title="' + esc(target) + '">' + esc(target) + '</div>' +
+      '</div>' +
+      '<div class="ops-meta">' +
+      (item.count > 1 ? '<b>&times;' + item.count + '</b>' : '') +
+      '<span title="' + esc(lastSeen.full) + '">' + esc(opRelativeTime(item.lastTs)) + '</span>' +
+      '</div>' +
+      '</summary>' +
+      '<div class="ops-more"><dl>' + details + '</dl></div>' +
+      '</details>';
+  }
+
+  function renderCodeChips(errors) {
+    if (!opCodeChips) return;
+    var counts = Object.create(null);
+    errors.forEach(function(err) {
+      counts[err.code] = (counts[err.code] || 0) + 1;
+    });
+    var entries = Object.keys(counts).map(function(code) { return [code, counts[code]]; });
+    entries.sort(function(a, b) { return b[1] - a[1]; });
+    if (entries.length === 0) {
+      opCodeChips.innerHTML = '';
+      opCodeChips.classList.add('d-none');
       return;
     }
-    recentErrorsBody.innerHTML = errors.slice(0, 50).map(function(err) {
-      var bucketKey = err.bucket ? err.bucket + (err.key ? '/' + err.key : '') : '\u2014';
-      var requestId = err.request_id || '\u2014';
-      var when = formatEventTimestamp(err.timestamp);
-      return '<tr>' +
-        '<td class="ps-3 small text-muted text-nowrap" title="' + esc(when.full) + '">' + esc(when.date) + '<div class="small">' + esc(when.time) + '</div></td>' +
-        '<td><code class="small text-danger">' + esc(err.code) + '</code><div><span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;">' + esc(err.source || '') + '</span></div></td>' +
-        '<td><span class="badge bg-light text-dark border">' + esc(err.method) + '</span></td>' +
-        '<td class="text-break" style="max-width: 320px;" title="' + esc(bucketKey) + '"><code class="small">' + esc(bucketKey) + '</code></td>' +
-        '<td><span class="badge bg-danger-subtle text-danger">' + esc(err.status) + '</span></td>' +
-        '<td class="text-truncate" style="max-width: 180px;" title="' + esc(requestId) + '"><code class="small">' + esc(requestId) + '</code></td>' +
-        '<td class="text-end pe-3 small text-muted">' + Number(err.latency_ms || 0).toFixed(1) + 'ms</td>' +
-        '</tr>';
+    var shown = entries.slice(0, 6);
+    var hidden = entries.length - shown.length;
+    if (selectedCode && !shown.some(function(entry) { return entry[0] === selectedCode; })) {
+      var extra = entries.filter(function(entry) { return entry[0] === selectedCode; })[0];
+      if (extra) {
+        shown = shown.concat([extra]);
+        hidden -= 1;
+      }
+    }
+    var html = '<button type="button" class="btn btn-sm rounded-pill ' + (selectedCode ? 'btn-outline-secondary' : 'btn-primary') + '" data-chip-code="">All <span class="opacity-75">' + errors.length + '</span></button>';
+    html += shown.map(function(entry) {
+      var active = selectedCode === entry[0];
+      return '<button type="button" class="btn btn-sm rounded-pill ' + (active ? 'btn-primary' : 'btn-outline-secondary') + '" data-chip-code="' + esc(entry[0]) + '">' + esc(entry[0]) + ' <span class="opacity-75">' + entry[1] + '</span></button>';
     }).join('');
-    if (recentErrorsStatus) recentErrorsStatus.textContent = errors.length + ' shown, ' + (data.total_buffered || 0) + ' buffered';
+    if (hidden > 0) html += '<span class="small text-muted align-self-center">+' + hidden + ' more</span>';
+    opCodeChips.innerHTML = html;
+    opCodeChips.classList.remove('d-none');
+    opCodeChips.querySelectorAll('[data-chip-code]').forEach(function(chip) {
+      chip.addEventListener('click', function() {
+        selectErrorCode(chip.getAttribute('data-chip-code'));
+      });
+    });
+  }
+
+  function renderErrorFeed() {
+    if (!opErrorFeed) return;
+    var all = recentErrorsData.errors || [];
+    var buffered = recentErrorsData.total_buffered || 0;
+    var filtered = all.filter(function(err) {
+      var status = Number(err.status) || 0;
+      if (severityFilter === '5xx') return status >= 500;
+      if (severityFilter === '4xx') return status < 500;
+      return true;
+    });
+    renderCodeChips(filtered);
+    var scoped = selectedCode ? filtered.filter(function(err) { return err.code === selectedCode; }) : filtered;
+    var items = groupedMode ? buildErrorGroups(scoped) : buildErrorEvents(scoped);
+
+    if (items.length === 0) {
+      opErrorFeed.innerHTML = all.length === 0 ? EMPTY_ERRORS_HTML : '<div class="text-muted small text-center py-4">No matching errors</div>';
+      if (opFeedMoreWrap) opFeedMoreWrap.classList.add('d-none');
+      if (recentErrorsStatus) recentErrorsStatus.textContent = '0 shown · ' + buffered.toLocaleString() + ' buffered';
+      return;
+    }
+
+    var limit = groupedMode ? groupLimit : eventLimit;
+    var visible = items.slice(0, limit);
+    opErrorFeed.innerHTML = visible.map(feedRowHtml).join('');
+    opErrorFeed.querySelectorAll('details[data-feed-key]').forEach(function(node) {
+      node.addEventListener('toggle', function() {
+        var key = node.getAttribute('data-feed-key');
+        if (node.open) feedExpanded[key] = true;
+        else delete feedExpanded[key];
+      });
+    });
+
+    var remaining = items.length - visible.length;
+    if (opFeedMoreWrap && opFeedMore) {
+      if (remaining > 0) {
+        opFeedMore.textContent = 'Show ' + remaining.toLocaleString() + ' more';
+        opFeedMoreWrap.classList.remove('d-none');
+      } else {
+        opFeedMoreWrap.classList.add('d-none');
+      }
+    }
+
+    if (recentErrorsStatus) {
+      recentErrorsStatus.textContent = groupedMode
+        ? items.length.toLocaleString() + ' groups from ' + scoped.length.toLocaleString() + ' errors · ' + buffered.toLocaleString() + ' buffered'
+        : visible.length.toLocaleString() + ' of ' + scoped.length.toLocaleString() + ' events · ' + buffered.toLocaleString() + ' buffered';
+    }
+  }
+
+  function healthClassFor(bar) {
+    if (bar.c5 > 0) return 'ops-h-err';
+    if (bar.c4 > 0) return 'ops-h-warn';
+    if (bar.total > 0) return 'ops-h-ok';
+    return 'ops-h-zero';
+  }
+
+  function renderHealthBar() {
+    var barEl = document.getElementById('opHealthBar');
+    var emptyEl = document.getElementById('opHealthEmpty');
+    var labelsEl = document.getElementById('opHealthLabels');
+    var scaleEl = document.getElementById('opHealthScale');
+    if (!barEl) return;
+    if (healthBars.length === 0) {
+      barEl.innerHTML = '';
+      barEl.classList.add('d-none');
+      if (labelsEl) labelsEl.classList.add('d-none');
+      if (scaleEl) scaleEl.textContent = '';
+      if (emptyEl) {
+        emptyEl.textContent = 'Collecting data — first snapshot in up to ' + healthIntervalMinutes + ' min';
+        emptyEl.classList.remove('d-none');
+      }
+      return;
+    }
+    if (emptyEl) emptyEl.classList.add('d-none');
+    barEl.classList.remove('d-none');
+    if (labelsEl) labelsEl.classList.remove('d-none');
+
+    var bars = healthBars.slice();
+    if (latestWindowBar) bars.push(latestWindowBar);
+    barEl.innerHTML = bars.map(function(bar) {
+      var title = formatEventTimestamp(bar.start).time + ' – ' + formatEventTimestamp(bar.end).time +
+        ' · ' + bar.total.toLocaleString() + ' requests · ' + bar.c4.toLocaleString() + ' 4xx · ' + bar.c5.toLocaleString() + ' 5xx';
+      return '<span class="' + healthClassFor(bar) + '" title="' + esc(title) + '"></span>';
+    }).join('');
+
+    var startLabel = document.getElementById('opHealthStart');
+    var midLabel = document.getElementById('opHealthMid');
+    var endLabel = document.getElementById('opHealthEnd');
+    if (startLabel) startLabel.textContent = formatEventTimestamp(bars[0].start).time;
+    if (midLabel) midLabel.textContent = formatEventTimestamp(bars[Math.floor(bars.length / 2)].start).time;
+    if (endLabel) endLabel.textContent = 'now';
+    if (scaleEl) scaleEl.textContent = 'one bar per ' + healthBucketMinutes + ' min';
+  }
+
+  function loadHealthBar() {
+    if (document.hidden || window.__metricsPaused) return;
+    var hours = opHealthRange ? opHealthRange.value : '1';
+    fetch('/ui/metrics/operations/history?hours=' + encodeURIComponent(hours))
+      .then(parseMetricsResponse)
+      .then(function(data) {
+        healthIntervalMinutes = data.interval_minutes || 5;
+        var raw = (data.enabled && data.history) ? data.history : [];
+        var bars = zeroFillHistory(raw, healthIntervalMinutes).map(function(snapshot) {
+          var classes = snapshot.by_status_class || {};
+          var totals = snapshot.totals || {};
+          var endMs = new Date(snapshot.timestamp).getTime();
+          var spanMs = (snapshot.window_seconds || healthIntervalMinutes * 60) * 1000;
+          return {
+            start: new Date(endMs - spanMs).toISOString(),
+            end: new Date(endMs).toISOString(),
+            total: totals.count || 0,
+            c4: classes['4xx'] || 0,
+            c5: classes['5xx'] || 0
+          };
+        });
+        var step = Math.max(1, Math.ceil(bars.length / HEALTH_MAX_BARS));
+        if (step > 1) {
+          var merged = [];
+          for (var i = 0; i < bars.length; i += step) {
+            var chunk = bars.slice(i, i + step);
+            merged.push({
+              start: chunk[0].start,
+              end: chunk[chunk.length - 1].end,
+              total: chunk.reduce(function(sum, bar) { return sum + bar.total; }, 0),
+              c4: chunk.reduce(function(sum, bar) { return sum + bar.c4; }, 0),
+              c5: chunk.reduce(function(sum, bar) { return sum + bar.c5; }, 0)
+            });
+          }
+          bars = merged;
+        }
+        healthBucketMinutes = healthIntervalMinutes * step;
+        healthBars = bars;
+        renderHealthBar();
+      })
+      .catch(function() {
+        var emptyEl = document.getElementById('opHealthEmpty');
+        if (emptyEl && healthBars.length === 0) {
+          emptyEl.textContent = 'Unable to load request health.';
+          emptyEl.classList.remove('d-none');
+        }
+      });
   }
 
   function loadRecentErrors(force) {
     if (!force && (document.hidden || window.__metricsPaused)) return;
-    var url = '/ui/metrics/operations/errors?limit=50';
-    if (selectedErrorCode) url += '&code=' + encodeURIComponent(selectedErrorCode);
-    fetch(url)
+    fetch('/ui/metrics/operations/errors?limit=256')
       .then(parseMetricsResponse)
       .then(function(data) {
         if (!data.enabled) {
           if (recentErrorsStatus) recentErrorsStatus.textContent = 'Not available';
+          if (opErrorFeed) opErrorFeed.innerHTML = '<div class="text-muted small text-center py-4">Not available</div>';
           return;
         }
-        renderRecentErrors(data);
+        recentErrorsData = { errors: data.errors || [], total_buffered: data.total_buffered || 0 };
+        statusByCode = Object.create(null);
+        recentErrorsData.errors.forEach(function(err) {
+          if (!Object.prototype.hasOwnProperty.call(statusByCode, err.code)) statusByCode[err.code] = Number(err.status) || 0;
+        });
+        renderErrorFeed();
+        if (lastErrorSummary) renderErrorSummary(lastErrorSummary);
       })
       .catch(function() {
         renderRetryStatus(recentErrorsStatus, 'Unable to load recent errors.', function() { loadRecentErrors(true); });
@@ -1385,6 +1693,7 @@ function bootstrapOperationsSection() {
       timestamp: new Date(timestamp).toISOString(),
       window_seconds: intervalMinutes * 60,
       totals: { count: 0, success_count: 0, error_count: 0, latency_avg_ms: 0, bytes_in: 0, bytes_out: 0 },
+      by_status_class: {},
       error_codes: {}
     };
   }
@@ -1489,7 +1798,10 @@ function bootstrapOperationsSection() {
     }, 10000);
     if (trendTimer) clearInterval(trendTimer);
     trendTimer = setInterval(function() {
-      if (!document.hidden && !window.__metricsPaused) loadOpTrends();
+      if (!document.hidden && !window.__metricsPaused) {
+        loadOpTrends();
+        loadHealthBar();
+      }
     }, 60000);
   }
 
@@ -1498,15 +1810,57 @@ function bootstrapOperationsSection() {
     loadErrorSummary();
     loadRecentErrors(Boolean(force));
     loadOpTrends();
+    loadHealthBar();
   }
 
   if (opHistoryRange) opHistoryRange.addEventListener('change', loadOpTrends);
   if (errorSummaryRange) errorSummaryRange.addEventListener('change', loadErrorSummary);
-  if (clearRecentErrorFilter) {
-    clearRecentErrorFilter.addEventListener('click', function() {
-      selectedErrorCode = null;
-      updateRecentFilterLabel();
-      loadRecentErrors(true);
+
+  if (opHealthRange) {
+    try {
+      var storedRange = window.localStorage.getItem(HEALTH_RANGE_KEY);
+      if (storedRange === '1' || storedRange === '6' || storedRange === '24') opHealthRange.value = storedRange;
+    } catch (storageError) {
+      opHealthRange.value = '1';
+    }
+    opHealthRange.addEventListener('change', function() {
+      try {
+        window.localStorage.setItem(HEALTH_RANGE_KEY, opHealthRange.value);
+      } catch (storageError) {
+        void storageError;
+      }
+      loadHealthBar();
+    });
+  }
+
+  document.querySelectorAll('input[name="opSeverity"]').forEach(function(input) {
+    input.addEventListener('change', function() {
+      if (!input.checked) return;
+      severityFilter = input.value;
+      selectedCode = null;
+      groupLimit = GROUP_PAGE;
+      eventLimit = EVENT_PAGE;
+      renderErrorFeed();
+      updateErrorCodeSelection();
+    });
+  });
+
+  if (opFeedMore) {
+    opFeedMore.addEventListener('click', function() {
+      if (groupedMode) groupLimit += 10;
+      else eventLimit += EVENT_PAGE;
+      renderErrorFeed();
+    });
+  }
+
+  if (opGroupToggle) {
+    opGroupToggle.addEventListener('click', function(event) {
+      event.preventDefault();
+      groupedMode = !groupedMode;
+      groupLimit = GROUP_PAGE;
+      eventLimit = EVENT_PAGE;
+      opGroupToggle.textContent = groupedMode ? 'Show individual events' : 'Group repeated errors';
+      renderErrorFeed();
     });
   }
 
@@ -1524,6 +1878,7 @@ function bootstrapOperationsSection() {
         loadErrorSummary();
         loadRecentErrors(false);
         loadOpTrends();
+        loadHealthBar();
       }
       startOpPolling();
     }
@@ -1531,13 +1886,14 @@ function bootstrapOperationsSection() {
 
   var operationsTabButton = document.getElementById('opsTabBtn');
   operationsTabButton?.addEventListener('shown.bs.tab', function() {
-    [methodChart, statusChart, endpointChart, latencyEndpointChart, trendReqRate, trendThroughput, trendLatency, trendErrorRate, trendErrorCodes].forEach(function(chart) {
+    [methodStatusChart, endpointChart, latencyEndpointChart, trendReqRate, trendThroughput, trendLatency, trendErrorRate, trendErrorCodes].forEach(function(chart) {
       if (chart) chart.resize();
     });
     if (!operationsLoadSucceeded) loadOperationsSection(true);
   });
 
   initOpCharts();
+  renderHealthBar();
   loadOperationsSection(false);
   startOpPolling();
 })();

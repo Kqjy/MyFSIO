@@ -119,7 +119,7 @@ pub async fn admin_audit_layer(
         };
         state
             .audit_log
-            .record(crate::services::audit_log::AuditEntry {
+            .record_async(crate::services::audit_log::AuditEntry {
                 ts: chrono::Utc::now().to_rfc3339(),
                 correlation_id: uuid::Uuid::new_v4().to_string(),
                 origin_site_id: None,
@@ -134,7 +134,8 @@ pub async fn admin_audit_layer(
                 idempotency_key: None,
                 error: None,
                 attribution: Some(crate::services::audit_log::ATTRIBUTION_VERIFIED.to_string()),
-            });
+            })
+            .await;
     }
     response
 }

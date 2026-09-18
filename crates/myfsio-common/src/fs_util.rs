@@ -180,4 +180,15 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn directory_fsync_and_permission_tightening_are_no_ops_off_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, b"material").unwrap();
+        assert!(fsync_dir(dir.path()).is_ok());
+        assert!(restrict_secret_permissions(&path).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), b"material");
+    }
 }

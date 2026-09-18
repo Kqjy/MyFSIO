@@ -1610,7 +1610,7 @@ pub async fn audit_log_page(
     let mut ctx = page_context(&state, &session, "ui.audit_log");
     let (api_base, _) = parse_api_base(&state);
     ctx.insert("api_base", &api_base);
-    let entries = state.audit_log.read_recent(200);
+    let entries = state.audit_log.read_recent_async(200).await;
     ctx.insert("entries", &entries);
     ctx.insert("audit_enabled", &state.audit_log.enabled());
     render(&state, "audit_log.html", &ctx)
@@ -1658,7 +1658,7 @@ pub async fn cluster_dashboard(
         .filter(|s| s.get("online").and_then(|v| v.as_bool()).unwrap_or(false))
         .count();
 
-    let audit_entries = state.audit_log.read_recent(10);
+    let audit_entries = state.audit_log.read_recent_async(10).await;
     ctx.insert("cluster_sites", &sites);
     ctx.insert("cluster_total_buckets", &total_buckets);
     ctx.insert("cluster_total_objects", &total_objects);
@@ -1941,7 +1941,8 @@ pub async fn add_peer_site(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await
+        if let Err(reason) =
+            crate::services::endpoint_guard::guard_external_endpoint_async(&endpoint).await
         {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
@@ -2119,7 +2120,8 @@ pub async fn update_peer_site(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await
+        if let Err(reason) =
+            crate::services::endpoint_guard::guard_external_endpoint_async(&endpoint).await
         {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
@@ -3684,7 +3686,8 @@ pub async fn create_connection(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await
+        if let Err(reason) =
+            crate::services::endpoint_guard::guard_external_endpoint_async(endpoint).await
         {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
@@ -3800,7 +3803,8 @@ pub async fn update_connection(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await
+        if let Err(reason) =
+            crate::services::endpoint_guard::guard_external_endpoint_async(endpoint).await
         {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",

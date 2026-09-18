@@ -153,7 +153,7 @@ async fn enforce_outbound_endpoint(state: &AppState, endpoint: &str) -> Option<S
     if state.config.allow_internal_endpoints {
         return None;
     }
-    match crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+    match crate::services::endpoint_guard::guard_external_endpoint_async(endpoint).await {
         Ok(()) => None,
         Err(reason) => Some(format!(
             "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
@@ -1609,7 +1609,7 @@ pub async fn audit_log_recent(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 1000);
-    let entries = state.audit_log.read_recent(limit);
+    let entries = state.audit_log.read_recent_async(limit).await;
     json_response(
         StatusCode::OK,
         serde_json::json!({

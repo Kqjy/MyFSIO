@@ -1181,7 +1181,7 @@ impl ReplicationManager {
         if self.allow_internal_endpoints {
             return Ok(());
         }
-        crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await
+        crate::services::endpoint_guard::guard_external_endpoint_async(endpoint).await
     }
 
     pub(crate) fn http_client(&self) -> aws_smithy_runtime_api::client::http::SharedHttpClient {

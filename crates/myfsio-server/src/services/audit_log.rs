@@ -56,6 +56,24 @@ impl AuditLog {
         self.enabled
     }
 
+    pub async fn record_async(self: &Arc<Self>, entry: AuditEntry) {
+        if !self.enabled {
+            return;
+        }
+        let this = Arc::clone(self);
+        let _ = tokio::task::spawn_blocking(move || this.record(entry)).await;
+    }
+
+    pub async fn read_recent_async(self: &Arc<Self>, limit: usize) -> Vec<serde_json::Value> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let this = Arc::clone(self);
+        tokio::task::spawn_blocking(move || this.read_recent(limit))
+            .await
+            .unwrap_or_default()
+    }
+
     pub fn record(&self, entry: AuditEntry) {
         if !self.enabled {
             return;

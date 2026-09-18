@@ -333,97 +333,125 @@ impl LifecycleService {
             return None;
         }
 
-        let mut stack = VecDeque::from([versions_root]);
-        while let Some(current) = stack.pop_front() {
-            let entries = match std::fs::read_dir(&current) {
-                Ok(entries) => entries,
-                Err(err) => return Some(err.to_string()),
-            };
-            for entry in entries.flatten() {
-                let file_type = match entry.file_type() {
-                    Ok(file_type) => file_type,
-                    Err(_) => continue,
-                };
-                if file_type.is_dir() {
-                    stack.push_back(entry.path());
-                    continue;
-                }
-                if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
-                    continue;
-                }
-                let contents = match std::fs::read_to_string(entry.path()) {
-                    Ok(contents) => contents,
-                    Err(_) => continue,
-                };
-                let Ok(manifest) = serde_json::from_str::<Value>(&contents) else {
-                    continue;
-                };
-                let key = manifest
-                    .get("key")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if !rule.prefix.is_empty() && !key.starts_with(&rule.prefix) {
-                    continue;
-                }
-                let archived_at = manifest
-                    .get("archived_at")
-                    .and_then(|value| value.as_str())
-                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                    .map(|value| value.with_timezone(&Utc));
-                if archived_at.is_none() || archived_at.unwrap() >= cutoff {
-                    continue;
-                }
-                if !rule.tags.is_empty() {
-                    let Some(version_tags_value) = manifest.get("tags") else {
-                        continue;
+        let scan_bucket = bucket.to_string();
+        let scan_prefix = rule.prefix.clone();
+        let scan_tags = rule.tags.clone();
+        let scanned = tokio::task::spawn_blocking(
+            move || -> Result<Vec<(String, String, PathBuf)>, String> {
+                let mut candidates = Vec::new();
+                let mut stack = VecDeque::from([versions_root]);
+                while let Some(current) = stack.pop_front() {
+                    let entries = match std::fs::read_dir(&current) {
+                        Ok(entries) => entries,
+                        Err(err) => return Err(err.to_string()),
                     };
-                    let version_tags: Vec<myfsio_common::types::Tag> =
-                        serde_json::from_value(version_tags_value.clone()).unwrap_or_default();
-                    let matched = rule
-                        .tags
-                        .iter()
-                        .all(|(k, v)| version_tags.iter().any(|t| t.key == *k && t.value == *v));
-                    if !matched {
-                        continue;
+                    for entry in entries.flatten() {
+                        let file_type = match entry.file_type() {
+                            Ok(file_type) => file_type,
+                            Err(_) => continue,
+                        };
+                        if file_type.is_dir() {
+                            stack.push_back(entry.path());
+                            continue;
+                        }
+                        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                            continue;
+                        }
+                        let contents = match std::fs::read_to_string(entry.path()) {
+                            Ok(contents) => contents,
+                            Err(_) => continue,
+                        };
+                        let Ok(manifest) = serde_json::from_str::<Value>(&contents) else {
+                            continue;
+                        };
+                        let key = manifest
+                            .get("key")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if !scan_prefix.is_empty() && !key.starts_with(&scan_prefix) {
+                            continue;
+                        }
+                        let archived_at = manifest
+                            .get("archived_at")
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                            .map(|value| value.with_timezone(&Utc));
+                        if archived_at.is_none() || archived_at.unwrap() >= cutoff {
+                            continue;
+                        }
+                        if !scan_tags.is_empty() {
+                            let Some(version_tags_value) = manifest.get("tags") else {
+                                continue;
+                            };
+                            let version_tags: Vec<myfsio_common::types::Tag> =
+                                serde_json::from_value(version_tags_value.clone())
+                                    .unwrap_or_default();
+                            let matched = scan_tags.iter().all(|(k, v)| {
+                                version_tags.iter().any(|t| t.key == *k && t.value == *v)
+                            });
+                            if !matched {
+                                continue;
+                            }
+                        }
+                        if let Some(version_meta) =
+                            manifest.get("metadata").and_then(|m| m.as_object())
+                        {
+                            let metadata_map: std::collections::HashMap<String, String> =
+                                version_meta
+                                    .iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.clone(), s.to_string()))
+                                    })
+                                    .collect();
+                            if let Err(message) =
+                                object_lock::can_delete_object(&metadata_map, false)
+                            {
+                                tracing::info!(
+                                    bucket = %scan_bucket,
+                                    key = %key,
+                                    "lifecycle skip locked archived version: {}",
+                                    message
+                                );
+                                continue;
+                            }
+                        }
+                        let version_id = manifest
+                            .get("version_id")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        candidates.push((key, version_id, entry.path()));
                     }
                 }
-                if let Some(version_meta) = manifest.get("metadata").and_then(|m| m.as_object()) {
-                    let metadata_map: std::collections::HashMap<String, String> = version_meta
-                        .iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                        .collect();
-                    if let Err(message) = object_lock::can_delete_object(&metadata_map, false) {
-                        tracing::info!(
-                            bucket = bucket,
-                            key = %key,
-                            "lifecycle skip locked archived version: {}",
-                            message
-                        );
-                        continue;
-                    }
+                Ok(candidates)
+            },
+        )
+        .await;
+
+        let candidates = match scanned {
+            Ok(Ok(candidates)) => candidates,
+            Ok(Err(message)) => return Some(message),
+            Err(join) => return Some(join.to_string()),
+        };
+
+        for (key, version_id, manifest_path) in candidates {
+            if !version_id.is_empty() {
+                match self
+                    .storage
+                    .delete_object_version(bucket, &key, &version_id)
+                    .await
+                {
+                    Ok(_) => result.versions_deleted += 1,
+                    Err(err) => result
+                        .errors
+                        .push(format!("expire version {}: {}", version_id, err)),
                 }
-                let version_id = manifest
-                    .get("version_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                if !version_id.is_empty() {
-                    match self
-                        .storage
-                        .delete_object_version(bucket, &key, version_id)
-                        .await
-                    {
-                        Ok(_) => result.versions_deleted += 1,
-                        Err(err) => result
-                            .errors
-                            .push(format!("expire version {}: {}", version_id, err)),
-                    }
-                } else {
-                    let data_path = entry.path().with_file_name(format!("{}.bin", version_id));
-                    let _ = std::fs::remove_file(&data_path);
-                    let _ = std::fs::remove_file(entry.path());
-                    result.versions_deleted += 1;
-                }
+            } else {
+                let data_path = manifest_path.with_extension("bin");
+                let _ = tokio::fs::remove_file(&data_path).await;
+                let _ = tokio::fs::remove_file(&manifest_path).await;
+                result.versions_deleted += 1;
             }
         }
         None
@@ -1336,6 +1364,47 @@ mod tests {
         let history = read_history(tmp.path(), "docs", 50, 0);
         assert_eq!(history["total"], 1);
         assert_eq!(history["executions"][0]["versions_deleted"], 1);
+    }
+
+    #[tokio::test]
+    async fn noncurrent_expiration_removes_data_file_when_manifest_lacks_version_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FsStorageBackend::new(tmp.path().to_path_buf()));
+        storage.create_bucket("docs").await.unwrap();
+
+        let version_dir = version_root_for_bucket(tmp.path(), "docs")
+            .join("logs")
+            .join("file.txt");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let manifest = version_dir.join("legacy-1.json");
+        let data = version_dir.join("legacy-1.bin");
+        let legacy_manifest = json!({
+            "key": "logs/file.txt",
+            "size": 3,
+            "archived_at": (Utc::now() - Duration::days(45)).to_rfc3339(),
+            "etag": "etag",
+        });
+        std::fs::write(&manifest, serde_json::to_string(&legacy_manifest).unwrap()).unwrap();
+        std::fs::write(&data, b"old").unwrap();
+
+        let lifecycle_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter><Prefix>logs/</Prefix></Filter>
+                <NoncurrentVersionExpiration><NoncurrentDays>30</NoncurrentDays></NoncurrentVersionExpiration>
+              </Rule>
+            </LifecycleConfiguration>"#;
+        let mut config = storage.get_bucket_config("docs").await.unwrap();
+        config.lifecycle = Some(Value::String(lifecycle_xml.to_string()));
+        storage.set_bucket_config("docs", &config).await.unwrap();
+
+        let service =
+            LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
+        let result = service.run_cycle().await.unwrap();
+        assert_eq!(result["versions_deleted"], 1);
+        assert!(!manifest.exists());
+        assert!(!data.exists());
     }
 
     #[tokio::test]

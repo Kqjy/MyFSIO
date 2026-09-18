@@ -260,7 +260,9 @@ pub async fn get_location(state: &AppState, _bucket: &str) -> Response {
     xml_response(StatusCode::OK, xml)
 }
 
-pub fn parse_encryption_config(value: &serde_json::Value) -> Option<(String, Option<String>)> {
+pub(crate) fn parse_encryption_config(
+    value: &serde_json::Value,
+) -> Option<(String, Option<String>)> {
     if let Some(obj) = value.as_object() {
         if let Some(alg) = obj
             .get("sse_algorithm")

@@ -288,6 +288,15 @@ async fn main() {
         }
     }
 
+    #[cfg(not(unix))]
+    tracing::warn!(
+        "This platform does not support directory fsync or POSIX file modes. Rename-namespace \
+         durability falls back to the filesystem's own journaling, and secret files such as \
+         iam.json, .secret, .connections_key and the encryption keys inherit their directory's \
+         ACL instead of being restricted to the owner. Restrict the ACL on the storage root \
+         yourself, and prefer Linux for production deployments."
+    );
+
     let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     if let Some(ref gc) = state.gc {

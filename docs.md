@@ -629,6 +629,8 @@ Snapshots are stored in `data/.myfsio.sys/config/operation_metrics.json`.
 
 Empty operation windows are not persisted. The Metrics UI zero-fills gaps in charts, and `/ui/metrics/operations/error-summary?hours=1|6|24` merges the live window with persisted snapshots so S3 API error codes remain visible after snapshot rollover. Recent in-memory error details are exposed at `/ui/metrics/operations/errors?limit=N&code=X&bucket=Y`.
 
+The Operations tab splits errors into server (`5xx`) and client (`4xx`) counts rather than a single total, because a 4xx is usually a caller problem while a 5xx is the server's. Its Recent errors feed pulls the whole 256-entry ring buffer and groups repeated failures client-side by error code, method, bucket and status, so one misbehaving client collapses into a single expandable row carrying its repeat count, first/last seen, latest key and request ID; a toggle switches back to ungrouped individual events, and severity buttons plus per-code chips filter both views. Above it, a request-health bar renders one colored tick per operation snapshot — green for clean, amber when only 4xx appeared, red for any 5xx, neutral for windows with no traffic — over a selectable 1h, 6h or 24h range, merging adjacent snapshots into at most 96 ticks on the longer ranges and appending the live window as the final tick.
+
 ## 9. Encryption and KMS
 
 Object encryption and built-in KMS are both optional.

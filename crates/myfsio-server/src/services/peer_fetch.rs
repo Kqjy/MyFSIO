@@ -179,25 +179,26 @@ impl PeerFetcher {
             return false;
         }
 
-        let default_encryption = match crate::handlers::resolve_bucket_default_encryption(
-            &*self.storage,
-            self.encryption.is_some(),
-            local_bucket,
-        )
-        .await
-        {
-            Ok(context) => context,
-            Err(err) => {
-                tracing::error!(
-                    "Refusing to store pulled object {}/{}: {}",
-                    local_bucket,
-                    key,
-                    err.message
-                );
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return false;
-            }
-        };
+        let default_encryption =
+            match crate::services::bucket_encryption::resolve_bucket_default_encryption(
+                &*self.storage,
+                self.encryption.is_some(),
+                local_bucket,
+            )
+            .await
+            {
+                Ok(context) => context,
+                Err(err) => {
+                    tracing::error!(
+                        "Refusing to store pulled object {}/{}: {}",
+                        local_bucket,
+                        key,
+                        err.message
+                    );
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return false;
+                }
+            };
 
         if let Some(enc_ctx) = default_encryption {
             let result = self
@@ -599,8 +600,10 @@ mod tests {
             "sse_algorithm": "AES256"
         })))
         .await;
-        let resolved =
-            crate::handlers::resolve_bucket_default_encryption(&storage, false, "pull").await;
+        let resolved = crate::services::bucket_encryption::resolve_bucket_default_encryption(
+            &storage, false, "pull",
+        )
+        .await;
         let error = match resolved {
             Ok(_) => panic!("a default-encrypted bucket must not accept a plaintext peer pull"),
             Err(error) => error,
@@ -618,10 +621,12 @@ mod tests {
             "sse_algorithm": "AES256"
         })))
         .await;
-        let context = crate::handlers::resolve_bucket_default_encryption(&storage, true, "pull")
-            .await
-            .expect("bucket default encryption resolves")
-            .expect("a default-encrypted bucket yields an encryption context");
+        let context = crate::services::bucket_encryption::resolve_bucket_default_encryption(
+            &storage, true, "pull",
+        )
+        .await
+        .expect("bucket default encryption resolves")
+        .expect("a default-encrypted bucket yields an encryption context");
         assert_eq!(
             context.algorithm,
             myfsio_crypto::encryption::SseAlgorithm::Aes256
@@ -632,9 +637,11 @@ mod tests {
     #[tokio::test]
     async fn peer_pull_into_an_unencrypted_bucket_stays_unencrypted() {
         let (storage, _tmp) = backend_with_default_encryption(None).await;
-        let context = crate::handlers::resolve_bucket_default_encryption(&storage, true, "pull")
-            .await
-            .expect("bucket without default encryption resolves");
+        let context = crate::services::bucket_encryption::resolve_bucket_default_encryption(
+            &storage, true, "pull",
+        )
+        .await
+        .expect("bucket without default encryption resolves");
         assert!(context.is_none());
     }
 

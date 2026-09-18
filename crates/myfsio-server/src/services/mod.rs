@@ -1,8 +1,10 @@
 pub mod access_logging;
 pub mod acl;
 pub mod audit_log;
+pub mod bucket_encryption;
 pub mod cluster_attest;
 pub mod disk_limiter;
+pub mod endpoint_guard;
 pub mod gc;
 pub mod integrity;
 pub mod lifecycle;
