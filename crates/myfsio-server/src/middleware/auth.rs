@@ -634,12 +634,8 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
     if let Some(metrics) = &state.metrics {
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
         let status = response.status().as_u16();
-        let bytes_out = response
-            .headers()
-            .get(axum::http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+        let bytes_out = crate::middleware::response_bytes_out(&method, &response);
+        let source = metrics_source(&path);
         let error_code = if status >= 400 {
             Some(
                 response
@@ -664,21 +660,50 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
             status,
             latency_ms,
             bytes_in,
-            bytes_out,
+            bytes_out.unwrap_or(0),
             error_code.as_deref(),
             bucket.as_deref(),
             key.as_deref(),
             request_id.as_deref(),
-            "api",
+            source,
         );
+        if bytes_out.is_none() {
+            return crate::middleware::count_streamed_bytes(
+                response,
+                metrics.clone(),
+                method.as_str(),
+                endpoint_type,
+                source,
+            );
+        }
     }
 
     response
 }
 
+fn metrics_source(path: &str) -> &'static str {
+    if path == "/myfsio/health" || path == "/myfsio/admin" || path.starts_with("/myfsio/admin/") {
+        crate::services::metrics::SOURCE_INTERNAL
+    } else {
+        crate::services::metrics::SOURCE_API
+    }
+}
+
 fn classify_endpoint(path: &str, query: &str) -> &'static str {
     if path == "/" {
         return "list_buckets";
+    }
+    if path == "/myfsio/health" {
+        return "health";
+    }
+    if path.starts_with("/myfsio/admin/peer/") || path.starts_with("/myfsio/admin/relay/") {
+        return "admin_peer";
+    }
+    if path == "/myfsio/admin" || path.starts_with("/myfsio/admin/") {
+        return "admin";
+    }
+    if path == "/myfsio/kms" || path.starts_with("/myfsio/kms/") {
+        return "kms";
     }
     let segments: Vec<&str> = path
         .trim_start_matches('/')
@@ -2177,10 +2202,32 @@ fn error_response(err: S3Error, resource: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        action_grant_matches, policy_action_matches, resolve_object_action, resource_matches,
-        wildcard_match, wildcard_match_case_sensitive,
+        action_grant_matches, classify_endpoint, metrics_source, policy_action_matches,
+        resolve_object_action, resource_matches, wildcard_match, wildcard_match_case_sensitive,
     };
     use axum::http::Method;
+
+    #[test]
+    fn metrics_classify_internal_paths_apart_from_s3_traffic() {
+        assert_eq!(classify_endpoint("/myfsio/health", ""), "health");
+        assert_eq!(metrics_source("/myfsio/health"), "internal");
+        assert_eq!(classify_endpoint("/myfsio/admin/sites", ""), "admin");
+        assert_eq!(metrics_source("/myfsio/admin/sites"), "internal");
+        assert_eq!(
+            classify_endpoint("/myfsio/admin/relay/site-b/sites", ""),
+            "admin_peer"
+        );
+        assert_eq!(
+            classify_endpoint("/myfsio/admin/peer/sites", ""),
+            "admin_peer"
+        );
+        assert_eq!(classify_endpoint("/myfsio/kms/encrypt", ""), "kms");
+        assert_eq!(metrics_source("/myfsio/kms/encrypt"), "api");
+        assert_eq!(classify_endpoint("/photos/a.jpg", ""), "object");
+        assert_eq!(metrics_source("/photos/a.jpg"), "api");
+        assert_eq!(classify_endpoint("/myfsio-data/health", ""), "object");
+        assert_eq!(metrics_source("/myfsio-data/health"), "api");
+    }
 
     #[test]
     fn version_id_query_selects_version_scoped_s3_actions() {

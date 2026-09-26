@@ -174,7 +174,20 @@ fn render_metrics() {
             "uptime_days": 0, "uptime_seconds": 0, "uptime_display": "0h 0m", "versions": 0
         }),
     );
-    ctx.insert("has_issues", &false);
+    ctx.insert("has_issues", &true);
+    ctx.insert(
+        "health",
+        &json!({
+            "status": "warning",
+            "checks": ["cpu", "memory", "disk", "disk_queue"],
+            "issues": [{
+                "key": "disk_queue",
+                "severity": "warning",
+                "label": "Disk queue",
+                "detail": "3 requests got 503 SlowDown <b>"
+            }]
+        }),
+    );
     ctx.insert(
         "summary",
         &json!({
@@ -185,7 +198,24 @@ fn render_metrics() {
             "has_issues": false
         }),
     );
-    render_or_panic("metrics.html", &ctx);
+    let rendered = render_to_string_or_panic("metrics.html", &ctx);
+    assert!(rendered.contains("health-banner health-warning"));
+    assert!(rendered.contains("Needs attention"));
+    assert!(rendered.contains("3 requests got 503 SlowDown &lt;b&gt;"));
+    assert!(rendered.contains("id=\"diskPressureTrend\""));
+
+    ctx.insert("metrics_history_enabled", &true);
+    ctx.insert(
+        "health",
+        &json!({ "status": "ok", "checks": ["cpu", "server_errors"], "issues": [] }),
+    );
+    let rendered = render_to_string_or_panic("metrics.html", &ctx);
+    assert!(rendered.contains("All systems normal"));
+    assert!(rendered.contains("Checked CPU, S3 5xx rate (15 min)"));
+    assert!(rendered.contains("id=\"storageHistoryChart\""));
+    assert!(rendered.contains("id=\"storageBucketChart\""));
+    assert!(rendered.contains("title=\"Last hour\""));
+    assert!(rendered.contains("var historySparklines = true;"));
 }
 
 #[test]

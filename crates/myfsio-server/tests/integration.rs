@@ -2165,6 +2165,74 @@ async fn test_ui_operation_metrics_error_endpoints() {
 }
 
 #[tokio::test]
+async fn test_ui_operation_metrics_scope_and_range() {
+    let (mut state, _tmp) = test_ui_state();
+    state.metrics = Some(Arc::new(
+        myfsio_server::services::metrics::MetricsService::new(
+            &state.config.storage_root,
+            myfsio_server::services::metrics::MetricsConfig {
+                interval_minutes: 5,
+                retention_hours: 24,
+            },
+        ),
+    ));
+    let metrics = state.metrics.as_ref().unwrap().clone();
+    metrics.record_request(
+        "GET",
+        "object",
+        404,
+        3.0,
+        0,
+        0,
+        Some("NoSuchKey"),
+        Some("bucket-a"),
+        Some("key-a"),
+        Some("req-a"),
+        "api",
+    );
+    metrics.record_request(
+        "GET", "health", 200, 0.2, 0, 0, None, None, None, None, "internal",
+    );
+
+    let (session_id, _csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state);
+
+    let get_json = |uri: &'static str| {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        async move {
+            let resp = app
+                .oneshot(ui_request(Method::GET, uri, &session_id, None))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes())
+                .unwrap()
+        }
+    };
+
+    let api = get_json("/ui/metrics/operations?hours=1&scope=api").await;
+    assert_eq!(api["stats"]["scope"], "api");
+    assert_eq!(api["stats"]["hours"], 1);
+    assert_eq!(api["stats"]["totals"]["count"], 1);
+    assert_eq!(api["stats"]["by_status_class"]["4xx"], 1);
+    assert_eq!(api["stats"]["live"]["count"], 1);
+    assert_eq!(api["retention_hours"], 24);
+
+    let internal = get_json("/ui/metrics/operations?hours=1&scope=internal").await;
+    assert_eq!(internal["stats"]["totals"]["count"], 1);
+    assert_eq!(internal["stats"]["by_endpoint"]["health"]["count"], 1);
+
+    let ui_summary = get_json("/ui/metrics/operations/error-summary?hours=1&scope=ui").await;
+    assert_eq!(ui_summary["total_errors"], 0);
+
+    let ui_errors = get_json("/ui/metrics/operations/errors?scope=ui&hours=1").await;
+    assert_eq!(ui_errors["errors"].as_array().unwrap().len(), 0);
+    let api_errors = get_json("/ui/metrics/operations/errors?scope=api&hours=1").await;
+    assert_eq!(api_errors["errors"][0]["code"], "NoSuchKey");
+}
+
+#[tokio::test]
 async fn test_ui_operation_metrics_error_endpoints_require_auth() {
     let (mut state, _tmp) = test_ui_state();
     state.metrics = Some(Arc::new(

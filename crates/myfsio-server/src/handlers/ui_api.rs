@@ -28,6 +28,10 @@ use tokio_util::io::StreamReader;
 
 use crate::handlers::{self, ObjectQuery};
 use crate::middleware::session::SessionHandle;
+use crate::services::health_signals::{
+    self, DiskQueueSignal, HealthInputs, ReplicationSignal, ServerErrorSignal,
+};
+use crate::services::metrics::MetricsScope;
 use crate::services::object_lock;
 use crate::services::peer_admin::PeerAdminStatus;
 use crate::state::AppState;
@@ -5052,10 +5056,12 @@ pub async fn collect_metrics(state: &AppState) -> Value {
     let mut total_objects: u64 = 0;
     let mut total_bytes: u64 = 0;
     let mut total_versions: u64 = 0;
+    let mut total_version_bytes: u64 = 0;
     for stats in stats.into_iter().flatten() {
         total_objects += stats.objects;
         total_bytes += stats.bytes;
         total_versions += stats.version_count;
+        total_version_bytes += stats.version_bytes;
     }
 
     let (cpu_percent, mem_used, mem_total) = sample_system().await;
@@ -5080,6 +5086,14 @@ pub async fn collect_metrics(state: &AppState) -> Value {
     let storage_refreshed_at_display = storage_refreshed_at
         .as_ref()
         .map(|timestamp| format_display_timestamp(timestamp, display_tz(state)));
+    let health = assess_health(
+        state,
+        cpu_percent,
+        mem_pct,
+        disk_pct,
+        state.disk_limiter.enabled().then_some(&disk_pressure),
+    )
+    .await;
 
     json!({
         "cpu_percent": cpu_percent,
@@ -5100,6 +5114,7 @@ pub async fn collect_metrics(state: &AppState) -> Value {
             "buckets": bucket_count,
             "objects": total_objects,
             "versions": total_versions,
+            "versions_bytes": human_size(total_version_bytes),
             "uptime_days": uptime_days.floor() as u64,
             "uptime_seconds": uptime_seconds,
             "uptime_display": uptime_display,
@@ -5115,22 +5130,77 @@ pub async fn collect_metrics(state: &AppState) -> Value {
             "queue_wait_ms_total": disk_pressure.queue_wait_ms_total,
             "queue_wait_ms_avg": disk_pressure.queue_wait_ms_avg,
             "upload_spool_bytes": disk_pressure.upload_spool_bytes,
+            "queue_timeout_ms": state.disk_limiter.queue_timeout().as_millis() as u64,
+            "recent": disk_pressure.recent,
+            "history": disk_pressure.history,
         },
         "replication_queue": {
             "depth": state.replication.queue_depth(),
+            "capacity": state.config.replication_queue_capacity,
             "overflow_total": state.replication.queue_overflow_total(),
         },
+        "health": health,
+    })
+}
+
+async fn assess_health(
+    state: &AppState,
+    cpu_percent: f64,
+    memory_percent: f64,
+    disk_percent: f64,
+    disk_pressure: Option<&crate::services::disk_limiter::DiskPressureSnapshot>,
+) -> health_signals::HealthAssessment {
+    let server_errors = state.metrics.as_ref().map(|metrics| {
+        let counts = metrics.recent_status_counts(
+            health_signals::SERVER_ERROR_WINDOW_SECONDS,
+            MetricsScope::Api,
+        );
+        ServerErrorSignal {
+            requests: counts.requests,
+            server_errors: counts.server_errors,
+            window_seconds: counts.window_seconds,
+        }
+    });
+    let disk_queue = disk_pressure.map(|pressure| DiskQueueSignal {
+        timeouts: pressure.recent.timeouts,
+        wait_ms_avg: pressure.recent.wait_ms_avg,
+        window_seconds: pressure.recent.window_seconds,
+        queue_timeout_ms: state.disk_limiter.queue_timeout().as_millis() as u64,
+    });
+    let replication = {
+        let manager = state.replication.clone();
+        let failed = tokio::task::spawn_blocking(move || {
+            let buckets: Vec<String> = manager.rules_snapshot().into_keys().collect();
+            if buckets.is_empty() {
+                return None;
+            }
+            Some(
+                buckets
+                    .iter()
+                    .map(|bucket| manager.get_failure_count(bucket) as u64)
+                    .sum::<u64>(),
+            )
+        })
+        .await
+        .unwrap_or(None);
+        failed.map(|failed_objects| ReplicationSignal {
+            queue_depth: state.replication.queue_depth() as u64,
+            queue_capacity: state.config.replication_queue_capacity as u64,
+            failed_objects,
+        })
+    };
+    health_signals::assess(&HealthInputs {
+        cpu_percent,
+        memory_percent,
+        disk_percent,
+        server_errors,
+        disk_queue,
+        replication,
     })
 }
 
 pub async fn metrics_api(State(state): State<AppState>) -> Response {
     Json(collect_metrics(&state).await).into_response()
-}
-
-#[derive(Deserialize, Default)]
-pub struct HoursQuery {
-    #[serde(default)]
-    pub hours: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -5149,6 +5219,18 @@ pub struct OperationErrorsQuery {
     pub code: Option<String>,
     #[serde(default)]
     pub bucket: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub hours: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct OperationsQuery {
+    #[serde(default)]
+    pub hours: Option<u64>,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 pub async fn metrics_history(
@@ -5188,14 +5270,22 @@ pub async fn metrics_history(
     }
 }
 
-pub async fn metrics_operations(State(state): State<AppState>) -> Response {
+pub async fn metrics_operations(
+    State(state): State<AppState>,
+    Query(q): Query<OperationsQuery>,
+) -> Response {
     match &state.metrics {
         Some(metrics) => {
-            let stats = metrics.get_current_stats();
+            let scope = MetricsScope::parse(q.scope.as_deref());
+            let stats = match q.hours {
+                Some(hours) => metrics.range_stats(hours, scope),
+                None => metrics.get_current_stats(scope),
+            };
             Json(json!({
                 "enabled": true,
                 "stats": stats,
                 "interval_minutes": metrics.interval_minutes(),
+                "retention_hours": metrics.retention_hours(),
             }))
             .into_response()
         }
@@ -5209,15 +5299,18 @@ pub async fn metrics_operations(State(state): State<AppState>) -> Response {
 
 pub async fn metrics_operations_history(
     State(state): State<AppState>,
-    Query(q): Query<HoursQuery>,
+    Query(q): Query<OperationsQuery>,
 ) -> Response {
     match &state.metrics {
         Some(metrics) => {
-            let history = metrics.get_history(q.hours.or(Some(24)));
+            let scope = MetricsScope::parse(q.scope.as_deref());
+            let history = metrics.get_history(q.hours.or(Some(24)), scope);
             Json(json!({
                 "enabled": true,
+                "scope": scope.as_str(),
                 "history": history,
                 "interval_minutes": metrics.interval_minutes(),
+                "retention_hours": metrics.retention_hours(),
             }))
             .into_response()
         }
@@ -5239,6 +5332,8 @@ pub async fn metrics_operations_errors(
             q.limit.unwrap_or(100),
             q.code.as_deref().filter(|value| !value.is_empty()),
             q.bucket.as_deref().filter(|value| !value.is_empty()),
+            MetricsScope::parse(q.scope.as_deref()),
+            q.hours.filter(|hours| *hours > 0),
         ))
         .into_response(),
         None => Json(json!({
@@ -5252,7 +5347,7 @@ pub async fn metrics_operations_errors(
 
 pub async fn metrics_operations_error_summary(
     State(state): State<AppState>,
-    Query(q): Query<HoursQuery>,
+    Query(q): Query<OperationsQuery>,
 ) -> Response {
     let requested = match q.hours.unwrap_or(1) {
         6 => 6,
@@ -5260,7 +5355,10 @@ pub async fn metrics_operations_error_summary(
         _ => 1,
     };
     match &state.metrics {
-        Some(metrics) => Json(metrics.error_summary(requested)).into_response(),
+        Some(metrics) => {
+            Json(metrics.error_summary(requested, MetricsScope::parse(q.scope.as_deref())))
+                .into_response()
+        }
         None => Json(json!({
             "enabled": false,
             "hours": requested,

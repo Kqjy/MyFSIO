@@ -1,5 +1,6 @@
 mod auth;
 mod bucket_cors;
+mod byte_count;
 pub mod ratelimit;
 pub mod session;
 pub(crate) mod sha_body;
@@ -10,6 +11,7 @@ pub use auth::{
 pub(crate) use auth::{authorize_action, current_request_context};
 pub use auth::{StreamingPayloadVariant, StreamingSigV4Context};
 pub use bucket_cors::bucket_cors_layer;
+pub(crate) use byte_count::{count_streamed_bytes, response_bytes_out};
 pub use ratelimit::{
     rate_limit_layer, ui_login_rate_limit_layer, RateLimitLayerState, UiLoginRateLimitState,
 };
@@ -160,26 +162,30 @@ pub async fn ui_metrics_layer(State(state): State<AppState>, req: Request, next:
 
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
     let status = response.status().as_u16();
-    let bytes_out = response
-        .headers()
-        .get(axum::http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
+    let bytes_out = byte_count::response_bytes_out(&method, &response);
     metrics.record_request(
         method.as_str(),
         endpoint_type,
         status,
         latency_ms,
         bytes_in,
-        bytes_out,
+        bytes_out.unwrap_or(0),
         None,
         None,
         None,
         None,
-        "ui",
+        crate::services::metrics::SOURCE_UI,
     );
 
+    if bytes_out.is_none() {
+        return byte_count::count_streamed_bytes(
+            response,
+            metrics,
+            method.as_str(),
+            endpoint_type,
+            crate::services::metrics::SOURCE_UI,
+        );
+    }
     response
 }
 

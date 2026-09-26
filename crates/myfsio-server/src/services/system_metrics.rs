@@ -3,6 +3,7 @@ use myfsio_storage::fs_backend::FsStorageBackend;
 use myfsio_storage::traits::StorageEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use sysinfo::{Disks, System};
@@ -32,7 +33,12 @@ pub struct SystemMetricsSnapshot {
     pub memory_percent: f64,
     pub disk_percent: f64,
     pub storage_bytes: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bucket_bytes: BTreeMap<String, u64>,
 }
+
+pub const MAX_TRACKED_BUCKETS: usize = 10;
+pub const OTHER_BUCKETS_KEY: &str = "(other)";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemMetricsHistoryPoint {
@@ -57,6 +63,8 @@ pub struct SystemMetricsHistoryPoint {
     pub storage_bytes_min: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_bytes_max: Option<u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub bucket_bytes: BTreeMap<String, u64>,
 }
 
 pub struct SystemMetricsHistory {
@@ -77,10 +85,28 @@ pub struct SystemMetricsService {
     storage_bytes_cache: Arc<RwLock<StorageBytesCache>>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct StorageBytesCache {
     bytes: u64,
+    buckets: BTreeMap<String, u64>,
     last_refresh: Option<DateTime<Utc>>,
+}
+
+fn cap_bucket_bytes(mut per_bucket: Vec<(String, u64)>) -> BTreeMap<String, u64> {
+    per_bucket.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut capped: BTreeMap<String, u64> = BTreeMap::new();
+    let mut other = 0u64;
+    for (index, (name, bytes)) in per_bucket.into_iter().enumerate() {
+        if index < MAX_TRACKED_BUCKETS {
+            capped.insert(name, bytes);
+        } else {
+            other += bytes;
+        }
+    }
+    if other > 0 {
+        capped.insert(OTHER_BUCKETS_KEY.to_string(), other);
+    }
+    capped
 }
 
 impl SystemMetricsService {
@@ -207,6 +233,7 @@ impl From<SystemMetricsSnapshot> for SystemMetricsHistoryPoint {
             storage_bytes: snapshot.storage_bytes,
             storage_bytes_min: None,
             storage_bytes_max: None,
+            bucket_bytes: snapshot.bucket_bytes,
         }
     }
 }
@@ -225,6 +252,7 @@ struct HistoryBucket {
     storage_sum: u128,
     storage_min: u64,
     storage_max: u64,
+    bucket_sums: BTreeMap<String, (u128, u64)>,
 }
 
 impl HistoryBucket {
@@ -243,6 +271,11 @@ impl HistoryBucket {
             storage_sum: snapshot.storage_bytes as u128,
             storage_min: snapshot.storage_bytes,
             storage_max: snapshot.storage_bytes,
+            bucket_sums: snapshot
+                .bucket_bytes
+                .iter()
+                .map(|(name, bytes)| (name.clone(), (*bytes as u128, 1)))
+                .collect(),
         }
     }
 
@@ -260,6 +293,11 @@ impl HistoryBucket {
         self.storage_sum += snapshot.storage_bytes as u128;
         self.storage_min = self.storage_min.min(snapshot.storage_bytes);
         self.storage_max = self.storage_max.max(snapshot.storage_bytes);
+        for (name, bytes) in &snapshot.bucket_bytes {
+            let entry = self.bucket_sums.entry(name.clone()).or_insert((0, 0));
+            entry.0 += *bytes as u128;
+            entry.1 += 1;
+        }
     }
 
     fn into_point(self, timestamp: DateTime<Utc>) -> SystemMetricsHistoryPoint {
@@ -277,6 +315,11 @@ impl HistoryBucket {
             storage_bytes: (self.storage_sum / self.count as u128) as u64,
             storage_bytes_min: Some(self.storage_min),
             storage_bytes_max: Some(self.storage_max),
+            bucket_bytes: self
+                .bucket_sums
+                .into_iter()
+                .map(|(name, (sum, count))| (name, (sum / count.max(1) as u128) as u64))
+                .collect(),
         }
     }
 }
@@ -396,7 +439,7 @@ async fn collect_snapshot(
         0.0
     };
 
-    let storage_bytes =
+    let (storage_bytes, bucket_bytes) =
         cached_storage_bytes(storage, storage_bytes_cache, storage_refresh_minutes).await;
 
     SystemMetricsSnapshot {
@@ -405,6 +448,7 @@ async fn collect_snapshot(
         memory_percent: round2(memory_percent),
         disk_percent: round2(disk_percent),
         storage_bytes,
+        bucket_bytes,
     }
 }
 
@@ -412,38 +456,44 @@ async fn cached_storage_bytes(
     storage: &Arc<FsStorageBackend>,
     cache: &Arc<RwLock<StorageBytesCache>>,
     storage_refresh_minutes: u64,
-) -> u64 {
+) -> (u64, BTreeMap<String, u64>) {
     let refresh_minutes = storage_refresh_minutes.max(5);
     let now = Utc::now();
     {
         let cached = cache.read().await;
         if let Some(last_refresh) = cached.last_refresh {
             if now - last_refresh < chrono::Duration::minutes(refresh_minutes as i64) {
-                return cached.bytes;
+                return (cached.bytes, cached.buckets.clone());
             }
         }
     }
 
-    let previous = { cache.read().await.bytes };
+    let previous = {
+        let cached = cache.read().await;
+        (cached.bytes, cached.buckets.clone())
+    };
     let storage = storage.clone();
     let handle = tokio::runtime::Handle::current();
     let refreshed = crate::services::background_io::run("storage-stats", move || {
         handle.block_on(async move {
             let mut total = 0u64;
+            let mut per_bucket = Vec::new();
             let buckets = storage.list_buckets().await.unwrap_or_default();
             for bucket in buckets {
                 if let Ok(stats) = storage.bucket_stats(&bucket.name).await {
                     total += stats.total_bytes();
+                    per_bucket.push((bucket.name, stats.total_bytes()));
                 }
             }
-            total
+            (total, cap_bucket_bytes(per_bucket))
         })
     })
     .await
     .unwrap_or(previous);
 
     let mut cached = cache.write().await;
-    cached.bytes = refreshed;
+    cached.bytes = refreshed.0;
+    cached.buckets = refreshed.1.clone();
     cached.last_refresh = Some(now);
     refreshed
 }
@@ -528,7 +578,53 @@ mod tests {
             memory_percent,
             disk_percent,
             storage_bytes,
+            bucket_bytes: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn bucket_bytes_keep_largest_and_fold_the_rest() {
+        let per_bucket: Vec<(String, u64)> = (0..13u64)
+            .map(|index| (format!("bucket-{index:02}"), (index + 1) * 100))
+            .collect();
+        let capped = cap_bucket_bytes(per_bucket);
+        assert_eq!(capped.len(), MAX_TRACKED_BUCKETS + 1);
+        assert_eq!(capped["bucket-12"], 1300);
+        assert!(!capped.contains_key("bucket-00"));
+        assert_eq!(capped[OTHER_BUCKETS_KEY], 100 + 200 + 300);
+        assert!(!cap_bucket_bytes(vec![("a".into(), 5)]).contains_key(OTHER_BUCKETS_KEY));
+    }
+
+    #[test]
+    fn aggregated_points_average_bucket_bytes_over_samples_present() {
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let mut first = history_snapshot(start, 10, 1.0, 1.0, 1.0, 300);
+        first.bucket_bytes = BTreeMap::from([("a".to_string(), 100), ("b".to_string(), 200)]);
+        let mut second = history_snapshot(start, 20, 1.0, 1.0, 1.0, 500);
+        second.bucket_bytes = BTreeMap::from([("a".to_string(), 300)]);
+        let result = aggregate_history(
+            vec![first, second],
+            start,
+            start + chrono::Duration::seconds(60),
+            1,
+        );
+        let point = &result.history[0];
+        assert_eq!(point.bucket_bytes["a"], 200);
+        assert_eq!(point.bucket_bytes["b"], 200);
+
+        let legacy: SystemMetricsSnapshot = serde_json::from_value(json!({
+            "timestamp": start,
+            "cpu_percent": 1.0,
+            "memory_percent": 1.0,
+            "disk_percent": 1.0,
+            "storage_bytes": 5
+        }))
+        .unwrap();
+        assert!(legacy.bucket_bytes.is_empty());
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("bucket_bytes")
+            .is_none());
     }
 
     #[test]

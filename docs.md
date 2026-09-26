@@ -615,7 +615,21 @@ METRICS_HISTORY_RETENTION_HOURS=72
 METRICS_STORAGE_REFRESH_MINUTES=30
 ```
 
-Snapshots are stored in `data/.myfsio.sys/config/metrics_history.json` with atomic temp-file replacement. CPU sampling and storage-size walks run on blocking worker threads; total stored bytes are refreshed on the `METRICS_STORAGE_REFRESH_MINUTES` cadence and reused between refreshes.
+Snapshots are stored in `data/.myfsio.sys/config/metrics_history.json` with atomic temp-file replacement. CPU sampling and storage-size walks run on blocking worker threads; total stored bytes are refreshed on the `METRICS_STORAGE_REFRESH_MINUTES` cadence and reused between refreshes. The Metrics History tab charts stored data (with the change over the selected range), disk, CPU and memory usage in a two-by-two grid. Stored data counts object bytes including archived versions; each snapshot also records `bucket_bytes` for the 10 largest buckets (the rest summed under `(other)`), shown by the chart's By bucket view. Snapshots written before this field existed appear as gaps in that view. When history is enabled, the CPU, memory and disk sparklines on the System tab show the last hour of history ending at the live value; otherwise they cover the time since the page opened. The Storage card counts current object versions only, with archived versions and their size shown underneath.
+
+### Metrics page health and disk pressure
+
+A health banner at the top of the Metrics page (`health` in `/ui/metrics/api`) reports `ok`, `warning` or `critical` from these checks:
+
+| Check | Warning | Critical |
+|---|---|---|
+| CPU / memory | above 80% / 85% | above 95% |
+| Disk space | above 90% full | above 95% full |
+| S3 5xx rate, last 15 min (needs `OPERATION_METRICS_ENABLED`) | at least 1% (with 20+ requests or 3+ errors), or 10+ errors | 5+ errors and at least 5% |
+| Disk queue, last 5 min (needs `HDD_READ_CONCURRENCY` / `HDD_WRITE_CONCURRENCY`) | any 503 SlowDown timeout, or average permit wait at least half of `DISK_QUEUE_TIMEOUT_SECONDS` | 10+ timeouts |
+| Replication (only when rules exist) | queue at least 50% full, or any object waiting for a retry | queue at least 90% full |
+
+Checks whose feature is off are skipped, and the banner lists which checks ran. The Disk pressure panel shows live permits in use, the average and maximum permit wait and 503 timeouts over the last 5 minutes (lifetime totals as secondary text), and a 60-minute per-minute trend of average wait and timeouts. The per-minute buckets live in memory and reset on restart.
 
 ### Operation metrics
 
@@ -634,9 +648,9 @@ OPERATION_METRICS_RETENTION_HOURS=24
 
 Snapshots are stored in `data/.myfsio.sys/config/operation_metrics.json`.
 
-Empty operation windows are not persisted. The Metrics UI zero-fills gaps in charts, and `/ui/metrics/operations/error-summary?hours=1|6|24` merges the live window with persisted snapshots so S3 API error codes remain visible after snapshot rollover. Recent in-memory error details are exposed at `/ui/metrics/operations/errors?limit=N&code=X&bucket=Y`.
+Empty operation windows are not persisted. Every request is tagged with a source: `api` (S3 and KMS clients), `ui` (the web console, including the Metrics page's own polling) or `internal` (`/myfsio/health`, the admin API and cluster peer relay traffic), and each snapshot stores per-source aggregates plus a sparse log-scale latency histogram so windows merge into exact counts and histogram-accurate percentiles. All operation endpoints accept `scope=api|ui|internal|all` (default `all`) and `hours=N`: `/ui/metrics/operations?hours=N` merges persisted snapshots in range with the live window (without `hours` it returns the live window only), `/ui/metrics/operations/history` returns snapshots projected to the scope, `/ui/metrics/operations/error-summary?hours=1|6|24` returns error-code and bucket counts, and `/ui/metrics/operations/errors?limit=N&code=X&bucket=Y` returns recent in-memory errors from per-source ring buffers. Snapshots written by older versions carry no per-source split; for them the S3 API and Console scopes are derived from the `ui_` endpoint prefix until they age out of retention.
 
-The Operations tab splits errors into server (`5xx`) and client (`4xx`) counts rather than a single total, because a 4xx is usually a caller problem while a 5xx is the server's. Its Recent errors feed pulls the whole 256-entry ring buffer and groups repeated failures client-side by error code, method, bucket and status, so one misbehaving client collapses into a single expandable row carrying its repeat count, first/last seen, latest key and request ID; a toggle switches back to ungrouped individual events, and severity buttons plus per-code chips filter both views. Above it, a request-health bar renders one colored tick per operation snapshot — green for clean, amber when only 4xx appeared, red for any 5xx, neutral for windows with no traffic — over a selectable 1h, 6h or 24h range, merging adjacent snapshots into at most 96 ticks on the longer ranges and appending the live window as the final tick.
+Latency is time to first byte: measured from request arrival until the response headers are ready, so it includes receiving an upload body but not streaming a download body. Bytes out come from `Content-Length`, then the body's exact size, and otherwise are counted as the body streams (recorded when the stream ends or the client disconnects); HEAD, 204 and 304 responses count as zero bytes out. The Operations tab has one toolbar that drives every section: a source switch (S3 API by default, Console, Internal, All) and a 1h/6h/24h range, both remembered per browser. It splits errors into server (`5xx`) and client (`4xx`) counts rather than a single total, because a 4xx is usually a caller problem while a 5xx is the server's. Its Recent errors feed pulls the whole 256-entry ring buffer and groups repeated failures client-side by error code, method, bucket and status, so one misbehaving client collapses into a single expandable row carrying its repeat count, first/last seen, latest key and request ID; a toggle switches back to ungrouped individual events, and severity buttons plus per-code chips filter both views. Above it, a request-health bar renders one colored tick per operation snapshot — green for clean, amber when only 4xx appeared, red for any 5xx, neutral for windows with no traffic — over the selected range, merging adjacent snapshots into at most 96 ticks on the longer ranges and appending the live window as the final tick.
 
 ## 9. Encryption and KMS
 

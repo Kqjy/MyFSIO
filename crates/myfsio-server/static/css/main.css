@@ -3486,3 +3486,49 @@ body:has(.login-card) .main-wrapper {
 	max-height: 560px;
 	overflow-y: auto;
 }
+
+.health-banner {
+	border-left: 4px solid var(--bs-success) !important;
+}
+
+.health-banner.health-warning {
+	border-left-color: var(--bs-warning) !important;
+}
+
+.health-banner.health-critical {
+	border-left-color: var(--bs-danger) !important;
+}
+
+.health-banner .health-icon {
+	width: 32px;
+	height: 32px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	background: var(--bs-success-bg-subtle);
+	color: var(--bs-success);
+}
+
+.health-banner.health-warning .health-icon {
+	background: var(--bs-warning-bg-subtle);
+	color: var(--bs-warning-text-emphasis);
+}
+
+.health-banner.health-critical .health-icon {
+	background: var(--bs-danger-bg-subtle);
+	color: var(--bs-danger);
+}
+
+.health-issues {
+	margin-top: 0.5rem;
+}
+
+.health-issues li {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 0.4rem;
+	padding: 0.15rem 0;
+}

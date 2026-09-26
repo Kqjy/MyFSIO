@@ -2342,12 +2342,11 @@ pub async fn metrics_dashboard(
         .get("storage_refreshed_at_display")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let mem_pct = memory
-        .get("percent")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let disk_pct = disk.get("percent").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let has_issues = cpu_percent > 80.0 || mem_pct > 85.0 || disk_pct > 90.0;
+    let health = metrics
+        .get("health")
+        .cloned()
+        .unwrap_or_else(|| json!({ "status": "ok", "issues": [], "checks": [] }));
+    let has_issues = health.get("status").and_then(Value::as_str) != Some("ok");
 
     ctx.insert("cpu_percent", &cpu_percent);
     ctx.insert("memory", &memory);
@@ -2359,6 +2358,7 @@ pub async fn metrics_dashboard(
         &storage_refreshed_at_display,
     );
     ctx.insert("has_issues", &has_issues);
+    ctx.insert("health", &health);
     ctx.insert("display_timezone", &state.config.display_timezone);
     ctx.insert(
         "summary",

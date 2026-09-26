@@ -51,6 +51,28 @@
   <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close" style="font-size: 0.65rem;"></button>
 </div>
 
+{% set health_count = health.issues | length %}
+<div id="healthBanner" class="card border-0 shadow-sm mb-4 health-banner health-{{ health.status }}" role="status" aria-live="polite">
+  <div class="card-body p-3 d-flex align-items-start gap-3">
+    <span class="health-icon">
+      <svg id="healthBannerIcon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+        {% if health.status == "critical" %}<path d="M11.46.146A.5.5 0 0 0 11.107 0H4.893a.5.5 0 0 0-.353.146L.146 4.54A.5.5 0 0 0 0 4.893v6.214a.5.5 0 0 0 .146.353l4.394 4.394a.5.5 0 0 0 .353.146h6.214a.5.5 0 0 0 .353-.146l4.394-4.394a.5.5 0 0 0 .146-.353V4.893a.5.5 0 0 0-.146-.353L11.46.146zM8 4c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 4.995A.905.905 0 0 1 8 4zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>{% elif health.status == "warning" %}<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>{% else %}<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>{% endif %}
+      </svg>
+    </span>
+    <div class="flex-grow-1" style="min-width: 0;">
+      <div class="fw-semibold" id="healthTitle">{% if health.status == "critical" %}Critical issues detected{% elif health.status == "warning" %}Needs attention{% else %}All systems normal{% endif %}</div>
+      <div class="small text-muted" id="healthDetail">{% if health_count > 0 %}{{ health_count }} issue{{ health_count | pluralize }}{% else %}Checked {% for check in health.checks %}{% if not loop.first %}, {% endif %}{% if check == "cpu" %}CPU{% elif check == "memory" %}memory{% elif check == "disk" %}disk space{% elif check == "server_errors" %}S3 5xx rate (15 min){% elif check == "disk_queue" %}disk queue (5 min){% elif check == "replication" %}replication{% else %}{{ check }}{% endif %}{% endfor %}{% endif %}</div>
+      <ul class="health-issues list-unstyled small mb-0{% if health_count == 0 %} d-none{% endif %}" id="healthIssues">
+        {% for issue in health.issues %}<li><span class="badge {% if issue.severity == "critical" %}bg-danger-subtle text-danger-emphasis{% else %}bg-warning-subtle text-warning-emphasis{% endif %}">{% if issue.severity == "critical" %}Critical{% else %}Warning{% endif %}</span> <span class="fw-semibold">{{ issue.label }}</span> <span class="text-muted">{{ issue.detail }}</span></li>{% endfor %}
+      </ul>
+    </div>
+    <div class="text-end small text-muted text-nowrap">
+      <div class="fw-semibold text-body" data-metric="health_uptime">{{ app.uptime_display | default(value="0h 0m") }}</div>
+      <div>Uptime</div>
+    </div>
+  </div>
+</div>
+
 <ul class="nav nav-tabs mb-4" id="metricsTabs" role="tablist">
   <li class="nav-item" role="presentation">
     <button class="nav-link active" id="systemTabBtn" data-bs-toggle="tab" data-bs-target="#systemTab" type="button" role="tab">System</button>
@@ -88,7 +110,7 @@
           <div class="mt-2">
             <small data-metric="cpu_status" class="badge bg-success-subtle text-success">Normal</small>
           </div>
-          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(59,130,246,0.04);"><canvas id="cpuSparkline"></canvas></div>
+          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(59,130,246,0.04);" title="{% if metrics_history_enabled %}Last hour{% else %}Since this page opened{% endif %}"><canvas id="cpuSparkline" aria-hidden="true"></canvas></div>
         </div>
       </div>
     </div>
@@ -110,7 +132,7 @@
             <small class="text-muted"><span data-metric="memory_used">{{ memory.used }}</span> used</small>
             <small class="text-muted"><span data-metric="memory_total">{{ memory.total }}</span> total</small>
           </div>
-          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(6,182,212,0.04);"><canvas id="memSparkline"></canvas></div>
+          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(6,182,212,0.04);" title="{% if metrics_history_enabled %}Last hour{% else %}Since this page opened{% endif %}"><canvas id="memSparkline" aria-hidden="true"></canvas></div>
         </div>
       </div>
     </div>
@@ -133,7 +155,7 @@
             <small class="text-muted"><span data-metric="disk_free">{{ disk.free }}</span> free</small>
             <small class="text-muted"><span data-metric="disk_total">{{ disk.total }}</span> total</small>
           </div>
-          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(245,158,11,0.04);"><canvas id="diskSparkline"></canvas></div>
+          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(245,158,11,0.04);" title="{% if metrics_history_enabled %}Last hour{% else %}Since this page opened{% endif %}"><canvas id="diskSparkline" aria-hidden="true"></canvas></div>
         </div>
       </div>
     </div>
@@ -161,23 +183,12 @@
                 <small class="text-muted">Objects</small>
               </div>
             </div>
-            <small class="text-muted mt-2">Storage inventory refreshes every {{ metrics_storage_refresh_minutes }} min</small>
-            <small class="text-muted{% if not storage_refreshed_at_display %} d-none{% endif %}" id="storageInventoryAsOf"{% if storage_refreshed_at %} data-timestamp="{{ storage_refreshed_at }}"{% endif %}>{% if storage_refreshed_at_display %}As of {{ storage_refreshed_at_display }}{% endif %}</small>
+            <small class="text-muted mt-2">Current object versions</small>
           </div>
-          <div class="mt-3 rounded px-2 py-1" style="height: 48px; background: rgba(16,185,129,0.04);">
-            <div class="d-flex align-items-center justify-content-around h-100 small">
-              <div class="d-flex align-items-center gap-1">
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-success opacity-50" viewBox="0 0 16 16"><path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/></svg>
-                <span class="text-muted" data-metric="buckets_count2">{{ app.buckets }}</span>
-              </div>
-              <div class="d-flex align-items-center gap-1">
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-success opacity-50" viewBox="0 0 16 16"><path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/></svg>
-                <span class="text-muted" data-metric="objects_count2">{{ app.objects }}</span>
-              </div>
-              <div class="d-flex align-items-center gap-1">
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-success opacity-50" viewBox="0 0 16 16"><path d="M12.643 15C13.979 15 15 13.845 15 12.5V5H1v7.5C1 13.845 2.021 15 3.357 15h9.286zM5.5 7a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0v-3a.5.5 0 0 1 .5-.5zm3 0a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0v-3a.5.5 0 0 1 .5-.5z"/><path d="M14 3a1 1 0 0 1 1 1v1H1V4a1 1 0 0 1 1-1h12z"/></svg>
-                <span class="text-muted" data-metric="versions_count2">{{ app.versions }}</span>
-              </div>
+          <div class="mt-3 rounded px-2 py-1" style="height: 48px; background: rgba(16,185,129,0.04);" title="Noncurrent versions kept by bucket versioning, not included above">
+            <div class="d-flex align-items-center justify-content-center gap-2 h-100 small text-muted">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-success opacity-50 flex-shrink-0" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.643 15C13.979 15 15 13.845 15 12.5V5H1v7.5C1 13.845 2.021 15 3.357 15h9.286zM5.5 7a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0v-3a.5.5 0 0 1 .5-.5zm3 0a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0v-3a.5.5 0 0 1 .5-.5z"/><path d="M14 3a1 1 0 0 1 1 1v1H1V4a1 1 0 0 1 1-1h12z"/></svg>
+              <span><span data-metric="versions_count">{{ app.versions }}</span> archived versions &middot; <span data-metric="versions_bytes">{{ app.versions_bytes | default(value="0 B") }}</span></span>
             </div>
           </div>
         </div>
@@ -200,82 +211,55 @@
     <div class="card-body px-3 pt-2 pb-3">
       <div id="diskPressureDisabledHint" class="small text-muted mb-3 d-none">Admission control disabled (HDD_READ_CONCURRENCY / HDD_WRITE_CONCURRENCY)</div>
       <div class="row g-2">
-        <div class="col-6 col-md-4 col-xl">
+        <div class="col-6 col-md-4 col-xl-2">
           <div class="bg-body-tertiary rounded-3 p-3 h-100">
             <div class="small text-muted mb-1">Read permits</div>
             <div class="fw-semibold" data-disk-pressure="read_permits">&mdash;</div>
+            <div class="small text-muted">in use now</div>
           </div>
         </div>
-        <div class="col-6 col-md-4 col-xl">
+        <div class="col-6 col-md-4 col-xl-2">
           <div class="bg-body-tertiary rounded-3 p-3 h-100">
             <div class="small text-muted mb-1">Write permits</div>
             <div class="fw-semibold" data-disk-pressure="write_permits">&mdash;</div>
+            <div class="small text-muted">in use now</div>
           </div>
         </div>
-        <div class="col-6 col-md-4 col-xl">
+        <div class="col-6 col-md-4 col-xl-2">
           <div class="bg-body-tertiary rounded-3 p-3 h-100">
-            <div class="small text-muted mb-1">Avg queue wait</div>
-            <div class="fw-semibold"><span data-disk-pressure="queue_wait_ms_avg">&mdash;</span> <span class="small text-muted">ms</span></div>
+            <div class="small text-muted mb-1">Permit wait &middot; 5 min</div>
+            <div class="fw-semibold"><span data-disk-pressure="recent_wait_avg">&mdash;</span> <span class="small text-muted">ms avg</span></div>
+            <div class="small text-muted">max <span data-disk-pressure="recent_wait_max">&mdash;</span> ms</div>
           </div>
         </div>
-        <div class="col-6 col-md-4 col-xl">
+        <div class="col-6 col-md-4 col-xl-2">
           <div class="bg-body-tertiary rounded-3 p-3 h-100">
-            <div class="small text-muted mb-1">Queue timeouts</div>
-            <div class="fw-semibold" data-disk-pressure="queue_timeouts">&mdash;</div>
+            <div class="small text-muted mb-1">503 timeouts &middot; 5 min</div>
+            <div class="fw-semibold" data-disk-pressure="recent_timeouts">&mdash;</div>
+            <div class="small text-muted"><span data-disk-pressure="queue_timeouts_total">&mdash;</span> since start</div>
           </div>
         </div>
-        <div class="col-6 col-md-4 col-xl">
+        <div class="col-6 col-md-4 col-xl-2">
           <div class="bg-body-tertiary rounded-3 p-3 h-100">
             <div class="small text-muted mb-1">Upload spool</div>
             <div class="fw-semibold" data-disk-pressure="upload_spool_bytes">&mdash;</div>
+            <div class="small text-muted">buffered in memory</div>
           </div>
         </div>
-        <div class="col-6 col-md-4 col-xl">
+        <div class="col-6 col-md-4 col-xl-2">
           <div class="bg-body-tertiary rounded-3 p-3 h-100">
             <div class="small text-muted mb-1">Replication queue</div>
             <div class="fw-semibold" data-disk-pressure="replication_depth">&mdash;</div>
-          </div>
-        </div>
-        <div class="col-6 col-md-4 col-xl">
-          <div class="bg-body-tertiary rounded-3 p-3 h-100">
-            <div class="small text-muted mb-1">Queue overflow</div>
-            <div class="fw-semibold" data-disk-pressure="replication_overflow_total">&mdash;</div>
+            <div class="small text-muted"><span data-disk-pressure="replication_overflow_total">&mdash;</span> overflowed since start</div>
           </div>
         </div>
       </div>
-    </div>
-  </div>
-
-  {% set has_issues = (cpu_percent > 80) or (memory.percent > 85) or (disk.percent > 90) %}
-  <div id="healthBanner" class="card shadow-sm border-0 mb-4 overflow-hidden">
-    <div class="card-body p-3 d-flex align-items-center gap-3" id="healthBannerBody"
-         style="background: linear-gradient(135deg, {% if has_issues %}#ef4444 0%, #f97316{% else %}#3b82f6 0%, #8b5cf6{% endif %} 100%);">
-      <div class="text-white flex-grow-1 d-flex align-items-center gap-3">
-        <svg id="healthBannerIcon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
-          {% if has_issues %}
-          <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-          {% else %}
-          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-          {% endif %}
-        </svg>
-        <div>
-          <span class="fw-semibold" id="healthTitle">{% if has_issues %}Issues Detected{% else %}All Systems Normal{% endif %}</span>
-          <span class="small opacity-75 ms-2" id="healthDetail">
-            {% if has_issues %}
-              {% if cpu_percent > 80 %}CPU {{ cpu_percent }}%{% endif %}
-              {% if memory.percent > 85 %}{% if cpu_percent > 80 %} &middot; {% endif %}Memory {{ memory.percent }}%{% endif %}
-              {% if disk.percent > 90 %}{% if cpu_percent > 80 or memory.percent > 85 %} &middot; {% endif %}Disk {{ disk.percent }}%{% endif %}
-            {% else %}
-              All resources within normal operating parameters
-            {% endif %}
-          </span>
+      <div id="diskPressureTrendWrap" class="d-none">
+        <div class="d-flex justify-content-between flex-wrap gap-2 small text-muted mt-3 mb-1">
+          <span>Last 60 min, one bar per minute</span>
+          <span><span style="color: #8b5cf6;">&#9632;</span> avg permit wait <span style="color: #ef4444;" class="ms-2">&#9632;</span> 503 timeouts</span>
         </div>
-      </div>
-      <div class="d-flex gap-4 text-white text-nowrap">
-        <div class="text-center">
-          <div class="fw-bold" data-metric="health_uptime">{{ app.uptime_display | default(value="0h 0m") }}</div>
-          <small class="opacity-75" style="font-size: 0.7rem;">Uptime</small>
-        </div>
+        <div style="height: 96px; position: relative;"><canvas id="diskPressureTrend" aria-label="Disk permit wait and timeouts over the last 60 minutes" role="img"></canvas></div>
       </div>
     </div>
   </div>
@@ -283,6 +267,26 @@
 
 {% if operation_metrics_enabled %}
 <div class="tab-pane fade" id="operationsTab" role="tabpanel">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <div class="btn-group btn-group-sm" role="group" aria-label="Traffic source">
+      <input type="radio" class="btn-check" name="opScope" id="opScopeApi" value="api" autocomplete="off" checked>
+      <label class="btn btn-outline-secondary" for="opScopeApi" title="S3 API and KMS requests from clients">S3 API</label>
+      <input type="radio" class="btn-check" name="opScope" id="opScopeUi" value="ui" autocomplete="off">
+      <label class="btn btn-outline-secondary" for="opScopeUi" title="Web console requests, including this dashboard's own polling">Console</label>
+      <input type="radio" class="btn-check" name="opScope" id="opScopeInternal" value="internal" autocomplete="off">
+      <label class="btn btn-outline-secondary" for="opScopeInternal" title="Health checks, admin API and cluster peer traffic">Internal</label>
+      <input type="radio" class="btn-check" name="opScope" id="opScopeAll" value="all" autocomplete="off">
+      <label class="btn btn-outline-secondary" for="opScopeAll" title="Every request on both listeners">All</label>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+      <span class="small text-muted" id="opStatus">Loading...</span>
+      <select class="form-select form-select-sm" id="opRange" style="width: auto;" aria-label="Time range">
+        <option value="1" selected>Last 1h</option>
+        <option value="6">Last 6h</option>
+        <option value="24">Last 24h</option>
+      </select>
+    </div>
+  </div>
   <div class="card shadow-sm border-0 mb-4">
     <div class="card-body p-3">
       <div class="ops-strip">
@@ -306,8 +310,8 @@
           <div class="ops-v text-warning" id="opClientErrors">&mdash;</div>
           <div class="small text-muted">4xx</div>
         </div>
-        <div>
-          <div class="ops-l">Latency</div>
+        <div title="Time to first byte: from request arrival until the response headers are ready. Includes receiving upload bodies; excludes streaming download bodies.">
+          <div class="ops-l">Latency (TTFB)</div>
           <div class="ops-v" style="color: #8b5cf6;"><span id="opP95Latency">&mdash;</span> <span class="fs-6 fw-normal text-muted">p95</span></div>
           <div class="small text-muted">avg <span id="opAvgLatency">&mdash;</span></div>
         </div>
@@ -318,14 +322,7 @@
       </div>
       <hr class="my-3">
       <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 small text-muted mb-1">
-        <div class="d-flex align-items-center gap-2">
-          <select class="form-select form-select-sm" id="opHealthRange" style="width: auto;">
-            <option value="1" selected>Last 1h</option>
-            <option value="6">Last 6h</option>
-            <option value="24">Last 24h</option>
-          </select>
-          <span id="opHealthScale"></span>
-        </div>
+        <span id="opHealthScale"></span>
         <span>
           <span style="color: #10b981;">&#9632;</span> ok
           <span style="color: #f59e0b;" class="ms-2">&#9632;</span> 4xx
@@ -374,15 +371,7 @@
       <div class="card shadow-sm border-0 mb-4">
         <div class="card-body p-3">
           <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
-            <div class="d-flex align-items-center gap-2">
-              <h6 class="text-muted small fw-bold text-uppercase mb-0">Top error codes</h6>
-              <span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;" title="Errors from the S3 API listener only; UI errors are excluded">API Only</span>
-            </div>
-            <select class="form-select form-select-sm" id="errorSummaryRange" style="width: auto;">
-              <option value="1" selected>1h</option>
-              <option value="6">6h</option>
-              <option value="24">24h</option>
-            </select>
+            <h6 class="text-muted small fw-bold text-uppercase mb-0">Top error codes</h6>
           </div>
           <div id="errorCodesBody">
             <div class="text-muted small text-center py-4">
@@ -390,7 +379,7 @@
                 <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
                 <path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/>
               </svg>
-              <div>No S3 API errors</div>
+              <div>No error codes</div>
             </div>
           </div>
         </div>
@@ -431,7 +420,7 @@
     <div class="col-lg-4">
       <div class="card shadow-sm border-0 h-100">
         <div class="card-body p-3">
-          <h6 class="text-muted small fw-bold text-uppercase mb-3">Latency by Endpoint</h6>
+          <h6 class="text-muted small fw-bold text-uppercase mb-3" title="Time to first byte: until response headers are ready">Latency (TTFB) by Endpoint</h6>
           <div style="height: 220px;">
             <canvas id="latencyEndpointChart"></canvas>
           </div>
@@ -443,14 +432,6 @@
   <div class="card shadow-sm border-0 mb-4">
     <div class="card-header bg-transparent border-0 pt-3 px-3 d-flex justify-content-between align-items-center">
       <h6 class="text-muted small fw-bold text-uppercase mb-0">Operation Trends</h6>
-      <div class="d-flex align-items-center gap-3">
-        <span class="small text-muted" id="opStatus">Loading...</span>
-        <select class="form-select form-select-sm" id="opHistoryRange" style="width: auto;">
-          <option value="1">1h</option>
-          <option value="6">6h</option>
-          <option value="24" selected>24h</option>
-        </select>
-      </div>
     </div>
     <div class="card-body p-3">
       <div class="row g-4">
@@ -465,7 +446,7 @@
       </div>
       <div class="row g-4 mt-1">
         <div class="col-md-6">
-          <div class="small text-muted fw-semibold mb-2">Average Latency (ms)</div>
+          <div class="small text-muted fw-semibold mb-2" title="Time to first byte: until response headers are ready">Average Latency, TTFB (ms)</div>
           <div style="height: 180px;"><canvas id="opTrendLatency"></canvas></div>
         </div>
         <div class="col-md-6">
@@ -498,22 +479,51 @@
     </div>
     <span class="small text-muted" id="historyStatus">Loading...</span>
   </div>
-  <div class="card shadow-sm border-0 mb-4">
-    <div class="card-body p-3">
-      <h6 class="text-muted small fw-bold text-uppercase mb-3">CPU Usage</h6>
-      <div style="height: 200px;"><canvas id="cpuHistoryChart"></canvas></div>
+  <div class="row g-4 mb-4">
+    <div class="col-lg-6">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <div class="d-flex justify-content-between align-items-baseline gap-2 mb-3">
+            <div class="d-flex align-items-baseline gap-2">
+              <h6 class="text-muted small fw-bold text-uppercase mb-0">Stored Data</h6>
+              <span class="small text-muted" id="storageHistoryDelta"></span>
+            </div>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Stored data view">
+              <input type="radio" class="btn-check" name="storageMode" id="storageModeTotal" value="total" autocomplete="off" checked>
+              <label class="btn btn-outline-secondary" for="storageModeTotal">Total</label>
+              <input type="radio" class="btn-check" name="storageMode" id="storageModeBuckets" value="buckets" autocomplete="off">
+              <label class="btn btn-outline-secondary" for="storageModeBuckets">By bucket</label>
+            </div>
+          </div>
+          <div style="height: 200px;" id="storageTotalWrap"><canvas id="storageHistoryChart"></canvas></div>
+          <div style="height: 200px;" id="storageBucketWrap" class="d-none"><canvas id="storageBucketChart"></canvas></div>
+          <div class="small text-muted mt-2">Object bytes including archived versions, sampled from the storage inventory every {{ metrics_storage_refresh_minutes }} min; per-bucket view tracks the 10 largest buckets</div>
+        </div>
+      </div>
     </div>
-  </div>
-  <div class="card shadow-sm border-0 mb-4">
-    <div class="card-body p-3">
-      <h6 class="text-muted small fw-bold text-uppercase mb-3">Memory Usage</h6>
-      <div style="height: 200px;"><canvas id="memoryHistoryChart"></canvas></div>
+    <div class="col-lg-6">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Disk Usage</h6>
+          <div style="height: 200px;"><canvas id="diskHistoryChart"></canvas></div>
+        </div>
+      </div>
     </div>
-  </div>
-  <div class="card shadow-sm border-0 mb-4">
-    <div class="card-body p-3">
-      <h6 class="text-muted small fw-bold text-uppercase mb-3">Disk Usage</h6>
-      <div style="height: 200px;"><canvas id="diskHistoryChart"></canvas></div>
+    <div class="col-lg-6">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">CPU Usage</h6>
+          <div style="height: 200px;"><canvas id="cpuHistoryChart"></canvas></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Memory Usage</h6>
+          <div style="height: 200px;"><canvas id="memoryHistoryChart"></canvas></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -655,6 +665,54 @@ try {
   var countdownTimer = null;
   var fetchTimer = null;
 
+  var HEALTH_CHECK_LABELS = {
+    cpu: 'CPU',
+    memory: 'memory',
+    disk: 'disk space',
+    server_errors: 'S3 5xx rate (15 min)',
+    disk_queue: 'disk queue (5 min)',
+    replication: 'replication'
+  };
+  var HEALTH_ICONS = {
+    ok: '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>',
+    warning: '<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>',
+    critical: '<path d="M11.46.146A.5.5 0 0 0 11.107 0H4.893a.5.5 0 0 0-.353.146L.146 4.54A.5.5 0 0 0 0 4.893v6.214a.5.5 0 0 0 .146.353l4.394 4.394a.5.5 0 0 0 .353.146h6.214a.5.5 0 0 0 .353-.146l4.394-4.394a.5.5 0 0 0 .146-.353V4.893a.5.5 0 0 0-.146-.353L11.46.146zM8 4c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 4.995A.905.905 0 0 1 8 4zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>'
+  };
+
+  function escapeText(value) {
+    if (window.UICore && window.UICore.escapeHtml) return window.UICore.escapeHtml(value);
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  }
+
+  function renderHealth(health) {
+    if (!health) return;
+    var status = HEALTH_ICONS[health.status] ? health.status : 'ok';
+    var issues = health.issues || [];
+    var banner = document.getElementById('healthBanner');
+    if (banner) banner.className = 'card border-0 shadow-sm mb-4 health-banner health-' + status;
+    var icon = document.getElementById('healthBannerIcon');
+    if (icon) icon.innerHTML = HEALTH_ICONS[status];
+    var title = document.getElementById('healthTitle');
+    if (title) title.textContent = status === 'critical' ? 'Critical issues detected' : (status === 'warning' ? 'Needs attention' : 'All systems normal');
+    var detail = document.getElementById('healthDetail');
+    if (detail) {
+      detail.textContent = issues.length > 0
+        ? issues.length + ' issue' + (issues.length === 1 ? '' : 's')
+        : 'Checked ' + (health.checks || []).map(function(check) { return HEALTH_CHECK_LABELS[check] || check; }).join(', ');
+    }
+    var list = document.getElementById('healthIssues');
+    if (list) {
+      list.innerHTML = issues.map(function(issue) {
+        var critical = issue.severity === 'critical';
+        return '<li><span class="badge ' + (critical ? 'bg-danger-subtle text-danger-emphasis' : 'bg-warning-subtle text-warning-emphasis') + '">' + (critical ? 'Critical' : 'Warning') + '</span> ' +
+          '<span class="fw-semibold">' + escapeText(issue.label) + '</span> ' +
+          '<span class="text-muted">' + escapeText(issue.detail) + '</span></li>';
+      }).join('');
+      list.classList.toggle('d-none', issues.length === 0);
+    }
+  }
+
   var sparklineBuffers = { cpu: [], mem: [], disk: [] };
   var SPARK_MAX = 60;
 
@@ -681,6 +739,28 @@ try {
     }
   };
   if (chartsAvailable) Chart.register(gaugePlugin);
+
+  var emptyStatePlugin = {
+    id: 'emptyState',
+    afterDraw: function(chart, args, options) {
+      if (options && options.disabled) return;
+      var hasData = chart.data.datasets.some(function(dataset) { return (dataset.data || []).length > 0; });
+      if (hasData || !chart.chartArea) return;
+      var area = chart.chartArea;
+      var ctx = chart.ctx;
+      var isDark = document.documentElement.dataset.bsTheme === 'dark';
+      ctx.save();
+      ctx.fillStyle = isDark ? 'rgba(17, 24, 39, 0.8)' : 'rgba(255, 255, 255, 0.85)';
+      ctx.fillRect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+      ctx.fillStyle = isDark ? '#9ca3af' : '#6b7280';
+      ctx.font = '12px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText((options && options.message) || 'No data in this range yet', (area.left + area.right) / 2, (area.top + area.bottom) / 2);
+      ctx.restore();
+    }
+  };
+  if (chartsAvailable) Chart.register(emptyStatePlugin);
 
   var gaugeBg = 'rgba(128, 128, 128, 0.08)';
 
@@ -734,7 +814,7 @@ try {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        plugins: { legend: { display: false }, tooltip: { enabled: false }, emptyState: { disabled: true } },
         scales: {
           x: { display: false },
           y: { display: false, min: 0, max: 100 }
@@ -764,6 +844,38 @@ try {
     chart.update('none');
   }
 
+  var historySparklines = {% if metrics_history_enabled %}true{% else %}false{% endif %};
+  var sparkBase = { cpu: [], mem: [], disk: [] };
+  var sparkLive = null;
+  var SPARK_HISTORY_REFRESH_MS = 300000;
+
+  function sparkSeries(key) {
+    if (!historySparklines) return sparklineBuffers[key];
+    return sparkLive ? sparkBase[key].concat([sparkLive[key]]) : sparkBase[key].slice();
+  }
+
+  function renderSparklines() {
+    updateSparkline(cpuSpark, sparkSeries('cpu'));
+    updateSparkline(memSpark, sparkSeries('mem'));
+    updateSparkline(diskSpark, sparkSeries('disk'));
+  }
+
+  function loadSparkHistory() {
+    if (!historySparklines || document.hidden) return;
+    fetch('/ui/metrics/history?hours=1&points=60')
+      .then(parseMetricsResponse)
+      .then(function(data) {
+        var points = (data && data.history) || [];
+        sparkBase = {
+          cpu: points.map(function(point) { return Number(point.cpu_percent) || 0; }),
+          mem: points.map(function(point) { return Number(point.memory_percent) || 0; }),
+          disk: points.map(function(point) { return Number(point.disk_percent) || 0; })
+        };
+        renderSparklines();
+      })
+      .catch(function() {});
+  }
+
   function updateMetrics() {
     fetch('/ui/metrics/api')
       .then(parseMetricsResponse)
@@ -773,15 +885,17 @@ try {
         updateGauge(memGauge, data.memory.percent);
         updateGauge(diskGauge, data.disk.percent);
 
-        sparklineBuffers.cpu.push(data.cpu_percent);
-        sparklineBuffers.mem.push(data.memory.percent);
-        sparklineBuffers.disk.push(data.disk.percent);
-        if (sparklineBuffers.cpu.length > SPARK_MAX) sparklineBuffers.cpu.shift();
-        if (sparklineBuffers.mem.length > SPARK_MAX) sparklineBuffers.mem.shift();
-        if (sparklineBuffers.disk.length > SPARK_MAX) sparklineBuffers.disk.shift();
-        updateSparkline(cpuSpark, sparklineBuffers.cpu);
-        updateSparkline(memSpark, sparklineBuffers.mem);
-        updateSparkline(diskSpark, sparklineBuffers.disk);
+        if (historySparklines) {
+          sparkLive = { cpu: data.cpu_percent, mem: data.memory.percent, disk: data.disk.percent };
+        } else {
+          sparklineBuffers.cpu.push(data.cpu_percent);
+          sparklineBuffers.mem.push(data.memory.percent);
+          sparklineBuffers.disk.push(data.disk.percent);
+          if (sparklineBuffers.cpu.length > SPARK_MAX) sparklineBuffers.cpu.shift();
+          if (sparklineBuffers.mem.length > SPARK_MAX) sparklineBuffers.mem.shift();
+          if (sparklineBuffers.disk.length > SPARK_MAX) sparklineBuffers.disk.shift();
+        }
+        renderSparklines();
 
         var el;
         el = document.querySelector('[data-metric="cpu_status"]');
@@ -801,58 +915,18 @@ try {
         if (el) el.textContent = data.disk.total;
         el = document.querySelector('[data-metric="storage_used"]');
         if (el) el.textContent = data.app.storage_used;
-        el = document.getElementById('storageInventoryAsOf');
-        if (el && data.app.storage_refreshed_at_display) {
-          el.textContent = 'As of ' + data.app.storage_refreshed_at_display;
-          el.dataset.timestamp = data.app.storage_refreshed_at || '';
-          el.classList.remove('d-none');
-        }
         el = document.querySelector('[data-metric="buckets_count"]');
         if (el) el.textContent = data.app.buckets;
         el = document.querySelector('[data-metric="objects_count"]');
         if (el) el.textContent = data.app.objects;
         el = document.querySelector('[data-metric="versions_count"]');
         if (el) el.textContent = data.app.versions;
-        el = document.querySelector('[data-metric="buckets_count2"]');
-        if (el) el.textContent = data.app.buckets;
-        el = document.querySelector('[data-metric="objects_count2"]');
-        if (el) el.textContent = data.app.objects;
-        el = document.querySelector('[data-metric="versions_count2"]');
-        if (el) el.textContent = data.app.versions;
+        el = document.querySelector('[data-metric="versions_bytes"]');
+        if (el && data.app.versions_bytes) el.textContent = data.app.versions_bytes;
         el = document.querySelector('[data-metric="health_uptime"]');
         if (el) el.textContent = data.app.uptime_display || formatUptime(data.app.uptime_seconds);
 
-        var cpuHigh = data.cpu_percent > 80;
-        var memHigh = data.memory.percent > 85;
-        var diskHigh = data.disk.percent > 90;
-        var hasIssues = cpuHigh || memHigh || diskHigh;
-
-        var banner = document.getElementById('healthBannerBody');
-        if (banner) {
-          banner.style.background = hasIssues
-            ? 'linear-gradient(135deg, #ef4444 0%, #f97316 100%)'
-            : 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)';
-        }
-        var hIcon = document.getElementById('healthBannerIcon');
-        if (hIcon) {
-          hIcon.innerHTML = hasIssues
-            ? '<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>'
-            : '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>';
-        }
-        var hTitle = document.getElementById('healthTitle');
-        var hDetail = document.getElementById('healthDetail');
-        if (hTitle) hTitle.textContent = hasIssues ? 'Issues Detected' : 'All Systems Normal';
-        if (hDetail) {
-          if (hasIssues) {
-            var parts = [];
-            if (cpuHigh) parts.push('CPU ' + data.cpu_percent.toFixed(1) + '%');
-            if (memHigh) parts.push('Memory ' + data.memory.percent.toFixed(1) + '%');
-            if (diskHigh) parts.push('Disk ' + data.disk.percent.toFixed(1) + '%');
-            hDetail.textContent = parts.join(' \u00b7 ');
-          } else {
-            hDetail.textContent = 'All resources within normal operating parameters';
-          }
-        }
+        renderHealth(data.health);
 
         countdown = 5;
         var errBanner = document.getElementById('metrics-error-banner');
@@ -912,6 +986,8 @@ try {
 
   updateMetrics();
   startPolling();
+  loadSparkHistory();
+  if (historySparklines) setInterval(loadSparkHistory, SPARK_HISTORY_REFRESH_MS);
 
   function downloadJson(data, filename) {
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -938,7 +1014,10 @@ try {
   if (exportOps) {
     exportOps.addEventListener('click', function(e) {
       e.preventDefault();
-      fetch('/ui/metrics/operations').then(parseMetricsResponse).then(function(d) {
+      var exportScope = document.querySelector('input[name="opScope"]:checked');
+      var exportRange = document.getElementById('opRange');
+      var exportQuery = 'hours=' + encodeURIComponent(exportRange ? exportRange.value : '1') + '&scope=' + encodeURIComponent(exportScope ? exportScope.value : 'api');
+      fetch('/ui/metrics/operations?' + exportQuery).then(parseMetricsResponse).then(function(d) {
         downloadJson(d, 'operation-metrics-' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json');
       });
     });
@@ -977,9 +1056,12 @@ function bootstrapOperationsSection() {
   var trendErrorCodes = null;
   var opStatus = document.getElementById('opStatus');
   var opTrendStatus = document.getElementById('opTrendStatus');
-  var opHistoryRange = document.getElementById('opHistoryRange');
-  var opHealthRange = document.getElementById('opHealthRange');
-  var errorSummaryRange = document.getElementById('errorSummaryRange');
+  var opRange = document.getElementById('opRange');
+  var opScope = 'api';
+  var filterGeneration = 0;
+  var SCOPE_KEY = 'myfsioOpsScope';
+  var RANGE_KEY = 'myfsioOpsRange';
+  var LEGACY_RANGE_KEY = 'myfsioOpsHealthRange';
   var recentErrorsStatus = document.getElementById('recentErrorsStatus');
   var opErrorFeed = document.getElementById('opErrorFeed');
   var opCodeChips = document.getElementById('opCodeChips');
@@ -1005,7 +1087,6 @@ function bootstrapOperationsSection() {
   var healthIntervalMinutes = 5;
   var healthBucketMinutes = 5;
   var latestWindowBar = null;
-  var HEALTH_RANGE_KEY = 'myfsioOpsHealthRange';
   var HEALTH_MAX_BARS = 95;
   var SERVER_ERROR_CODES = ['InternalError', 'ServiceUnavailable', 'SlowDown', 'NotImplemented'];
   var EMPTY_ERRORS_HTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>No recent errors</div></div>';
@@ -1024,7 +1105,33 @@ function bootstrapOperationsSection() {
     'object': '#3b82f6', 'bucket': '#10b981', 'ui': '#6b7280',
     'service': '#06b6d4', 'kms': '#f59e0b'
   };
+  var endpointPalette = ['#3b82f6', '#10b981', '#06b6d4', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#6366f1', '#84cc16', '#6b7280'];
   var errorSeriesColors = ['#ef4444', '#f59e0b', '#3b82f6', '#10b981', '#8b5cf6', '#6b7280'];
+  var ENDPOINT_CHART_LIMIT = 10;
+
+  function endpointColor(name, index) {
+    return endpointColors[name] || endpointPalette[index % endpointPalette.length];
+  }
+
+  function rangeHours() {
+    return opRange ? opRange.value : '1';
+  }
+
+  function filterQuery() {
+    return 'hours=' + encodeURIComponent(rangeHours()) + '&scope=' + encodeURIComponent(opScope);
+  }
+
+  function pluralize(count, word) {
+    return count + ' ' + word + (Number(count) === 1 ? '' : 's');
+  }
+
+  function formatSpan(seconds) {
+    seconds = Math.max(0, Math.round(Number(seconds) || 0));
+    if (seconds < 60) return seconds + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+    var minutes = Math.floor((seconds % 3600) / 60);
+    return Math.floor(seconds / 3600) + 'h' + (minutes ? ' ' + minutes + 'm' : '');
+  }
 
   var formatBytes = window.MyFSIO.formatBytes;
 
@@ -1083,7 +1190,7 @@ function bootstrapOperationsSection() {
         options: {
           responsive: true, maintainAspectRatio: false, indexAxis: 'y', animation: false,
           plugins: { legend: { display: false } },
-          scales: { x: { beginAtZero: true, ticks: { stepSize: 1 } } }
+          scales: { x: { beginAtZero: true, ticks: { precision: 0 } } }
         }
       });
     }
@@ -1114,7 +1221,10 @@ function bootstrapOperationsSection() {
     var ecCtx = document.getElementById('opTrendErrorCodes');
 
     if (trCtx) trendReqRate = new Chart(trCtx, trendChartOpts('#3b82f6', function(v) { return v.toFixed(1); }));
-    if (ttCtx) trendThroughput = new Chart(ttCtx, trendChartOpts('#10b981', function(v) { return formatBytes(v) + '/s'; }));
+    if (ttCtx) {
+      trendThroughput = new Chart(ttCtx, trendChartOpts('#10b981', function(v) { return formatBytes(v) + '/s'; }));
+      trendThroughput.options.scales.y.ticks.precision = 0;
+    }
     if (tlCtx) trendLatency = new Chart(tlCtx, trendChartOpts('#8b5cf6', function(v) { return v.toFixed(0) + 'ms'; }));
     if (teCtx) trendErrorRate = new Chart(teCtx, trendChartOpts('#ef4444', function(v) { return v.toFixed(1) + '%'; }));
     if (ecCtx) {
@@ -1158,13 +1268,25 @@ function bootstrapOperationsSection() {
     renderRetryStatus(opStatus, 'Unable to load operations.', function() { loadOperationsSection(true); });
   }
 
+  function applyRetention(retentionHours) {
+    if (!opRange || !retentionHours) return;
+    Array.prototype.forEach.call(opRange.options, function(option) {
+      var hours = Number(option.value);
+      option.disabled = hours > 1 && hours > retentionHours;
+      option.title = option.disabled ? 'Operation metrics are retained for ' + pluralize(retentionHours, 'hour') : '';
+    });
+  }
+
   function updateOpMetrics(force) {
     if ((!force && document.hidden) || operationsLoadInFlight) return;
     operationsLoadInFlight = true;
-    return fetch('/ui/metrics/operations')
+    var generation = filterGeneration;
+    return fetch('/ui/metrics/operations?' + filterQuery())
       .then(parseMetricsResponse)
       .then(function(data) {
+        if (generation !== filterGeneration) return;
         operationsLoadSucceeded = true;
+        applyRetention(data.retention_hours);
         if (!data.enabled || !data.stats) {
           if (opStatus) opStatus.textContent = 'Not available';
           return;
@@ -1189,13 +1311,15 @@ function bootstrapOperationsSection() {
         setText('opBytesIn', formatBytes(totals.bytes_in || 0));
         setText('opBytesOut', formatBytes(totals.bytes_out || 0));
 
+        var live = stats.live || {};
+        var liveClasses = live.by_status_class || {};
         var windowEnd = Date.now();
         latestWindowBar = {
-          start: new Date(windowEnd - (stats.window_seconds || 0) * 1000).toISOString(),
+          start: new Date(windowEnd - (live.window_seconds || 0) * 1000).toISOString(),
           end: new Date(windowEnd).toISOString(),
-          total: totals.count || 0,
-          c4: clientErrors,
-          c5: serverErrors
+          total: live.count || 0,
+          c4: liveClasses['4xx'] || 0,
+          c5: liveClasses['5xx'] || 0
         };
         renderHealthBar();
 
@@ -1207,16 +1331,19 @@ function bootstrapOperationsSection() {
           methodStatusChart.update('none');
         }
 
+        var endpoints = Object.keys(stats.by_endpoint || {}).sort(function(a, b) {
+          return (stats.by_endpoint[b].count || 0) - (stats.by_endpoint[a].count || 0);
+        }).slice(0, ENDPOINT_CHART_LIMIT);
+
         if (endpointChart && stats.by_endpoint) {
-          var endpoints = Object.keys(stats.by_endpoint);
           endpointChart.data.labels = endpoints;
           endpointChart.data.datasets[0].data = endpoints.map(function(e) { return stats.by_endpoint[e].count; });
-          endpointChart.data.datasets[0].backgroundColor = endpoints.map(function(e) { return endpointColors[e] || '#6b7280'; });
+          endpointChart.data.datasets[0].backgroundColor = endpoints.map(endpointColor);
           endpointChart.update('none');
         }
 
         if (latencyEndpointChart && stats.by_endpoint) {
-          var eps = Object.keys(stats.by_endpoint);
+          var eps = endpoints;
           latencyEndpointChart.data.labels = eps;
           latencyEndpointChart.data.datasets[0].data = eps.map(function(e) { return stats.by_endpoint[e].latency_avg_ms || 0; });
           latencyEndpointChart.data.datasets[1].data = eps.map(function(e) { return stats.by_endpoint[e].latency_p95_ms || stats.by_endpoint[e].latency_max_ms || 0; });
@@ -1224,19 +1351,21 @@ function bootstrapOperationsSection() {
           latencyEndpointChart.update('none');
         }
 
-        var windowMins = Math.floor(stats.window_seconds / 60);
-        var windowSecs = stats.window_seconds % 60;
-        var windowStr = windowMins > 0 ? windowMins + 'm ' + windowSecs + 's' : windowSecs + 's';
         if (opStatus) {
-          opStatus.textContent = 'Window: ' + windowStr;
-          opStatus.title = 'Live stats since the last snapshot; snapshots are taken every ' + (data.interval_minutes || 5) + ' minutes';
+          var rangeSeconds = (stats.hours || Number(rangeHours())) * 3600;
+          var covered = stats.window_seconds || 0;
+          opStatus.textContent = covered + 60 < rangeSeconds
+            ? 'Data covers the last ' + formatSpan(covered)
+            : pluralize(stats.snapshot_count || 0, 'snapshot') + ' + live window';
+          opStatus.title = 'Totals merge persisted snapshots (taken every ' + pluralize(data.interval_minutes || 5, 'minute') + ') with the live window';
         }
       })
       .catch(function() {
-        renderOperationsLoadError();
+        if (generation === filterGeneration) renderOperationsLoadError();
       })
       .finally(function() {
         operationsLoadInFlight = false;
+        if (generation !== filterGeneration) updateOpMetrics(true);
       });
   }
 
@@ -1292,7 +1421,8 @@ function bootstrapOperationsSection() {
       var totalErrors = summary.total_errors || errorCodes.reduce(function(sum, entry) { return sum + entry[1]; }, 0);
       errorCodes = errorCodes.slice(0, 8);
       if (errorCodes.length === 0) {
-        errorBody.innerHTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>No S3 API errors</div></div>';
+        var emptyCodesText = opScope === 'ui' ? 'Console requests carry no S3 error code; see Recent errors' : 'No errors in this range';
+        errorBody.innerHTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>' + esc(emptyCodesText) + '</div></div>';
       } else {
         errorBody.innerHTML = errorCodes.map(function(entry) {
           var code = entry[0];
@@ -1338,16 +1468,17 @@ function bootstrapOperationsSection() {
     }
   }
 
-  function loadErrorSummary() {
-    if (document.hidden || window.__metricsPaused) return;
-    var hours = errorSummaryRange ? errorSummaryRange.value : 1;
-    fetch('/ui/metrics/operations/error-summary?hours=' + encodeURIComponent(hours))
+  function loadErrorSummary(force) {
+    if (!force && (document.hidden || window.__metricsPaused)) return;
+    var generation = filterGeneration;
+    fetch('/ui/metrics/operations/error-summary?' + filterQuery())
       .then(parseMetricsResponse)
       .then(function(data) {
-        if (!data.enabled) return;
+        if (generation !== filterGeneration || !data.enabled) return;
         renderErrorSummary(data);
       })
       .catch(function() {
+        if (generation !== filterGeneration) return;
         var errorBody = document.getElementById('errorCodesBody');
         if (errorBody) {
           errorBody.innerHTML = '';
@@ -1355,7 +1486,7 @@ function bootstrapOperationsSection() {
           retry.type = 'button';
           retry.className = 'btn btn-link btn-sm';
           retry.textContent = 'Unable to load error summary · Retry';
-          retry.addEventListener('click', loadErrorSummary);
+          retry.addEventListener('click', function() { loadErrorSummary(true); });
           errorBody.appendChild(retry);
         }
       });
@@ -1566,7 +1697,7 @@ function bootstrapOperationsSection() {
 
     if (recentErrorsStatus) {
       recentErrorsStatus.textContent = groupedMode
-        ? items.length.toLocaleString() + ' groups from ' + scoped.length.toLocaleString() + ' errors · ' + buffered.toLocaleString() + ' buffered'
+        ? pluralize(items.length.toLocaleString(), 'group') + ' from ' + pluralize(scoped.length.toLocaleString(), 'error') + ' · ' + buffered.toLocaleString() + ' buffered'
         : visible.length.toLocaleString() + ' of ' + scoped.length.toLocaleString() + ' events · ' + buffered.toLocaleString() + ' buffered';
     }
   }
@@ -1616,12 +1747,7 @@ function bootstrapOperationsSection() {
     if (scaleEl) scaleEl.textContent = 'one bar per ' + healthBucketMinutes + ' min';
   }
 
-  function loadHealthBar() {
-    if (document.hidden || window.__metricsPaused) return;
-    var hours = opHealthRange ? opHealthRange.value : '1';
-    fetch('/ui/metrics/operations/history?hours=' + encodeURIComponent(hours))
-      .then(parseMetricsResponse)
-      .then(function(data) {
+  function applyHealthHistory(data) {
         healthIntervalMinutes = data.interval_minutes || 5;
         var raw = (data.enabled && data.history) ? data.history : [];
         var bars = zeroFillHistory(raw, healthIntervalMinutes).map(function(snapshot) {
@@ -1655,21 +1781,36 @@ function bootstrapOperationsSection() {
         healthBucketMinutes = healthIntervalMinutes * step;
         healthBars = bars;
         renderHealthBar();
+  }
+
+  function loadOpHistory(force) {
+    if (!force && (document.hidden || window.__metricsPaused)) return;
+    var generation = filterGeneration;
+    fetch('/ui/metrics/operations/history?' + filterQuery())
+      .then(parseMetricsResponse)
+      .then(function(data) {
+        if (generation !== filterGeneration) return;
+        applyHealthHistory(data);
+        applyTrendHistory(data);
       })
       .catch(function() {
+        if (generation !== filterGeneration) return;
         var emptyEl = document.getElementById('opHealthEmpty');
         if (emptyEl && healthBars.length === 0) {
           emptyEl.textContent = 'Unable to load request health.';
           emptyEl.classList.remove('d-none');
         }
+        renderRetryStatus(opTrendStatus, 'Unable to load operation history.', function() { loadOpHistory(true); });
       });
   }
 
   function loadRecentErrors(force) {
     if (!force && (document.hidden || window.__metricsPaused)) return;
-    fetch('/ui/metrics/operations/errors?limit=256')
+    var generation = filterGeneration;
+    fetch('/ui/metrics/operations/errors?limit=256&' + filterQuery())
       .then(parseMetricsResponse)
       .then(function(data) {
+        if (generation !== filterGeneration) return;
         if (!data.enabled) {
           if (recentErrorsStatus) recentErrorsStatus.textContent = 'Not available';
           if (opErrorFeed) opErrorFeed.innerHTML = '<div class="text-muted small text-center py-4">Not available</div>';
@@ -1684,6 +1825,7 @@ function bootstrapOperationsSection() {
         if (lastErrorSummary) renderErrorSummary(lastErrorSummary);
       })
       .catch(function() {
+        if (generation !== filterGeneration) return;
         renderRetryStatus(recentErrorsStatus, 'Unable to load recent errors.', function() { loadRecentErrors(true); });
       });
   }
@@ -1747,14 +1889,31 @@ function bootstrapOperationsSection() {
     trendErrorCodes.update('none');
   }
 
-  function loadOpTrends() {
-    if (document.hidden) return;
-    var hours = opHistoryRange ? opHistoryRange.value : 24;
-    fetch('/ui/metrics/operations/history?hours=' + hours)
-      .then(parseMetricsResponse)
-      .then(function(data) {
+  function clearTrends() {
+    opTrendTimestamps = [];
+    [trendReqRate, trendThroughput, trendLatency, trendErrorRate].forEach(function(chart) {
+      if (!chart) return;
+      chart.data.labels = [];
+      chart.data.datasets[0].data = [];
+      chart.update('none');
+    });
+    if (trendErrorCodes) {
+      trendErrorCodes.data.labels = [];
+      trendErrorCodes.data.datasets = [];
+      trendErrorCodes.update('none');
+    }
+  }
+
+  function applyTrendHistory(data) {
         if (!data.enabled || !data.history || data.history.length === 0) {
-          if (opTrendStatus) opTrendStatus.textContent = 'No operation history data yet. Snapshots are taken every ' + (data.interval_minutes || 5) + ' minutes.';
+          clearTrends();
+          if (opTrendStatus) opTrendStatus.textContent = 'No snapshots in this range yet. Snapshots are taken every ' + pluralize(data.interval_minutes || 5, 'minute') + '.';
+          return;
+        }
+        var hasTraffic = data.history.some(function(h) { return ((h.totals || {}).count || 0) > 0; });
+        if (!hasTraffic) {
+          clearTrends();
+          if (opTrendStatus) opTrendStatus.textContent = 'No requests from this source in the selected range.';
           return;
         }
         var history = zeroFillHistory(data.history, data.interval_minutes || 5);
@@ -1777,11 +1936,7 @@ function bootstrapOperationsSection() {
         updateTrend(trendErrorRate, labels, errorRates);
         updateErrorCodesTrend(history, labels);
 
-        if (opTrendStatus) opTrendStatus.textContent = data.history.length + ' snapshots';
-      })
-      .catch(function() {
-        renderRetryStatus(opTrendStatus, 'Unable to load operation history.', loadOpTrends);
-      });
+        if (opTrendStatus) opTrendStatus.textContent = pluralize(data.history.length, 'snapshot');
   }
 
   function startOpPolling() {
@@ -1789,7 +1944,7 @@ function bootstrapOperationsSection() {
     opTimer = setInterval(function() {
       if (!document.hidden && !window.__metricsPaused) {
         updateOpMetrics();
-        loadErrorSummary();
+        loadErrorSummary(false);
       }
     }, 5000);
     if (recentErrorsTimer) clearInterval(recentErrorsTimer);
@@ -1798,40 +1953,67 @@ function bootstrapOperationsSection() {
     }, 10000);
     if (trendTimer) clearInterval(trendTimer);
     trendTimer = setInterval(function() {
-      if (!document.hidden && !window.__metricsPaused) {
-        loadOpTrends();
-        loadHealthBar();
-      }
+      if (!document.hidden && !window.__metricsPaused) loadOpHistory(false);
     }, 60000);
   }
 
   function loadOperationsSection(force) {
     updateOpMetrics(force);
-    loadErrorSummary();
+    loadErrorSummary(Boolean(force));
     loadRecentErrors(Boolean(force));
-    loadOpTrends();
-    loadHealthBar();
+    loadOpHistory(Boolean(force));
   }
 
-  if (opHistoryRange) opHistoryRange.addEventListener('change', loadOpTrends);
-  if (errorSummaryRange) errorSummaryRange.addEventListener('change', loadErrorSummary);
-
-  if (opHealthRange) {
+  function persistFilter(key, value) {
     try {
-      var storedRange = window.localStorage.getItem(HEALTH_RANGE_KEY);
-      if (storedRange === '1' || storedRange === '6' || storedRange === '24') opHealthRange.value = storedRange;
+      window.localStorage.setItem(key, value);
     } catch (storageError) {
-      opHealthRange.value = '1';
+      void storageError;
     }
-    opHealthRange.addEventListener('change', function() {
-      try {
-        window.localStorage.setItem(HEALTH_RANGE_KEY, opHealthRange.value);
-      } catch (storageError) {
-        void storageError;
-      }
-      loadHealthBar();
+  }
+
+  function restoreFilters() {
+    try {
+      var storedScope = window.localStorage.getItem(SCOPE_KEY);
+      if (['api', 'ui', 'internal', 'all'].indexOf(storedScope) !== -1) opScope = storedScope;
+      var storedRange = window.localStorage.getItem(RANGE_KEY) || window.localStorage.getItem(LEGACY_RANGE_KEY);
+      if (opRange && (storedRange === '1' || storedRange === '6' || storedRange === '24')) opRange.value = storedRange;
+    } catch (storageError) {
+      void storageError;
+    }
+    var scopeInput = document.querySelector('input[name="opScope"][value="' + opScope + '"]');
+    if (scopeInput) scopeInput.checked = true;
+  }
+
+  function onFiltersChanged() {
+    filterGeneration += 1;
+    selectedCode = null;
+    groupLimit = GROUP_PAGE;
+    eventLimit = EVENT_PAGE;
+    feedExpanded = Object.create(null);
+    healthBars = [];
+    latestWindowBar = null;
+    lastErrorSummary = null;
+    if (opStatus) opStatus.textContent = 'Loading...';
+    renderHealthBar();
+    loadOperationsSection(true);
+  }
+
+  if (opRange) {
+    opRange.addEventListener('change', function() {
+      persistFilter(RANGE_KEY, opRange.value);
+      onFiltersChanged();
     });
   }
+
+  document.querySelectorAll('input[name="opScope"]').forEach(function(input) {
+    input.addEventListener('change', function() {
+      if (!input.checked) return;
+      opScope = input.value;
+      persistFilter(SCOPE_KEY, opScope);
+      onFiltersChanged();
+    });
+  });
 
   document.querySelectorAll('input[name="opSeverity"]').forEach(function(input) {
     input.addEventListener('change', function() {
@@ -1875,10 +2057,9 @@ function bootstrapOperationsSection() {
     } else {
       if (!window.__metricsPaused) {
         updateOpMetrics();
-        loadErrorSummary();
+        loadErrorSummary(false);
         loadRecentErrors(false);
-        loadOpTrends();
-        loadHealthBar();
+        loadOpHistory(false);
       }
       startOpPolling();
     }
@@ -1892,6 +2073,7 @@ function bootstrapOperationsSection() {
     if (!operationsLoadSucceeded) loadOperationsSection(true);
   });
 
+  restoreFilters();
   initOpCharts();
   renderHealthBar();
   loadOperationsSection(false);
@@ -1931,6 +2113,24 @@ function bootstrapHistorySection() {
   var cpuChart = null;
   var memoryChart = null;
   var diskChart = null;
+  var storageChart = null;
+  var storageBucketChart = null;
+  var storageMode = 'total';
+  var STORAGE_MODE_KEY = 'myfsioStorageMode';
+  var STORAGE_BUCKET_LIMIT = 6;
+  var OTHER_BUCKETS_KEY = '(other)';
+  var bucketPalette = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#9ca3af'];
+  var formatBytes = window.MyFSIO.formatBytes;
+  var percentFormat = {
+    percent: true,
+    value: function(v) { return Number(v).toFixed(2) + '%'; },
+    tick: function(v) { return v + '%'; }
+  };
+  var bytesFormat = {
+    percent: false,
+    value: function(v) { return formatBytes(Number(v) || 0); },
+    tick: function(v) { return formatBytes(Math.max(0, Number(v) || 0)); }
+  };
   var historyStatus = document.getElementById('historyStatus');
   var timeRangeSelect = document.getElementById('historyTimeRange');
   var historyTimer = null;
@@ -1951,7 +2151,7 @@ function bootstrapHistorySection() {
     return (Number.isInteger(hours) ? hours : hours.toFixed(1)) + ' hr';
   }
 
-  function createChart(ctx, label, color, metricKey) {
+  function createChart(ctx, label, color, metricKey, format) {
     return new Chart(ctx, {
       type: 'line',
       data: {
@@ -1967,6 +2167,7 @@ function bootstrapHistorySection() {
           pointHoverRadius: 5,
           borderWidth: 1.5,
           hitRadius: 10,
+          cubicInterpolationMode: format.percent ? 'default' : 'monotone',
         }]
       },
       options: {
@@ -1979,14 +2180,14 @@ function bootstrapHistorySection() {
             callbacks: {
               title: chartTooltipTitle(function() { return renderedHistoryTimestamps; }),
               label: function(ctx) {
-                if (!renderedHistoryAggregated) return ctx.parsed.y.toFixed(2) + '%';
+                if (!renderedHistoryAggregated) return format.value(ctx.parsed.y);
                 var point = renderedHistory[ctx.dataIndex] || {};
-                var minimum = Number(point[metricKey + '_min']);
-                var maximum = Number(point[metricKey + '_max']);
+                var minimum = point[metricKey + '_min'];
+                var maximum = point[metricKey + '_max'];
                 return [
-                  label + ' avg: ' + ctx.parsed.y.toFixed(2) + '%',
-                  'Min: ' + minimum.toFixed(2) + '%',
-                  'Max: ' + maximum.toFixed(2) + '%',
+                  label + ' avg: ' + format.value(ctx.parsed.y),
+                  'Min: ' + format.value(minimum === undefined || minimum === null ? ctx.parsed.y : minimum),
+                  'Max: ' + format.value(maximum === undefined || maximum === null ? ctx.parsed.y : maximum),
                   'Bucket span: ' + formatBucketSpan(renderedBucketSeconds)
                 ];
               }
@@ -1995,7 +2196,9 @@ function bootstrapHistorySection() {
         },
         scales: {
           x: { display: true, ticks: { maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 12 } },
-          y: { display: true, min: 0, max: 100, ticks: { callback: function(v) { return v + '%'; } } }
+          y: format.percent
+            ? { display: true, min: 0, max: 100, ticks: { callback: format.tick } }
+            : { display: true, ticks: { callback: format.tick, maxTicksLimit: 6 } }
         }
       }
     });
@@ -2005,9 +2208,38 @@ function bootstrapHistorySection() {
     var cpuCtx = document.getElementById('cpuHistoryChart');
     var memCtx = document.getElementById('memoryHistoryChart');
     var diskCtx = document.getElementById('diskHistoryChart');
-    if (cpuCtx) cpuChart = createChart(cpuCtx, 'CPU %', '#3b82f6', 'cpu_percent');
-    if (memCtx) memoryChart = createChart(memCtx, 'Memory %', '#06b6d4', 'memory_percent');
-    if (diskCtx) diskChart = createChart(diskCtx, 'Disk %', '#f59e0b', 'disk_percent');
+    var storageCtx = document.getElementById('storageHistoryChart');
+    if (cpuCtx) cpuChart = createChart(cpuCtx, 'CPU %', '#3b82f6', 'cpu_percent', percentFormat);
+    if (memCtx) memoryChart = createChart(memCtx, 'Memory %', '#06b6d4', 'memory_percent', percentFormat);
+    if (diskCtx) diskChart = createChart(diskCtx, 'Disk %', '#f59e0b', 'disk_percent', percentFormat);
+    if (storageCtx) storageChart = createChart(storageCtx, 'Stored', '#10b981', 'storage_bytes', bytesFormat);
+    var bucketCtx = document.getElementById('storageBucketChart');
+    if (bucketCtx) {
+      storageBucketChart = new Chart(bucketCtx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } },
+            emptyState: { message: 'Per-bucket sizes are recorded from this version on' },
+            tooltip: {
+              callbacks: {
+                title: chartTooltipTitle(function() { return renderedHistoryTimestamps; }),
+                label: function(ctx) { return ctx.dataset.label + ': ' + formatBytes(Number(ctx.parsed.y) || 0); }
+              }
+            }
+          },
+          scales: {
+            x: { display: true, ticks: { maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 12 } },
+            y: { display: true, stacked: true, beginAtZero: true, ticks: { maxTicksLimit: 6, callback: function(v) { return formatBytes(Math.max(0, Number(v) || 0)); } } }
+          }
+        }
+      });
+    }
   }
 
   function renderHistoryLoadError() {
@@ -2019,6 +2251,67 @@ function bootstrapHistorySection() {
     retry.textContent = 'Retry';
     retry.addEventListener('click', function() { loadHistory(true); });
     historyStatus.appendChild(retry);
+  }
+
+  function renderBucketChart(history, labels) {
+    if (!storageBucketChart) return;
+    var latest = Object.create(null);
+    history.forEach(function(point) {
+      Object.keys(point.bucket_bytes || {}).forEach(function(name) {
+        latest[name] = Number(point.bucket_bytes[name]) || 0;
+      });
+    });
+    var ranked = Object.keys(latest).filter(function(name) { return name !== OTHER_BUCKETS_KEY; });
+    ranked.sort(function(a, b) { return latest[b] - latest[a]; });
+    var shown = ranked.slice(0, STORAGE_BUCKET_LIMIT);
+    var folded = ranked.slice(STORAGE_BUCKET_LIMIT);
+    var hasOther = folded.length > 0 || Object.prototype.hasOwnProperty.call(latest, OTHER_BUCKETS_KEY);
+    function recorded(point) {
+      return point.bucket_bytes && Object.keys(point.bucket_bytes).length > 0;
+    }
+    var series = shown.map(function(name) {
+      return {
+        label: name,
+        value: function(point) { return recorded(point) ? (Number(point.bucket_bytes[name]) || 0) : null; }
+      };
+    });
+    if (hasOther) {
+      series.push({
+        label: 'Other buckets',
+        value: function(point) {
+          if (!recorded(point)) return null;
+          return folded.concat([OTHER_BUCKETS_KEY]).reduce(function(sum, name) { return sum + (Number(point.bucket_bytes[name]) || 0); }, 0);
+        }
+      });
+    }
+    storageBucketChart.data.labels = series.length ? labels : [];
+    storageBucketChart.data.datasets = series.map(function(entry, index) {
+      var color = bucketPalette[index % bucketPalette.length];
+      return {
+        label: entry.label,
+        data: history.map(entry.value),
+        borderColor: color,
+        backgroundColor: color + '33',
+        fill: index === 0 ? 'origin' : '-1',
+        tension: 0.3,
+        cubicInterpolationMode: 'monotone',
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        borderWidth: 1.5
+      };
+    });
+    storageBucketChart.update('none');
+  }
+
+  function applyStorageMode(mode) {
+    storageMode = mode === 'buckets' ? 'buckets' : 'total';
+    var totalWrap = document.getElementById('storageTotalWrap');
+    var bucketWrap = document.getElementById('storageBucketWrap');
+    if (totalWrap) totalWrap.classList.toggle('d-none', storageMode !== 'total');
+    if (bucketWrap) bucketWrap.classList.toggle('d-none', storageMode !== 'buckets');
+    var input = document.querySelector('input[name="storageMode"][value="' + storageMode + '"]');
+    if (input) input.checked = true;
+    [storageChart, storageBucketChart].forEach(function(chart) { if (chart) chart.resize(); });
   }
 
   function loadHistory(force) {
@@ -2049,6 +2342,23 @@ function bootstrapHistorySection() {
         updateChart(cpuChart, history.map(function(h) { return h.cpu_percent; }));
         updateChart(memoryChart, history.map(function(h) { return h.memory_percent; }));
         updateChart(diskChart, history.map(function(h) { return h.disk_percent; }));
+        var storageSeries = history.map(function(h) { return Number(h.storage_bytes) || 0; });
+        if (storageChart && storageSeries.length) {
+          var storageLow = Math.min.apply(null, storageSeries);
+          var storageHigh = Math.max.apply(null, storageSeries);
+          var storagePad = (storageHigh - storageLow) * 0.1 || Math.max(storageHigh * 0.05, 1024);
+          storageChart.options.scales.y.min = Math.max(0, storageLow - storagePad);
+          storageChart.options.scales.y.max = storageHigh + storagePad;
+        }
+        updateChart(storageChart, storageSeries);
+        renderBucketChart(history, labels);
+        var deltaEl = document.getElementById('storageHistoryDelta');
+        if (deltaEl) {
+          var delta = storageSeries.length > 1 ? storageSeries[storageSeries.length - 1] - storageSeries[0] : 0;
+          deltaEl.textContent = storageSeries.length > 1
+            ? (delta >= 0 ? '+' : '\u2212') + formatBytes(Math.abs(delta)) + ' over range'
+            : '';
+        }
 
         if (historyStatus) {
           var sampleCount = Number(data.sample_count);
@@ -2085,13 +2395,29 @@ function bootstrapHistorySection() {
 
   var historyTabButton = document.getElementById('historyTabBtn');
   historyTabButton?.addEventListener('shown.bs.tab', function() {
-    [cpuChart, memoryChart, diskChart].forEach(function(chart) {
+    [cpuChart, memoryChart, diskChart, storageChart, storageBucketChart].forEach(function(chart) {
       if (chart) chart.resize();
     });
     if (!historyLoadSucceeded) loadHistory(true);
   });
 
   initCharts();
+  try {
+    applyStorageMode(window.localStorage.getItem(STORAGE_MODE_KEY) || 'total');
+  } catch (storageError) {
+    applyStorageMode('total');
+  }
+  document.querySelectorAll('input[name="storageMode"]').forEach(function(input) {
+    input.addEventListener('change', function() {
+      if (!input.checked) return;
+      applyStorageMode(input.value);
+      try {
+        window.localStorage.setItem(STORAGE_MODE_KEY, storageMode);
+      } catch (storageError) {
+        void storageError;
+      }
+    });
+  });
   loadHistory();
   startHistoryPolling();
 })();

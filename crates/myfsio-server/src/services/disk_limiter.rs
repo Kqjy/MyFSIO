@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use myfsio_storage::traits::AsyncReadStream;
 use tokio::io::{AsyncRead, ReadBuf};
@@ -11,6 +12,28 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError
 
 #[derive(Debug)]
 pub struct DiskQueueTimeout;
+
+const PRESSURE_BUCKET_SECONDS: u64 = 60;
+const PRESSURE_HISTORY_BUCKETS: usize = 60;
+pub const PRESSURE_RECENT_SECONDS: u64 = 300;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DiskPressureBucket {
+    pub start: u64,
+    pub waits: u64,
+    pub wait_ms_total: u64,
+    pub wait_ms_max: u64,
+    pub timeouts: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DiskPressureRecent {
+    pub window_seconds: u64,
+    pub waits: u64,
+    pub wait_ms_avg: u64,
+    pub wait_ms_max: u64,
+    pub timeouts: u64,
+}
 
 pub struct DiskLimiter {
     read: Option<Arc<Semaphore>>,
@@ -22,6 +45,7 @@ pub struct DiskLimiter {
     queue_waits: AtomicU64,
     queue_wait_ms_total: AtomicU64,
     upload_spool_bytes: Arc<AtomicU64>,
+    history: Mutex<VecDeque<DiskPressureBucket>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -35,6 +59,19 @@ pub struct DiskPressureSnapshot {
     pub queue_wait_ms_total: u64,
     pub queue_wait_ms_avg: u64,
     pub upload_spool_bytes: u64,
+    pub recent: DiskPressureRecent,
+    pub history: Vec<DiskPressureBucket>,
+}
+
+fn epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn bucket_start(now: u64) -> u64 {
+    now - now % PRESSURE_BUCKET_SECONDS
 }
 
 impl DiskLimiter {
@@ -49,7 +86,78 @@ impl DiskLimiter {
             queue_waits: AtomicU64::new(0),
             queue_wait_ms_total: AtomicU64::new(0),
             upload_spool_bytes: Arc::new(AtomicU64::new(0)),
+            history: Mutex::new(VecDeque::with_capacity(PRESSURE_HISTORY_BUCKETS)),
         }
+    }
+
+    fn record_at(&self, now: u64, update: impl FnOnce(&mut DiskPressureBucket)) {
+        let start = bucket_start(now);
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        if history.back().is_none_or(|bucket| bucket.start < start) {
+            history.push_back(DiskPressureBucket {
+                start,
+                ..Default::default()
+            });
+        }
+        while history.len() > PRESSURE_HISTORY_BUCKETS {
+            history.pop_front();
+        }
+        if let Some(bucket) = history.back_mut() {
+            update(bucket);
+        }
+    }
+
+    fn record_wait_at(&self, now: u64, wait_ms: u64) {
+        self.record_at(now, |bucket| {
+            bucket.waits += 1;
+            bucket.wait_ms_total += wait_ms;
+            bucket.wait_ms_max = bucket.wait_ms_max.max(wait_ms);
+        });
+    }
+
+    fn record_timeout_at(&self, now: u64) {
+        self.record_at(now, |bucket| bucket.timeouts += 1);
+    }
+
+    fn history_at(&self, now: u64) -> (DiskPressureRecent, Vec<DiskPressureBucket>) {
+        let current = bucket_start(now);
+        let first =
+            current.saturating_sub(PRESSURE_BUCKET_SECONDS * (PRESSURE_HISTORY_BUCKETS as u64 - 1));
+        let recent_from = now.saturating_sub(PRESSURE_RECENT_SECONDS);
+        let stored: Vec<DiskPressureBucket> = {
+            let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            history.iter().copied().collect()
+        };
+        let mut recent = DiskPressureRecent {
+            window_seconds: PRESSURE_RECENT_SECONDS,
+            ..Default::default()
+        };
+        let mut recent_wait_total = 0u64;
+        for bucket in &stored {
+            if bucket.start + PRESSURE_BUCKET_SECONDS > recent_from && bucket.start <= now {
+                recent.waits += bucket.waits;
+                recent_wait_total += bucket.wait_ms_total;
+                recent.wait_ms_max = recent.wait_ms_max.max(bucket.wait_ms_max);
+                recent.timeouts += bucket.timeouts;
+            }
+        }
+        if recent.waits > 0 {
+            recent.wait_ms_avg = recent_wait_total / recent.waits;
+        }
+        let series = (0..PRESSURE_HISTORY_BUCKETS as u64)
+            .map(|index| {
+                let start = first + index * PRESSURE_BUCKET_SECONDS;
+                stored
+                    .iter()
+                    .find(|bucket| bucket.start == start)
+                    .copied()
+                    .unwrap_or(DiskPressureBucket {
+                        start,
+                        ..Default::default()
+                    })
+            })
+            .collect();
+        (recent, series)
     }
 
     pub fn spool_gauge(&self) -> Arc<AtomicU64> {
@@ -66,14 +174,17 @@ impl DiskLimiter {
         let started = Instant::now();
         match tokio::time::timeout(self.queue_timeout, semaphore.clone().acquire_owned()).await {
             Ok(Ok(permit)) => {
+                let wait_ms = started.elapsed().as_millis() as u64;
                 self.queue_waits.fetch_add(1, Ordering::Relaxed);
                 self.queue_wait_ms_total
-                    .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    .fetch_add(wait_ms, Ordering::Relaxed);
+                self.record_wait_at(epoch_seconds(), wait_ms);
                 Ok(Some(permit))
             }
             Ok(Err(_)) => Ok(None),
             Err(_) => {
                 self.queue_timeouts.fetch_add(1, Ordering::Relaxed);
+                self.record_timeout_at(epoch_seconds());
                 Err(DiskQueueTimeout)
             }
         }
@@ -99,7 +210,16 @@ impl DiskLimiter {
         self.read.is_some() || self.write.is_some()
     }
 
+    pub fn queue_timeout(&self) -> Duration {
+        self.queue_timeout
+    }
+
     pub fn snapshot(&self) -> DiskPressureSnapshot {
+        self.snapshot_at(epoch_seconds())
+    }
+
+    fn snapshot_at(&self, now: u64) -> DiskPressureSnapshot {
+        let (recent, history) = self.history_at(now);
         let read_in_use = self
             .read
             .as_ref()
@@ -122,6 +242,8 @@ impl DiskLimiter {
             queue_wait_ms_total: wait_total,
             queue_wait_ms_avg: if waits > 0 { wait_total / waits } else { 0 },
             upload_spool_bytes: self.upload_spool_bytes.load(Ordering::Relaxed),
+            recent,
+            history,
         }
     }
 }
@@ -353,7 +475,11 @@ mod tests {
         let held = limiter.acquire_read().await.unwrap();
         assert!(held.is_some());
         assert!(limiter.acquire_read().await.is_err());
-        assert_eq!(limiter.snapshot().queue_timeouts, 1);
+        let snap = limiter.snapshot();
+        assert_eq!(snap.queue_timeouts, 1);
+        assert_eq!(snap.recent.timeouts, 1);
+        assert_eq!(snap.history.len(), PRESSURE_HISTORY_BUCKETS);
+        assert_eq!(snap.history.last().unwrap().timeouts, 1);
         drop(held);
         assert!(limiter.acquire_read().await.unwrap().is_some());
     }
@@ -367,6 +493,47 @@ mod tests {
         assert_eq!(snap.read_permits_in_use, 1);
         assert_eq!(snap.write_permits_in_use, 1);
         assert_eq!(snap.read_limit, 2);
+    }
+
+    #[test]
+    fn pressure_history_rolls_recent_window_and_zero_fills() {
+        let limiter = DiskLimiter::new(1, 1, Duration::from_secs(1));
+        let base: u64 = 1_800_000_000;
+        limiter.record_wait_at(base, 40);
+        limiter.record_timeout_at(base + 10);
+        limiter.record_wait_at(base + 400, 100);
+        limiter.record_wait_at(base + 410, 20);
+
+        let snap = limiter.snapshot_at(base + 415);
+        assert_eq!(snap.recent.waits, 2);
+        assert_eq!(snap.recent.wait_ms_avg, 60);
+        assert_eq!(snap.recent.wait_ms_max, 100);
+        assert_eq!(snap.recent.timeouts, 0);
+        assert_eq!(snap.history.len(), PRESSURE_HISTORY_BUCKETS);
+        let last = snap.history.last().unwrap();
+        assert_eq!(last.start, base + 360);
+        assert_eq!(last.waits, 2);
+        let first_minute = snap.history.iter().find(|b| b.start == base).unwrap();
+        assert_eq!(first_minute.timeouts, 1);
+        assert_eq!(
+            snap.history
+                .iter()
+                .filter(|b| b.waits == 0 && b.timeouts == 0)
+                .count(),
+            PRESSURE_HISTORY_BUCKETS - 2
+        );
+
+        let later = limiter.snapshot_at(base + 3 * 3600);
+        assert!(later
+            .history
+            .iter()
+            .all(|b| b.waits == 0 && b.timeouts == 0));
+        assert_eq!(later.recent.waits, 0);
+
+        for minute in 0..90u64 {
+            limiter.record_timeout_at(base + 7200 + minute * 60);
+        }
+        assert!(limiter.history.lock().unwrap().len() <= PRESSURE_HISTORY_BUCKETS);
     }
 
     fn stream_of(bytes: Vec<u8>) -> AsyncReadStream {

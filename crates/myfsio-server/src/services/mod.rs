@@ -7,6 +7,7 @@ pub mod cluster_attest;
 pub mod disk_limiter;
 pub mod endpoint_guard;
 pub mod gc;
+pub mod health_signals;
 pub mod integrity;
 pub mod lifecycle;
 pub mod metrics;
