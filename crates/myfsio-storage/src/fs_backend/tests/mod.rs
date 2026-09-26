@@ -10,6 +10,7 @@ mod listing_index;
 mod metadata_layout;
 mod multipart;
 mod object_lock;
+mod preallocate;
 mod recovery;
 
 fn create_test_backend() -> (tempfile::TempDir, FsStorageBackend) {

@@ -338,6 +338,19 @@ impl FsStorageBackend {
         metadata: Option<HashMap<String, String>>,
         options: crate::traits::PutCommitOptions,
     ) -> StorageResult<ObjectMeta> {
+        self.put_object_with_commit_sized(bucket, key, stream, metadata, options, None)
+            .await
+    }
+
+    pub async fn put_object_with_commit_sized(
+        &self,
+        bucket: &str,
+        key: &str,
+        stream: crate::traits::AsyncReadStream,
+        metadata: Option<HashMap<String, String>>,
+        options: crate::traits::PutCommitOptions,
+        expected_size: Option<u64>,
+    ) -> StorageResult<ObjectMeta> {
         self.validate_key(key)?;
 
         let tmp_dir = self.tmp_dir();
@@ -347,6 +360,7 @@ impl FsStorageBackend {
         let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
 
         let chunk_size = self.stream_chunk_size;
+        let preallocate = self.upload_preallocate;
         let drain_tmp = tmp_path.clone();
         #[cfg(any(test, feature = "failpoints"))]
         let fp_root = self.root.clone();
@@ -361,11 +375,16 @@ impl FsStorageBackend {
             let mut hasher = Md5::new();
             let mut total: u64 = 0;
             let mut buf = vec![0u8; chunk_size];
+            let mut preallocator =
+                crate::preallocate::Preallocator::new(expected_size, preallocate);
             loop {
                 let n = reader.read(&mut buf).map_err(StorageError::Io)?;
                 if n == 0 {
                     break;
                 }
+                preallocator
+                    .reserve(writer.get_ref(), total + n as u64)
+                    .map_err(StorageError::Io)?;
                 hasher.update(&buf[..n]);
                 writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
                 total += n as u64;
@@ -373,6 +392,7 @@ impl FsStorageBackend {
             let file = writer
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            preallocator.finish(&file, total);
             #[cfg(any(test, feature = "failpoints"))]
             crate::failpoints::hit(&fp_root, "put:stage-data-sync").map_err(StorageError::Io)?;
             file.sync_all().map_err(StorageError::Io)?;

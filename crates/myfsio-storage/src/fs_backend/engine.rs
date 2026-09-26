@@ -1004,11 +1004,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let mut hasher = Md5::new();
                 let mut buf = vec![0u8; chunk_size];
                 let mut total: u64 = 0;
+                let mut preallocator =
+                    crate::preallocate::Preallocator::new(Some(obj.size), self.upload_preallocate);
                 loop {
                     let n = reader.read(&mut buf).map_err(StorageError::Io)?;
                     if n == 0 {
                         break;
                     }
+                    preallocator
+                        .reserve(writer.get_ref(), total + n as u64)
+                        .map_err(StorageError::Io)?;
                     hasher.update(&buf[..n]);
                     writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
                     total += n as u64;
@@ -1017,6 +1022,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let file = writer
                     .into_inner()
                     .map_err(|error| StorageError::Io(error.into_error()))?;
+                preallocator.finish(&file, total);
                 #[cfg(any(test, feature = "failpoints"))]
                 crate::failpoints::hit(&self.root, "put:stage-data-sync")
                     .map_err(StorageError::Io)?;
@@ -1277,88 +1283,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         part_number: u32,
         stream: AsyncReadStream,
     ) -> StorageResult<String> {
-        let upload_dir = run_blocking(|| {
-            let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
-            if !upload_dir.join(MANIFEST_FILE).exists() {
-                return Err(StorageError::UploadNotFound(upload_id.to_string()));
-            }
-            Ok(upload_dir)
-        })?;
-
-        let part_file = Self::part_data_path(&upload_dir, part_number);
-        let tmp_file = upload_dir.join(format!("part-{:05}.{}.tmp", part_number, Uuid::new_v4()));
-
-        let chunk_size = self.stream_chunk_size;
-        let tmp_file_owned = tmp_file.clone();
-        #[cfg(any(test, feature = "failpoints"))]
-        let fp_root = self.root.clone();
-        let drain_res = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
-            use std::io::{BufWriter, Read, Write};
-            let mut reader = tokio_util::io::SyncIoBridge::new(stream);
-            let file = std::fs::File::create(&tmp_file_owned).map_err(StorageError::Io)?;
-            #[cfg(any(test, feature = "failpoints"))]
-            crate::failpoints::hit(&fp_root, "mpu:part-write").map_err(StorageError::Io)?;
-            let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
-            let mut hasher = Md5::new();
-            let mut part_size: u64 = 0;
-            let mut buf = vec![0u8; chunk_size];
-            loop {
-                let n = reader.read(&mut buf).map_err(StorageError::Io)?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
-                part_size += n as u64;
-            }
-            let file = writer
-                .into_inner()
-                .map_err(|e| StorageError::Io(e.into_error()))?;
-            #[cfg(any(test, feature = "failpoints"))]
-            crate::failpoints::hit(&fp_root, "mpu:part-sync").map_err(StorageError::Io)?;
-            file.sync_all().map_err(StorageError::Io)?;
-            Ok((format!("{:x}", hasher.finalize()), part_size))
-        })
-        .await;
-
-        let (etag, part_size) = match drain_res {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                let _ = tokio::fs::remove_file(&tmp_file).await;
-                return Err(e);
-            }
-            Err(join) => {
-                let _ = tokio::fs::remove_file(&tmp_file).await;
-                return Err(StorageError::Io(std::io::Error::other(join)));
-            }
-        };
-
-        run_blocking(|| -> StorageResult<()> {
-            let lock_path = upload_dir.join(".manifest.lock");
-            let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
-            let _guard = lock.lock();
-            #[cfg(any(test, feature = "failpoints"))]
-            if let Err(error) = crate::failpoints::hit(&self.root, "mpu:part-publish") {
-                let _ = std::fs::remove_file(&tmp_file);
-                return Err(StorageError::Io(error));
-            }
-            let displaced_record = Self::read_part_record_sync(&upload_dir, part_number);
-            if let Err(error) = Self::retract_part_record_sync(&self.root, &upload_dir, part_number)
-            {
-                let _ = std::fs::remove_file(&tmp_file);
-                Self::restore_displaced_part_record(&upload_dir, part_number, displaced_record);
-                return Err(StorageError::Io(error));
-            }
-            if let Err(error) = std::fs::rename(&tmp_file, &part_file) {
-                let _ = std::fs::remove_file(&tmp_file);
-                Self::restore_displaced_part_record(&upload_dir, part_number, displaced_record);
-                return Err(StorageError::Io(error));
-            }
-            self.publish_part_record_sync(&upload_dir, part_number, &etag, part_size)
-                .map_err(StorageError::Io)
-        })?;
-
-        Ok(etag)
+        self.upload_part_sized(bucket, upload_id, part_number, stream, None)
+            .await
     }
 
     async fn upload_part_copy(
@@ -1451,12 +1377,17 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let mut hasher = Md5::new();
             let mut remaining = length;
             let mut buf = vec![0u8; chunk_size];
+            let mut preallocator =
+                crate::preallocate::Preallocator::new(Some(length), self.upload_preallocate);
             while remaining > 0 {
                 let to_read = std::cmp::min(remaining as usize, buf.len());
                 let n = src.read(&mut buf[..to_read]).map_err(StorageError::Io)?;
                 if n == 0 {
                     break;
                 }
+                preallocator
+                    .reserve(dst.get_ref(), length - remaining + n as u64)
+                    .map_err(StorageError::Io)?;
                 hasher.update(&buf[..n]);
                 dst.write_all(&buf[..n]).map_err(StorageError::Io)?;
                 remaining -= n as u64;
@@ -1470,6 +1401,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let dst = dst
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            preallocator.finish(&dst, length);
             #[cfg(any(test, feature = "failpoints"))]
             crate::failpoints::hit(&self.root, "mpu:part-sync").map_err(StorageError::Io)?;
             dst.sync_all().map_err(StorageError::Io)?;

@@ -554,6 +554,7 @@ fn print_config_summary(config: &ServerConfig) {
         "Background I/O priority: {}",
         config.background_io_priority.as_str()
     );
+    println!("Upload preallocation: {}", config.upload_preallocate);
     println!("Lifecycle enabled: {}", config.lifecycle_enabled);
     println!(
         "Lifecycle history limit: {}",

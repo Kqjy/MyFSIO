@@ -347,7 +347,14 @@ pub async fn put_object(
 
     match state
         .storage
-        .put_object_with_commit(&bucket, &key, boxed, Some(metadata), commit_options)
+        .put_object_with_commit_sized(
+            &bucket,
+            &key,
+            boxed,
+            Some(metadata),
+            commit_options,
+            declared_len,
+        )
         .await
     {
         Ok(meta) => {

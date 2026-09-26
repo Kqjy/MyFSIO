@@ -80,6 +80,7 @@ pub fn build_storage_backend(config: &ServerConfig) -> Arc<FsStorageBackend> {
                 config.bucket_config_cache_ttl_seconds,
             ),
             stream_chunk_size: config.stream_chunk_size,
+            upload_preallocate: config.upload_preallocate,
             multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
                 &config.multipart_object_layout,
             ),

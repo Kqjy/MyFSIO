@@ -129,6 +129,7 @@ pub struct ServerConfig {
     pub stream_chunk_size: usize,
     pub request_body_timeout_secs: u64,
     pub upload_stream_buffer_bytes: usize,
+    pub upload_preallocate: bool,
     pub read_verify_mode: ReadVerifyMode,
     pub background_io_priority: crate::services::background_io::BackgroundIoPriority,
     pub multipart_object_layout: String,
@@ -330,6 +331,7 @@ impl ServerConfig {
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
         let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 300);
         let upload_stream_buffer_bytes = parse_usize_env("UPLOAD_STREAM_BUFFER_BYTES", 8_388_608);
+        let upload_preallocate = parse_bool_env("UPLOAD_PREALLOCATE", true);
         let read_verify_mode = parse_read_verify_mode();
         let background_io_priority = parse_background_io_priority();
         let multipart_object_layout =
@@ -456,6 +458,7 @@ impl ServerConfig {
             stream_chunk_size,
             request_body_timeout_secs,
             upload_stream_buffer_bytes,
+            upload_preallocate,
             read_verify_mode,
             background_io_priority,
             multipart_object_layout,
@@ -582,6 +585,7 @@ impl Default for ServerConfig {
             stream_chunk_size: 1_048_576,
             request_body_timeout_secs: 300,
             upload_stream_buffer_bytes: 8_388_608,
+            upload_preallocate: true,
             read_verify_mode: ReadVerifyMode::Off,
             background_io_priority: crate::services::background_io::BackgroundIoPriority::Low,
             multipart_object_layout: "segments".to_string(),

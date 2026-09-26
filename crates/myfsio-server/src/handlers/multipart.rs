@@ -523,7 +523,13 @@ pub(super) async fn upload_part_handler_with_chunking(
 
     match state
         .storage
-        .upload_part(bucket, upload_id, part_number, boxed)
+        .upload_part_sized(
+            bucket,
+            upload_id,
+            part_number,
+            boxed,
+            declared_body_length(headers, aws_chunked),
+        )
         .await
     {
         Ok(etag) => {
