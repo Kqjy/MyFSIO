@@ -130,6 +130,7 @@ pub struct ServerConfig {
     pub request_body_timeout_secs: u64,
     pub upload_stream_buffer_bytes: usize,
     pub read_verify_mode: ReadVerifyMode,
+    pub background_io_priority: crate::services::background_io::BackgroundIoPriority,
     pub multipart_object_layout: String,
     pub metadata_layout: String,
     pub listing_index_enabled: bool,
@@ -330,6 +331,7 @@ impl ServerConfig {
         let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 300);
         let upload_stream_buffer_bytes = parse_usize_env("UPLOAD_STREAM_BUFFER_BYTES", 8_388_608);
         let read_verify_mode = parse_read_verify_mode();
+        let background_io_priority = parse_background_io_priority();
         let multipart_object_layout =
             std::env::var("MULTIPART_OBJECT_LAYOUT").unwrap_or_else(|_| "segments".to_string());
         let metadata_layout =
@@ -455,6 +457,7 @@ impl ServerConfig {
             request_body_timeout_secs,
             upload_stream_buffer_bytes,
             read_verify_mode,
+            background_io_priority,
             multipart_object_layout,
             metadata_layout,
             listing_index_enabled,
@@ -580,6 +583,7 @@ impl Default for ServerConfig {
             request_body_timeout_secs: 300,
             upload_stream_buffer_bytes: 8_388_608,
             read_verify_mode: ReadVerifyMode::Off,
+            background_io_priority: crate::services::background_io::BackgroundIoPriority::Low,
             multipart_object_layout: "segments".to_string(),
             metadata_layout: "sidecar".to_string(),
             listing_index_enabled: true,
@@ -795,6 +799,20 @@ fn parse_read_verify_mode() -> ReadVerifyMode {
     }
 }
 
+fn parse_background_io_priority() -> crate::services::background_io::BackgroundIoPriority {
+    use crate::services::background_io::BackgroundIoPriority;
+    let Ok(raw) = std::env::var("BACKGROUND_IO_PRIORITY") else {
+        return BackgroundIoPriority::default();
+    };
+    BackgroundIoPriority::parse(&raw).unwrap_or_else(|| {
+        tracing::warn!(
+            "Invalid BACKGROUND_IO_PRIORITY '{}'; expected 'low', 'idle' or 'normal', falling back to low",
+            raw
+        );
+        BackgroundIoPriority::default()
+    })
+}
+
 fn parse_list_env(key: &str, default: &str) -> Vec<String> {
     std::env::var(key)
         .unwrap_or_else(|_| default.to_string())
@@ -955,6 +973,32 @@ mod tests {
         std::env::remove_var("PORT");
         std::env::remove_var("STRICT_STREAMING_SIGV4");
         std::env::remove_var("READ_VERIFY_MODE");
+        std::env::remove_var("STORAGE_ROOT");
+    }
+
+    #[test]
+    fn background_io_priority_parses_and_falls_back_to_low() {
+        use crate::services::background_io::BackgroundIoPriority;
+        let _guard = env_lock().lock().unwrap();
+        let _storage = isolated_storage_root();
+
+        std::env::remove_var("BACKGROUND_IO_PRIORITY");
+        assert_eq!(
+            ServerConfig::from_env().background_io_priority,
+            BackgroundIoPriority::Low
+        );
+        std::env::set_var("BACKGROUND_IO_PRIORITY", "idle");
+        assert_eq!(
+            ServerConfig::from_env().background_io_priority,
+            BackgroundIoPriority::Idle
+        );
+        std::env::set_var("BACKGROUND_IO_PRIORITY", "realtime");
+        assert_eq!(
+            ServerConfig::from_env().background_io_priority,
+            BackgroundIoPriority::Low
+        );
+
+        std::env::remove_var("BACKGROUND_IO_PRIORITY");
         std::env::remove_var("STORAGE_ROOT");
     }
 

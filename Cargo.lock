@@ -2416,6 +2416,7 @@ dependencies = [
  "hyper 1.9.0",
  "hyper-rustls 0.27.7",
  "hyper-util",
+ "libc",
  "lru 0.14.0",
  "md-5 0.10.6",
  "mime_guess",

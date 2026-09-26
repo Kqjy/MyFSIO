@@ -453,7 +453,7 @@ impl IntegrityService {
         let batch_size = self.config.batch_size;
         let pacing_ms = self.config.scan_pacing_ms;
         let reverify_days = self.config.reverify_days;
-        let scan_state = tokio::task::spawn_blocking(move || {
+        let scan_state = crate::services::background_io::run("integrity-scan", move || {
             scan_all_buckets_with_reverify(&storage_root, batch_size, pacing_ms, reverify_days)
         })
         .await
@@ -886,7 +886,7 @@ async fn heal_stale_version(storage_root: &Path, bucket: &str, key: &str) -> Hea
     let storage_root = storage_root.to_path_buf();
     let bucket = bucket.to_string();
     let key = key.to_string();
-    tokio::task::spawn_blocking(move || {
+    crate::services::background_io::run("integrity-heal", move || {
         let versions_root = storage_root
             .join(SYSTEM_ROOT)
             .join(SYSTEM_BUCKETS_DIR)

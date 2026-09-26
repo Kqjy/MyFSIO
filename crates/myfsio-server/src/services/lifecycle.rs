@@ -336,7 +336,8 @@ impl LifecycleService {
         let scan_bucket = bucket.to_string();
         let scan_prefix = rule.prefix.clone();
         let scan_tags = rule.tags.clone();
-        let scanned = tokio::task::spawn_blocking(
+        let scanned = crate::services::background_io::run(
+            "lifecycle-scan",
             move || -> Result<Vec<(String, String, PathBuf)>, String> {
                 let mut candidates = Vec::new();
                 let mut stack = VecDeque::from([versions_root]);

@@ -427,7 +427,7 @@ async fn cached_storage_bytes(
     let previous = { cache.read().await.bytes };
     let storage = storage.clone();
     let handle = tokio::runtime::Handle::current();
-    let refreshed = tokio::task::spawn_blocking(move || {
+    let refreshed = crate::services::background_io::run("storage-stats", move || {
         handle.block_on(async move {
             let mut total = 0u64;
             let buckets = storage.list_buckets().await.unwrap_or_default();

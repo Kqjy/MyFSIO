@@ -202,10 +202,13 @@ The web UI uses 1024-byte binary units consistently and labels them `KiB`, `MiB`
 | `HDD_READ_CONCURRENCY` | `0` (disabled) | Maximum concurrent S3 object data reads; `2` is recommended for HDD storage |
 | `HDD_WRITE_CONCURRENCY` | `0` (disabled) | Maximum concurrent S3 object data writes; `2` is recommended for HDD storage |
 | `DISK_QUEUE_TIMEOUT_SECONDS` | `15` | Maximum wait for a disk permit before returning `503 SlowDown` |
+| `BACKGROUND_IO_PRIORITY` | `low` | I/O priority of background filesystem scans: `low` (Linux best-effort level 7), `idle` (Linux idle class: served only when the disk is otherwise idle), or `normal` |
 
 These limits gate S3 object data reads and writes only. Admin and UI requests, HEAD requests, and metadata operations are unaffected.
 
 Permits track disk work, not network time. `DISK_QUEUE_TIMEOUT_SECONDS` applies once, when a request is admitted (before any response headers are sent). After that a download holds a read permit only while a disk read is in flight, and an upload holds a write permit only while already-buffered body bytes are being written: the permit is released whenever the upload waits on the client and is re-queued every four stream chunks so concurrent writers interleave. An upload's final flush, fsync and commit run under a single write permit. A slow client therefore never occupies a disk slot while the disk is idle. Encrypted downloads decrypt a few chunks ahead of the gate, so they can briefly exceed the read limit by that read-ahead.
+
+Background filesystem scans (the GC sweep, the integrity scan and stale-version heals, the lifecycle noncurrent-version walk, and the periodic storage-size refresh for system metrics) run on dedicated short-lived threads whose I/O priority is lowered per `BACKGROUND_IO_PRIORITY`; request-serving threads are never reprioritized. How much this helps depends on the Linux I/O scheduler: BFQ honours both the class and the level, `mq-deadline` honours only the class (so `low` behaves like `normal` there and `idle` is the setting that matters), and `none` ignores priorities. Priorities apply to reads and synchronous writes; buffered writes are flushed by kernel writeback threads at their own priority. Deletes and rewrites that lifecycle and integrity healing issue through the storage engine still run at normal priority. `idle` can delay maintenance indefinitely on a disk that is never idle, which is why `low` is the default. On Windows `low` and `idle` both put the worker in background processing mode, which lowers its CPU and I/O priority.
 
 ### CORS and proxying
 

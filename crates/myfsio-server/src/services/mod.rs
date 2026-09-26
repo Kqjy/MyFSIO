@@ -1,6 +1,7 @@
 pub mod access_logging;
 pub mod acl;
 pub mod audit_log;
+pub mod background_io;
 pub mod bucket_encryption;
 pub mod cluster_attest;
 pub mod disk_limiter;

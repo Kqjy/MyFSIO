@@ -195,7 +195,7 @@ impl GcService {
     async fn execute_gc(&self, dry_run: bool) -> Value {
         let storage_root = self.storage_root.clone();
         let config = self.config.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::services::background_io::run("gc", move || {
             Self::execute_gc_blocking(storage_root, config, dry_run)
         })
         .await

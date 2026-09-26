@@ -297,6 +297,11 @@ async fn main() {
          yourself, and prefer Linux for production deployments."
     );
 
+    myfsio_server::services::background_io::configure(config.background_io_priority);
+    tracing::info!(
+        "Background I/O priority: {}",
+        config.background_io_priority.as_str()
+    );
     let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     if let Some(ref gc) = state.gc {
@@ -545,6 +550,10 @@ fn print_config_summary(config: &ServerConfig) {
     );
     println!("Integrity enabled: {}", config.integrity_enabled);
     println!("Read verify mode: {}", config.read_verify_mode.as_str());
+    println!(
+        "Background I/O priority: {}",
+        config.background_io_priority.as_str()
+    );
     println!("Lifecycle enabled: {}", config.lifecycle_enabled);
     println!(
         "Lifecycle history limit: {}",
