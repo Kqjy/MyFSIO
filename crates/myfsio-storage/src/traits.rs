@@ -75,10 +75,21 @@ impl SnapshotSource {
         start: u64,
         len: Option<u64>,
     ) -> std::io::Result<AsyncReadStream> {
+        self.into_range_stream_tuned(start, len, crate::read_tuning::ReadTuning::default())
+            .await
+    }
+
+    pub async fn into_range_stream_tuned(
+        self,
+        start: u64,
+        len: Option<u64>,
+        tuning: crate::read_tuning::ReadTuning,
+    ) -> std::io::Result<AsyncReadStream> {
         match self {
             SnapshotSource::LinkedFile(path) => {
                 use tokio::io::{AsyncReadExt, AsyncSeekExt};
                 let mut file = tokio::fs::File::open(&path).await?;
+                tuning.apply(&mut file);
                 if start > 0 {
                     file.seek(std::io::SeekFrom::Start(start)).await?;
                 }
@@ -109,7 +120,8 @@ impl SnapshotSource {
                 }
                 let reader =
                     crate::segments::LazySegmentRangeReader::new(source, rel_start, effective_len)
-                        .await?;
+                        .await?
+                        .with_tuning(tuning);
                 Ok(Box::pin(reader))
             }
             SnapshotSource::EagerSegments {
@@ -140,7 +152,8 @@ impl SnapshotSource {
                     rel_start,
                     effective_len,
                 )
-                .await?;
+                .await?
+                .with_tuning(tuning);
                 Ok(Box::pin(reader))
             }
         }

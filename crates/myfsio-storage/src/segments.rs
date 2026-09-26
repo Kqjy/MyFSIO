@@ -624,6 +624,15 @@ pub struct SegmentRangeReader {
     seg_remaining: u64,
 }
 
+impl SegmentRangeReader {
+    pub fn with_tuning(mut self, tuning: crate::read_tuning::ReadTuning) -> Self {
+        for (file, _) in self.files.iter_mut() {
+            tuning.apply(file);
+        }
+        self
+    }
+}
+
 type SegmentOpenFuture =
     Pin<Box<dyn Future<Output = std::io::Result<tokio::fs::File>> + Send + Sync>>;
 
@@ -634,9 +643,18 @@ pub struct LazySegmentRangeReader {
     current: Option<tokio::fs::File>,
     opening: Option<SegmentOpenFuture>,
     seg_remaining: u64,
+    tuning: crate::read_tuning::ReadTuning,
 }
 
 impl LazySegmentRangeReader {
+    pub fn with_tuning(mut self, tuning: crate::read_tuning::ReadTuning) -> Self {
+        if let Some(file) = self.current.as_mut() {
+            tuning.apply(file);
+        }
+        self.tuning = tuning;
+        self
+    }
+
     pub async fn new(source: LazySegmentSource, start: u64, len: u64) -> std::io::Result<Self> {
         let (paths, eager) = source.into_parts();
         let plan = paths.window(start, len);
@@ -667,6 +685,7 @@ impl LazySegmentRangeReader {
             current,
             opening: None,
             seg_remaining,
+            tuning: crate::read_tuning::ReadTuning::default(),
         })
     }
 
@@ -694,7 +713,8 @@ impl AsyncRead for LazySegmentRangeReader {
                 }
                 let opening = self.opening.as_mut().expect("segment open future");
                 match opening.as_mut().poll(cx) {
-                    Poll::Ready(Ok(file)) => {
+                    Poll::Ready(Ok(mut file)) => {
+                        self.tuning.apply(&mut file);
                         self.current = Some(file);
                         self.opening = None;
                         self.seg_remaining = self.plan[self.plan_idx].2;

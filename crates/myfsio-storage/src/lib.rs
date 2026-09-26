@@ -4,6 +4,7 @@ pub mod failpoints;
 pub mod fs_backend;
 mod listing_index;
 pub mod preallocate;
+pub mod read_tuning;
 pub mod segments;
 pub mod traits;
 pub mod validation;

@@ -16789,3 +16789,138 @@ async fn test_stalled_upload_does_not_hold_disk_write_permit() {
     expected.extend(vec![b'c'; 100 * 1024]);
     assert_eq!(body.as_ref(), expected.as_slice());
 }
+
+#[tokio::test]
+async fn test_large_read_chunks_serve_plain_and_segmented_objects() {
+    let (app, _tmp) = test_app_with_iam_and(
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            }]
+        }),
+        |config| {
+            config.read_chunk_size = 4 * 1024 * 1024;
+            config.hdd_read_concurrency = 1;
+        },
+    );
+    let mib = 1024 * 1024;
+    let plain: Vec<u8> = (0..9 * mib).map(|i| (i % 241) as u8).collect();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/tuned-read", Body::empty()))
+        .await
+        .unwrap();
+    let put = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/tuned-read/plain.bin",
+            Body::from(plain.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let init = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/tuned-read/video.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let init_body = String::from_utf8(body_bytes(init).await).unwrap();
+    let upload_id = init_body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+    let first: Vec<u8> = (0..6 * mib).map(|i| (i % 239) as u8).collect();
+    let second: Vec<u8> = (0..3 * mib).map(|i| (i % 233) as u8).collect();
+    let mut etags = Vec::new();
+    for (number, data) in [(1, &first), (2, &second)] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/tuned-read/video.bin?uploadId={upload_id}&partNumber={number}"),
+                Body::from(data.clone()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        etags.push(
+            resp.headers()
+                .get("etag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        etags[0], etags[1]
+    );
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            &format!("/tuned-read/video.bin?uploadId={upload_id}"),
+            Body::from(complete),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut video = first.clone();
+    video.extend_from_slice(&second);
+
+    for (key, expected) in [("plain.bin", &plain), ("video.bin", &video)] {
+        let full = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/tuned-read/{key}"),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(&body_bytes(full).await, expected);
+
+        for (start, end) in [(5 * mib + 7, 6 * mib + 11), (mib, 9 * mib - 1)] {
+            let ranged = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(format!("/tuned-read/{key}"))
+                        .header("x-access-key", TEST_ACCESS_KEY)
+                        .header("x-secret-key", TEST_SECRET_KEY)
+                        .header("range", format!("bytes={start}-{end}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(body_bytes(ranged).await, expected[start..=end].to_vec());
+        }
+    }
+}

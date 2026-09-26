@@ -377,7 +377,10 @@ pub(crate) async fn serve_object_data(
                         Some((start, end)) => (start, Some(end - start + 1)),
                         None => (0, None),
                     };
-                    let reader = match segments.into_range_stream(start, length).await {
+                    let reader = match segments
+                        .into_range_stream_tuned(start, length, read_tuning(state, window, total))
+                        .await
+                    {
                         Ok(reader) => reader,
                         Err(e) => return Err(ObjectReadError::Storage(StorageError::Io(e))),
                     };
@@ -394,6 +397,23 @@ pub(crate) async fn serve_object_data(
                 }
             }
         }
+    }
+}
+
+const SEQUENTIAL_READ_MIN_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_tuning(
+    state: &AppState,
+    window: Option<(u64, u64)>,
+    total: u64,
+) -> myfsio_storage::read_tuning::ReadTuning {
+    let length = match window {
+        Some((start, end)) => end - start + 1,
+        None => total,
+    };
+    myfsio_storage::read_tuning::ReadTuning {
+        buffer_bytes: state.config.read_chunk_size,
+        sequential: length >= SEQUENTIAL_READ_MIN_BYTES,
     }
 }
 
@@ -437,6 +457,7 @@ async fn serve_file_window(
             return Err(ObjectReadError::Storage(StorageError::Io(e)));
         }
     };
+    read_tuning(state, window, total).apply(&mut file);
 
     let reader: AsyncReadStream = match window {
         Some((start, end)) => {
@@ -475,8 +496,10 @@ fn served_object(
         Some(verification) => Box::pin(VerifyOnRead::new(reader, verification)) as AsyncReadStream,
         None => reader,
     };
-    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
-    let body = Body::from_stream(ReaderStream::with_capacity(reader, stream_cap));
+    let body = Body::from_stream(ReaderStream::with_capacity(
+        reader,
+        state.config.read_chunk_size,
+    ));
     let content_length = match window {
         Some((start, end)) => end - start + 1,
         None => total,

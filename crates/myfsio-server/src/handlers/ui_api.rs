@@ -2607,7 +2607,10 @@ pub async fn upload_object(
             )
         }
     };
-    let reader_stream = tokio_util::io::ReaderStream::new(read_handle);
+    let reader_stream = tokio_util::io::ReaderStream::with_capacity(
+        read_handle,
+        state.config.stream_chunk_size.max(64 * 1024),
+    );
     let upload_body = Body::from_stream(reader_stream);
 
     let response = handlers::put_object(

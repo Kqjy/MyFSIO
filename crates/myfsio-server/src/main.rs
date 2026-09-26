@@ -555,6 +555,7 @@ fn print_config_summary(config: &ServerConfig) {
         config.background_io_priority.as_str()
     );
     println!("Upload preallocation: {}", config.upload_preallocate);
+    println!("Read chunk size: {} bytes", config.read_chunk_size);
     println!("Lifecycle enabled: {}", config.lifecycle_enabled);
     println!(
         "Lifecycle history limit: {}",

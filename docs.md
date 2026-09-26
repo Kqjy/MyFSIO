@@ -161,6 +161,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Age before an orphaned (unreferenced) multipart segment directory is garbage-collected |
 | `BULK_DELETE_MAX_KEYS` | `1000` | Maximum keys per UI bulk-delete request |
 | `STREAM_CHUNK_SIZE` | `1048576` | Default streaming chunk size for opt-in routes |
+| `READ_CHUNK_SIZE` | `STREAM_CHUNK_SIZE` (1 MiB) | Size of each disk read when serving S3 GETs (plain and multipart-segmented objects), clamped to 64 KiB–16 MiB. Larger reads mean fewer seeks when several downloads interleave on an HDD, at the cost of up to about twice this much memory per active download. GETs of 8 MiB or more (full objects or large ranges) also tell the Linux kernel the file will be read sequentially (`posix_fadvise(SEQUENTIAL)`, which doubles its readahead window); smaller ranges keep the default so video seeks don't trigger wasted readahead. Server-side-encrypted objects use their own decryption chunking |
 | `OBJECT_KEY_MAX_LENGTH_BYTES` | `1024` | Maximum object key length |
 | `OBJECT_CACHE_MAX_SIZE` | `1024` | Object metadata LRU cache capacity |
 | `BUCKET_CONFIG_CACHE_TTL_SECONDS` | `30` | Bucket config cache TTL |
