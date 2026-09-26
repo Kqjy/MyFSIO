@@ -242,17 +242,12 @@ pub async fn put_object(
         Ok(stream) => stream,
         Err(response) => return response,
     };
-    let boxed = spool_upload_stream(
-        raw,
-        state.config.upload_stream_buffer_bytes,
-        state.config.stream_chunk_size,
-        state.disk_limiter.spool_gauge(),
-    );
-
-    let _disk_permit = match acquire_disk_write_permit(&state).await {
+    let disk_permit = match acquire_disk_write_permit(&state).await {
         Ok(permit) => permit,
         Err(response) => return response,
     };
+    let disk_tail = crate::services::disk_limiter::DiskTailPermit::default();
+    let boxed = admit_upload_stream(&state, raw, disk_permit, &disk_tail);
 
     let commit_options = myfsio_storage::traits::PutCommitOptions {
         etag_override: None,

@@ -470,7 +470,7 @@ fn served_object(
     encryption_algorithm: Option<String>,
     verification: Option<ReadVerification>,
 ) -> ServedObject {
-    let reader = attach_read_permit(reader, permit);
+    let reader = attach_read_permit(state, reader, permit);
     let reader = match verification {
         Some(verification) => Box::pin(VerifyOnRead::new(reader, verification)) as AsyncReadStream,
         None => reader,

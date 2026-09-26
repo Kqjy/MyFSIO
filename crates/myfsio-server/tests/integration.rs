@@ -16624,3 +16624,168 @@ async fn version_scoped_object_actions_need_version_scoped_grants() {
         "an s3:GetObjectVersion grant must not authorize a current-object read"
     );
 }
+
+fn disk_limited_app() -> (axum::Router, tempfile::TempDir) {
+    test_app_with_iam_and(
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            }]
+        }),
+        |config| {
+            config.hdd_read_concurrency = 1;
+            config.hdd_write_concurrency = 1;
+            config.disk_queue_timeout_secs = 1;
+            config.stream_chunk_size = 64 * 1024;
+        },
+    )
+}
+
+#[tokio::test]
+async fn test_stalled_download_does_not_hold_disk_read_permit() {
+    let (app, _tmp) = disk_limited_app();
+    let payload: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(Method::PUT, "/stall-read", Body::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/stall-read/video.bin",
+                Body::from(payload.clone())
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let stalled = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/stall-read/video.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stalled.status(), StatusCode::OK);
+    let mut stalled_body = stalled.into_body();
+    let first = stalled_body.frame().await.unwrap().unwrap();
+    assert!(first.data_ref().is_some_and(|d| !d.is_empty()));
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        app.clone().oneshot(signed_request(
+            Method::GET,
+            "/stall-read/video.bin",
+            Body::empty(),
+        )),
+    )
+    .await
+    .expect("second GET must not wait behind a stalled download")
+    .unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::OK,
+        "a stalled download must not hold the disk read permit"
+    );
+    let second_bytes = second.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(second_bytes.as_ref(), payload.as_slice());
+
+    let mut rest = first.into_data().unwrap().to_vec();
+    rest.extend_from_slice(&stalled_body.collect().await.unwrap().to_bytes());
+    assert_eq!(rest, payload);
+}
+
+#[tokio::test]
+async fn test_stalled_upload_does_not_hold_disk_write_permit() {
+    let (app, _tmp) = disk_limited_app();
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(Method::PUT, "/stall-write", Body::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
+    let slow = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.oneshot(signed_request(
+                Method::PUT,
+                "/stall-write/slow.bin",
+                Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+            ))
+            .await
+            .unwrap()
+        }
+    });
+    tx.send(Ok(bytes::Bytes::from(vec![b'a'; 300 * 1024])))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let fast = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        app.clone().oneshot(signed_request(
+            Method::PUT,
+            "/stall-write/fast.bin",
+            Body::from(vec![b'b'; 256 * 1024]),
+        )),
+    )
+    .await
+    .expect("second PUT must not wait behind a stalled upload")
+    .unwrap();
+    assert_eq!(
+        fast.status(),
+        StatusCode::OK,
+        "a stalled upload must not hold the disk write permit"
+    );
+
+    tx.send(Ok(bytes::Bytes::from(vec![b'c'; 100 * 1024])))
+        .await
+        .unwrap();
+    drop(tx);
+    let slow = slow.await.unwrap();
+    assert_eq!(slow.status(), StatusCode::OK);
+
+    let body = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/stall-write/slow.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let mut expected = vec![b'a'; 300 * 1024];
+    expected.extend(vec![b'c'; 100 * 1024]);
+    assert_eq!(body.as_ref(), expected.as_slice());
+}

@@ -491,10 +491,11 @@ pub(super) async fn upload_part_handler_with_chunking(
         .await;
     }
 
-    let _disk_permit = match acquire_disk_write_permit(state).await {
+    let disk_permit = match acquire_disk_write_permit(state).await {
         Ok(permit) => permit,
         Err(response) => return response,
     };
+    let disk_tail = crate::services::disk_limiter::DiskTailPermit::default();
     let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
         match decode_aws_chunked_body(
             body,
@@ -518,12 +519,7 @@ pub(super) async fn upload_part_handler_with_chunking(
         Ok(stream) => stream,
         Err(response) => return response,
     };
-    let boxed = spool_upload_stream(
-        raw,
-        state.config.upload_stream_buffer_bytes,
-        state.config.stream_chunk_size,
-        state.disk_limiter.spool_gauge(),
-    );
+    let boxed = admit_upload_stream(state, raw, disk_permit, &disk_tail);
 
     match state
         .storage
@@ -612,10 +608,11 @@ pub(super) async fn upload_part_sse_c(
     let plain_tmp = tmp_dir.join(format!("mpu-plain-{}", uuid::Uuid::new_v4()));
     let block_tmp = tmp_dir.join(format!("mpu-block-{}", uuid::Uuid::new_v4()));
 
-    let _disk_permit = match acquire_disk_write_permit(state).await {
+    let disk_permit = match acquire_disk_write_permit(state).await {
         Ok(permit) => permit,
         Err(response) => return response,
     };
+    let disk_tail = crate::services::disk_limiter::DiskTailPermit::default();
     let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
         match decode_aws_chunked_body(
             body,
@@ -638,12 +635,7 @@ pub(super) async fn upload_part_sse_c(
         Ok(stream) => stream,
         Err(response) => return response,
     };
-    let boxed = spool_upload_stream(
-        raw,
-        state.config.upload_stream_buffer_bytes,
-        state.config.stream_chunk_size,
-        state.disk_limiter.spool_gauge(),
-    );
+    let boxed = admit_upload_stream(state, raw, disk_permit, &disk_tail);
 
     if let Err(resp) = drain_stream_to_file(boxed, &plain_tmp).await {
         let _ = tokio::fs::remove_file(&plain_tmp).await;
@@ -771,31 +763,40 @@ pub(super) fn spool_upload_stream(
     Box::pin(tokio_util::io::StreamReader::new(consumer_stream))
 }
 
-pub(super) struct PermitReader {
-    inner: myfsio_storage::traits::AsyncReadStream,
-    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
-}
-
-impl tokio::io::AsyncRead for PermitReader {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
 pub(super) fn attach_read_permit(
+    state: &AppState,
     reader: myfsio_storage::traits::AsyncReadStream,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> myfsio_storage::traits::AsyncReadStream {
-    match permit {
-        Some(_) => Box::pin(PermitReader {
-            inner: reader,
-            _permit: permit,
-        }),
+    match state.disk_limiter.read_semaphore() {
+        Some(semaphore) => Box::pin(crate::services::disk_limiter::DiskReadGate::new(
+            reader, semaphore, permit,
+        )),
         None => reader,
+    }
+}
+
+pub(super) fn admit_upload_stream(
+    state: &AppState,
+    raw: myfsio_storage::traits::AsyncReadStream,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    tail: &crate::services::disk_limiter::DiskTailPermit,
+) -> myfsio_storage::traits::AsyncReadStream {
+    let spooled = spool_upload_stream(
+        raw,
+        state.config.upload_stream_buffer_bytes,
+        state.config.stream_chunk_size,
+        state.disk_limiter.spool_gauge(),
+    );
+    match state.disk_limiter.write_semaphore() {
+        Some(semaphore) => Box::pin(crate::services::disk_limiter::DiskWriteGate::new(
+            spooled,
+            semaphore,
+            permit,
+            state.config.stream_chunk_size.max(64 * 1024),
+            tail.clone(),
+        )),
+        None => spooled,
     }
 }
 
@@ -2007,7 +2008,7 @@ pub(super) async fn serve_mpu_sse_c(
 
     let body_len: u64 = if total == 0 { 0 } else { end - start + 1 };
     let stream = enc_svc.decrypt_mpu_blocks_stream(&snap_link, odk, chunk_size, blocks, true);
-    let stream = attach_read_permit(stream, disk_permit);
+    let stream = attach_read_permit(state, stream, disk_permit);
 
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
     let stream = ReaderStream::with_capacity(stream, stream_cap);

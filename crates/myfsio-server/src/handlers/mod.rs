@@ -79,10 +79,10 @@ use encryption::{
 };
 use multipart::{
     abort_multipart_handler, acquire_disk_read_permit, acquire_disk_write_permit,
-    attach_read_permit, build_part_response_headers, complete_multipart_handler, head_mpu_sse_c,
-    initiate_multipart_handler, list_multipart_uploads_handler, list_parts_handler, mpu_is_sse_c,
-    resolve_part_view, serve_mpu_sse_c, spool_upload_stream, upload_part_copy_handler,
-    upload_part_handler_with_chunking,
+    admit_upload_stream, attach_read_permit, build_part_response_headers,
+    complete_multipart_handler, head_mpu_sse_c, initiate_multipart_handler,
+    list_multipart_uploads_handler, list_parts_handler, mpu_is_sse_c, resolve_part_view,
+    serve_mpu_sse_c, upload_part_copy_handler, upload_part_handler_with_chunking,
 };
 pub use object::{delete_object, get_object, head_object, post_object, put_object};
 pub use object_headers::ObjectQuery;

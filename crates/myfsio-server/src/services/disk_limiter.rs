@@ -1,7 +1,13 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use myfsio_storage::traits::AsyncReadStream;
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[derive(Debug)]
 pub struct DiskQueueTimeout;
@@ -81,6 +87,14 @@ impl DiskLimiter {
         self.acquire(&self.write).await
     }
 
+    pub fn read_semaphore(&self) -> Option<Arc<Semaphore>> {
+        self.read.clone()
+    }
+
+    pub fn write_semaphore(&self) -> Option<Arc<Semaphore>> {
+        self.write.clone()
+    }
+
     pub fn enabled(&self) -> bool {
         self.read.is_some() || self.write.is_some()
     }
@@ -108,6 +122,215 @@ impl DiskLimiter {
             queue_wait_ms_total: wait_total,
             queue_wait_ms_avg: if waits > 0 { wait_total / waits } else { 0 },
             upload_spool_bytes: self.upload_spool_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+type PermitFuture =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+
+struct PermitSlot {
+    semaphore: Option<Arc<Semaphore>>,
+    permit: Option<OwnedSemaphorePermit>,
+    acquiring: Option<PermitFuture>,
+}
+
+impl PermitSlot {
+    fn new(semaphore: Arc<Semaphore>, permit: Option<OwnedSemaphorePermit>) -> Self {
+        Self {
+            semaphore: Some(semaphore),
+            permit,
+            acquiring: None,
+        }
+    }
+
+    fn poll_hold(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.permit.is_some() {
+            return Poll::Ready(());
+        }
+        let Some(semaphore) = self.semaphore.clone() else {
+            return Poll::Ready(());
+        };
+        if self.acquiring.is_none() {
+            match semaphore.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    self.permit = Some(permit);
+                    return Poll::Ready(());
+                }
+                Err(TryAcquireError::Closed) => {
+                    self.semaphore = None;
+                    return Poll::Ready(());
+                }
+                Err(TryAcquireError::NoPermits) => {
+                    self.acquiring = Some(Box::pin(semaphore.acquire_owned()));
+                }
+            }
+        }
+        let Some(acquiring) = self.acquiring.as_mut() else {
+            return Poll::Ready(());
+        };
+        match acquiring.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.acquiring = None;
+                match result {
+                    Ok(permit) => self.permit = Some(permit),
+                    Err(_) => self.semaphore = None,
+                }
+                Poll::Ready(())
+            }
+        }
+    }
+
+    fn release(&mut self) {
+        self.permit = None;
+    }
+
+    fn take(&mut self) -> Option<OwnedSemaphorePermit> {
+        self.permit.take()
+    }
+}
+
+pub struct DiskReadGate {
+    inner: AsyncReadStream,
+    slot: PermitSlot,
+}
+
+impl DiskReadGate {
+    pub fn new(
+        inner: AsyncReadStream,
+        semaphore: Arc<Semaphore>,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> Self {
+        Self {
+            inner,
+            slot: PermitSlot::new(semaphore, permit),
+        }
+    }
+}
+
+impl AsyncRead for DiskReadGate {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.slot.poll_hold(cx).is_pending() {
+            return Poll::Pending;
+        }
+        let result = this.inner.as_mut().poll_read(cx, buf);
+        if result.is_ready() {
+            this.slot.release();
+        }
+        result
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct DiskTailPermit(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
+
+impl DiskTailPermit {
+    fn park(&self, permit: OwnedSemaphorePermit) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(permit);
+        }
+    }
+
+    pub fn is_parked(&self) -> bool {
+        self.0.lock().map(|slot| slot.is_some()).unwrap_or(false)
+    }
+}
+
+pub struct DiskWriteGate {
+    inner: AsyncReadStream,
+    slot: PermitSlot,
+    stash: Vec<u8>,
+    pos: usize,
+    len: usize,
+    eof: bool,
+    parked: bool,
+    held_bytes: u64,
+    quantum: u64,
+    tail: DiskTailPermit,
+}
+
+impl DiskWriteGate {
+    pub fn new(
+        inner: AsyncReadStream,
+        semaphore: Arc<Semaphore>,
+        permit: Option<OwnedSemaphorePermit>,
+        chunk_size: usize,
+        tail: DiskTailPermit,
+    ) -> Self {
+        let chunk_size = chunk_size.max(1);
+        Self {
+            inner,
+            slot: PermitSlot::new(semaphore, permit),
+            stash: vec![0u8; chunk_size],
+            pos: 0,
+            len: 0,
+            eof: false,
+            parked: false,
+            held_bytes: 0,
+            quantum: (chunk_size as u64).saturating_mul(4),
+            tail,
+        }
+    }
+}
+
+impl AsyncRead for DiskWriteGate {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            if this.pos < this.len {
+                if this.held_bytes >= this.quantum {
+                    this.slot.release();
+                    this.held_bytes = 0;
+                }
+                if this.slot.poll_hold(cx).is_pending() {
+                    return Poll::Pending;
+                }
+                let n = (this.len - this.pos).min(buf.remaining());
+                buf.put_slice(&this.stash[this.pos..this.pos + n]);
+                this.pos += n;
+                this.held_bytes += n as u64;
+                return Poll::Ready(Ok(()));
+            }
+            if this.eof {
+                if !this.parked {
+                    if this.slot.poll_hold(cx).is_pending() {
+                        return Poll::Pending;
+                    }
+                    if let Some(permit) = this.slot.take() {
+                        this.tail.park(permit);
+                    }
+                    this.parked = true;
+                }
+                return Poll::Ready(Ok(()));
+            }
+            let mut stash = ReadBuf::new(&mut this.stash);
+            match this.inner.as_mut().poll_read(cx, &mut stash) {
+                Poll::Pending => {
+                    this.slot.release();
+                    this.held_bytes = 0;
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {
+                    let n = stash.filled().len();
+                    if n == 0 {
+                        this.eof = true;
+                    } else {
+                        this.pos = 0;
+                        this.len = n;
+                    }
+                }
+            }
         }
     }
 }
@@ -144,5 +367,81 @@ mod tests {
         assert_eq!(snap.read_permits_in_use, 1);
         assert_eq!(snap.write_permits_in_use, 1);
         assert_eq!(snap.read_limit, 2);
+    }
+
+    fn stream_of(bytes: Vec<u8>) -> AsyncReadStream {
+        Box::pin(std::io::Cursor::new(bytes))
+    }
+
+    #[tokio::test]
+    async fn read_gate_holds_permit_only_during_reads() {
+        use futures::FutureExt;
+        use tokio::io::AsyncReadExt;
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let initial = semaphore.clone().try_acquire_owned().unwrap();
+        let mut gate =
+            DiskReadGate::new(stream_of(vec![7u8; 16]), semaphore.clone(), Some(initial));
+        let mut buf = [0u8; 4];
+        assert_eq!(gate.read(&mut buf).await.unwrap(), 4);
+        assert_eq!(semaphore.available_permits(), 1);
+
+        let held = semaphore.clone().try_acquire_owned().unwrap();
+        assert!(gate.read(&mut buf).now_or_never().is_none());
+        drop(held);
+        assert_eq!(gate.read(&mut buf).await.unwrap(), 4);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn write_gate_releases_during_network_waits_and_parks_tail() {
+        use futures::FutureExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let (mut client, server) = tokio::io::duplex(64);
+        let tail = DiskTailPermit::default();
+        let mut gate =
+            DiskWriteGate::new(Box::pin(server), semaphore.clone(), None, 4, tail.clone());
+        let mut buf = [0u8; 4];
+
+        client.write_all(&[1u8; 8]).await.unwrap();
+        assert_eq!(gate.read(&mut buf).await.unwrap(), 4);
+        assert_eq!(semaphore.available_permits(), 0);
+        assert_eq!(gate.read(&mut buf).await.unwrap(), 4);
+        assert!(gate.read(&mut buf).now_or_never().is_none());
+        assert_eq!(semaphore.available_permits(), 1);
+
+        client.write_all(&[2u8; 2]).await.unwrap();
+        drop(client);
+        assert_eq!(gate.read(&mut buf).await.unwrap(), 2);
+        assert_eq!(&buf[..2], &[2u8, 2]);
+        assert_eq!(gate.read(&mut buf).await.unwrap(), 0);
+        assert!(tail.is_parked());
+        drop(gate);
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(tail);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn write_gate_requeues_after_quantum() {
+        use futures::FutureExt;
+        use tokio::io::AsyncReadExt;
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let tail = DiskTailPermit::default();
+        let mut gate =
+            DiskWriteGate::new(stream_of(vec![3u8; 64]), semaphore.clone(), None, 4, tail);
+        let mut buf = [0u8; 4];
+        for _ in 0..4 {
+            assert_eq!(gate.read(&mut buf).await.unwrap(), 4);
+        }
+        let mut waiter = Box::pin(semaphore.clone().acquire_owned());
+        assert!((&mut waiter).now_or_never().is_none());
+        assert!(gate.read(&mut buf).now_or_never().is_none());
+        let granted = waiter.await.unwrap();
+        drop(granted);
+        assert_eq!(gate.read(&mut buf).await.unwrap(), 4);
     }
 }

@@ -378,10 +378,11 @@ pub(super) async fn post_object_form_handler(
         return response;
     }
 
-    let _disk_permit = match acquire_disk_write_permit(state).await {
+    let disk_permit = match acquire_disk_write_permit(state).await {
         Ok(permit) => permit,
         Err(response) => return response,
     };
+    let disk_tail = crate::services::disk_limiter::DiskTailPermit::default();
     let raw: myfsio_storage::traits::AsyncReadStream = Box::pin(tokio_util::io::StreamReader::new(
         tokio_stream::wrappers::ReceiverStream::new(file_data),
     ));
@@ -393,12 +394,7 @@ pub(super) async fn post_object_form_handler(
         Ok(stream) => stream,
         Err(response) => return response,
     };
-    let boxed = spool_upload_stream(
-        raw,
-        state.config.upload_stream_buffer_bytes,
-        state.config.stream_chunk_size,
-        state.disk_limiter.spool_gauge(),
-    );
+    let boxed = admit_upload_stream(state, raw, disk_permit, &disk_tail);
 
     let meta = match state
         .storage

@@ -205,6 +205,8 @@ The web UI uses 1024-byte binary units consistently and labels them `KiB`, `MiB`
 
 These limits gate S3 object data reads and writes only. Admin and UI requests, HEAD requests, and metadata operations are unaffected.
 
+Permits track disk work, not network time. `DISK_QUEUE_TIMEOUT_SECONDS` applies once, when a request is admitted (before any response headers are sent). After that a download holds a read permit only while a disk read is in flight, and an upload holds a write permit only while already-buffered body bytes are being written: the permit is released whenever the upload waits on the client and is re-queued every four stream chunks so concurrent writers interleave. An upload's final flush, fsync and commit run under a single write permit. A slow client therefore never occupies a disk slot while the disk is idle. Encrypted downloads decrypt a few chunks ahead of the gate, so they can briefly exceed the read limit by that read-ahead.
+
 ### CORS and proxying
 
 | Variable | Default | Description |
