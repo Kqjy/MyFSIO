@@ -1038,16 +1038,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn segment_sweep_skips_bucket_when_reference_scan_fails() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let segments_dir = write_segment_fixture(tmp.path(), "photos", "referenced");
         let orphan_dir = segments_dir.join("orphaned");
         std::fs::create_dir_all(&orphan_dir).unwrap();
         std::fs::write(orphan_dir.join("0"), b"part").unwrap();
-        let blocked_dir = tmp.path().join("photos").join("nested");
-        std::fs::create_dir_all(&blocked_dir).unwrap();
-        std::fs::set_permissions(&blocked_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut corrupt_stub = myfsio_storage::segments::SEGMENT_STUB_MAGIC.to_vec();
+        corrupt_stub.extend_from_slice(&0u32.to_le_bytes());
+        corrupt_stub.resize(myfsio_storage::segments::SEGMENT_MIN_TOTAL as usize, 0);
+        let nested_dir = tmp.path().join("photos").join("nested");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(nested_dir.join("corrupt.bin"), corrupt_stub).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         let service = Arc::new(GcService::new(
@@ -1059,7 +1060,6 @@ mod tests {
         ));
 
         let result = service.run_now(false).await.unwrap();
-        std::fs::set_permissions(&blocked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert_eq!(result["segment_dirs_deleted"], 0);
         assert!(orphan_dir.exists());
