@@ -338,6 +338,15 @@ pub(super) async fn post_object_form_handler(
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         .map(|(_, v)| v.clone());
+    if content_type_value
+        .as_deref()
+        .is_some_and(|value| value.parse::<axum::http::HeaderValue>().is_err())
+    {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Content-Type is not a valid header value",
+        ));
+    }
     metadata.insert(
         "__content_type__".to_string(),
         guessed_content_type(&object_key, content_type_value.as_deref()),

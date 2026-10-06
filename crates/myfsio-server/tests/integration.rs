@@ -8346,6 +8346,72 @@ async fn test_static_website_serves_plaintext_object() {
     assert_eq!(content_length, WEBSITE_INDEX_BODY.len());
 }
 
+#[tokio::test]
+async fn test_static_website_falls_back_when_stored_content_type_is_not_a_header_value() {
+    let (state, _tmp) = test_website_state();
+    let bucket = "site-bucket";
+
+    state.storage.create_bucket(bucket).await.unwrap();
+    put_website_object(
+        &state,
+        bucket,
+        "index.html",
+        WEBSITE_INDEX_BODY,
+        "text/html\r\nx-injected: 1",
+    )
+    .await;
+    put_website_object(
+        &state,
+        bucket,
+        "404.html",
+        "<!doctype html><h1>Bucket Not Found Page</h1>",
+        "text/html\u{1}",
+    )
+    .await;
+    let mut config = state.storage.get_bucket_config(bucket).await.unwrap();
+    config.website = Some(serde_json::json!({
+        "index_document": "index.html",
+        "error_document": "404.html",
+    }));
+    state
+        .storage
+        .set_bucket_config(bucket, &config)
+        .await
+        .unwrap();
+    state
+        .website_domains
+        .as_ref()
+        .unwrap()
+        .set_mapping("site.example.com", bucket);
+    let app = myfsio_server::create_router(state);
+
+    for (method, uri, expected_status) in [
+        (Method::GET, "/", StatusCode::OK),
+        (Method::HEAD, "/", StatusCode::OK),
+        (Method::GET, "/missing.html", StatusCode::NOT_FOUND),
+        (Method::HEAD, "/missing.html", StatusCode::NOT_FOUND),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(website_request(method.clone(), uri))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), expected_status, "{} {}", method, uri);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/octet-stream",
+            "{} {}",
+            method,
+            uri
+        );
+    }
+
+    let (status, body) = website_get(&app, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, WEBSITE_INDEX_BODY);
+}
+
 async fn test_website_app_with_objects(keys: &[&str]) -> (axum::Router, tempfile::TempDir) {
     let (state, tmp) = test_website_state();
     let bucket = "site-bucket";
@@ -15566,6 +15632,88 @@ async fn test_post_form_accepts_a_large_file_field_with_any_ascii_casing() {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(bytes.len(), payload.len());
+    }
+}
+
+#[tokio::test]
+async fn test_post_form_rejects_content_type_that_is_not_a_header_value() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/form-content-type",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    for (content_type, key, boundary, accepted) in [
+        (
+            "text/html\u{7f}",
+            "delete.html",
+            "----DeleteTypeBoundary",
+            false,
+        ),
+        (
+            "text/html\u{1}",
+            "control.html",
+            "----ControlTypeBoundary",
+            false,
+        ),
+        (
+            "text/html; charset=utf-8",
+            "valid.html",
+            "----ValidTypeBoundary",
+            true,
+        ),
+    ] {
+        let mut fields = post_form_auth_fields(key);
+        fields.push(("Content-Type".to_string(), content_type.to_string()));
+        let body = multipart_form_body(boundary, &fields, Some(("file", b"<h1>hi</h1>")));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/form-content-type")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let object = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/form-content-type/{}", key),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+
+        if accepted {
+            assert!(resp.status().is_success(), "got {}", resp.status());
+            assert_eq!(object.status(), StatusCode::OK);
+            assert_eq!(object.headers().get("content-type").unwrap(), content_type);
+        } else {
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains("<Code>InvalidArgument</Code>"),
+                "expected InvalidArgument XML, got: {}",
+                body
+            );
+            assert_eq!(object.status(), StatusCode::NOT_FOUND);
+        }
     }
 }
 

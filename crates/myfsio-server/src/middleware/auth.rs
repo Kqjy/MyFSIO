@@ -121,17 +121,17 @@ fn default_website_error_body(status: StatusCode) -> String {
     }
 }
 
-fn website_content_type(key: &str, metadata: &std::collections::HashMap<String, String>) -> String {
+fn website_content_type(
+    key: &str,
+    metadata: &std::collections::HashMap<String, String>,
+) -> axum::http::HeaderValue {
     metadata
         .get("__content_type__")
         .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .unwrap_or_else(|| {
-            mime_guess::from_path(key)
-                .first_raw()
-                .unwrap_or("application/octet-stream")
-                .to_string()
-        })
+        .map(|value| value.as_str())
+        .or_else(|| mime_guess::from_path(key).first_raw())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| axum::http::HeaderValue::from_static("application/octet-stream"))
 }
 
 fn parse_website_config(value: &Value) -> Option<(String, Option<String>)> {
@@ -227,7 +227,7 @@ async fn serve_website_document(
             ));
         }
         let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        headers.insert(header::CONTENT_TYPE, content_type.clone());
         headers.insert(
             header::CONTENT_LENGTH,
             object_read::plaintext_size(&meta)
@@ -280,7 +280,7 @@ async fn serve_website_document(
     };
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(header::CONTENT_TYPE, content_type);
     headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
     apply_website_object_headers(&mut headers, &served.meta);
     headers.insert(
