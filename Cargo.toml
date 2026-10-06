@@ -60,8 +60,8 @@ sqlparser = "0.62"
 csv = "1.4"
 parquet = { version = "59", default-features = false, features = ["snap", "brotli", "flate2-zlib-rs", "lz4", "zstd", "base64", "simdutf8", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
-aws-sdk-s3 = { version = "1", features = ["behavior-version-latest", "rt-tokio"] }
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "sigv4a", "default-https-client"] }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-credential-types = "1"
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"
