@@ -16772,6 +16772,342 @@ async fn version_scoped_object_actions_need_version_scoped_grants() {
     );
 }
 
+#[tokio::test]
+async fn copy_source_version_id_needs_version_scoped_read_grant() {
+    const OBJ_READ_ACCESS_KEY: &str = "AKIACOPYOBJECTREAD00";
+    const OBJ_READ_SECRET_KEY: &str = "copy-object-read-secret-key";
+    const VER_READ_ACCESS_KEY: &str = "AKIACOPYVERSIONREAD0";
+    const VER_READ_SECRET_KEY: &str = "copy-version-read-secret-key";
+
+    let copy_user = |user_id: &str, access_key: &str, secret_key: &str, read_action: &str| {
+        serde_json::json!({
+            "user_id": user_id,
+            "display_name": user_id,
+            "enabled": true,
+            "access_keys": [{
+                "access_key": access_key,
+                "secret_key": secret_key,
+                "status": "active"
+            }],
+            "policies": [
+                {"bucket": "copy-ver-src", "actions": [read_action], "prefix": "*"},
+                {"bucket": "copy-ver-dst", "actions": ["s3:PutObject", "s3:GetObject"], "prefix": "*"}
+            ]
+        })
+    };
+
+    let (app, _tmp) = test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            copy_user(
+                "u-copy-objread",
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY,
+                "s3:GetObject"
+            ),
+            copy_user(
+                "u-copy-verread",
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY,
+                "s3:GetObjectVersion"
+            )
+        ]
+    }));
+
+    let as_user = |method: Method,
+                   uri: &str,
+                   copy_source: Option<&str>,
+                   access_key: &'static str,
+                   secret_key: &'static str| {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-access-key", access_key)
+            .header("x-secret-key", secret_key);
+        if let Some(copy_source) = copy_source {
+            builder = builder.header("x-amz-copy-source", copy_source);
+        }
+        builder.body(Body::empty()).unwrap()
+    };
+
+    for bucket in ["/copy-ver-src", "/copy-ver-dst"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(signed_request(Method::PUT, bucket, Body::empty()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/copy-ver-src?versioning",
+                Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let first_put = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/copy-ver-src/secret.txt",
+            Body::from("old secret"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first_put.status(), StatusCode::OK);
+    let old_version_id = first_put.headers()["x-amz-version-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/copy-ver-src/secret.txt",
+                Body::from("current"),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let versioned_source = format!("/copy-ver-src/secret.txt?versionId={}", old_version_id);
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::PUT,
+                "/copy-ver-dst/loot.txt",
+                Some(&versioned_source),
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:GetObject grant must not authorize CopyObject from a specific source version"
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::GET,
+                "/copy-ver-dst/loot.txt",
+                None,
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND,
+        "a denied versioned copy must not create the destination object"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::PUT,
+                "/copy-ver-dst/plain.txt",
+                Some("/copy-ver-src/secret.txt"),
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "a plain CopyObject must still need only s3:GetObject on the source"
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::PUT,
+                "/copy-ver-dst/empty-version.txt",
+                Some("/copy-ver-src/secret.txt?versionId="),
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an empty source versionId must authorize as an ordinary GetObject"
+    );
+    let empty_version_copy = app
+        .clone()
+        .oneshot(as_user(
+            Method::GET,
+            "/copy-ver-dst/empty-version.txt",
+            None,
+            OBJ_READ_ACCESS_KEY,
+            OBJ_READ_SECRET_KEY,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        &empty_version_copy
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()[..],
+        b"current",
+        "an empty source versionId must copy the current version"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::PUT,
+                "/copy-ver-dst/versioned.txt",
+                Some(&versioned_source),
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an s3:GetObjectVersion grant must authorize CopyObject from a specific source version"
+    );
+    let versioned_copy = app
+        .clone()
+        .oneshot(as_user(
+            Method::GET,
+            "/copy-ver-dst/versioned.txt",
+            None,
+            VER_READ_ACCESS_KEY,
+            VER_READ_SECRET_KEY,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        &versioned_copy
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()[..],
+        b"old secret"
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::PUT,
+                "/copy-ver-dst/plain-as-version-reader.txt",
+                Some("/copy-ver-src/secret.txt"),
+                VER_READ_ACCESS_KEY,
+                VER_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:GetObjectVersion grant must not authorize a plain CopyObject"
+    );
+
+    let init = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/copy-ver-dst/parts.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(init.status(), StatusCode::OK);
+    let init_body = String::from_utf8(
+        init.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = init_body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap();
+    let part_uri = |part_number: u32| {
+        format!(
+            "/copy-ver-dst/parts.bin?uploadId={}&partNumber={}",
+            upload_id, part_number
+        )
+    };
+
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::PUT,
+                &part_uri(1),
+                Some(&versioned_source),
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN,
+        "an s3:GetObject grant must not authorize UploadPartCopy from a specific source version"
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(as_user(
+                Method::PUT,
+                &part_uri(1),
+                Some("/copy-ver-src/secret.txt"),
+                OBJ_READ_ACCESS_KEY,
+                OBJ_READ_SECRET_KEY
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "a plain UploadPartCopy must still need only s3:GetObject on the source"
+    );
+    assert_eq!(
+        app.oneshot(as_user(
+            Method::PUT,
+            &part_uri(2),
+            Some(&versioned_source),
+            VER_READ_ACCESS_KEY,
+            VER_READ_SECRET_KEY
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK,
+        "an s3:GetObjectVersion grant must authorize UploadPartCopy from a specific source version"
+    );
+}
+
 fn disk_limited_app() -> (axum::Router, tempfile::TempDir) {
     test_app_with_iam_and(
         serde_json::json!({

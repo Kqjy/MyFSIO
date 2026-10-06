@@ -102,9 +102,9 @@ use range::{
     object_read_error_response, parse_range, range_get_handler, serve_range_from_snapshot,
 };
 pub use subresource::{
-    ambiguous_subresource_error, bucket_method_default_s3_action, object_method_default_action,
-    object_method_default_s3_action, parse_bucket_subresource, parse_object_subresource,
-    query_has_version_id, BucketSubresource, ObjectSubresource,
+    ambiguous_subresource_error, bucket_method_default_s3_action, copy_source_version_id,
+    object_method_default_action, object_method_default_s3_action, parse_bucket_subresource,
+    parse_object_subresource, query_has_version_id, BucketSubresource, ObjectSubresource,
 };
 use subresource::{
     guard_object_subresource, subresource_method_not_allowed, unsupported_bucket_subresource,

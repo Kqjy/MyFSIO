@@ -399,10 +399,10 @@ pub(super) fn parse_copy_source(
             "Invalid x-amz-copy-source",
         ))
     })?;
-    let (key_raw, query) = key_and_query
+    let key_raw = key_and_query
         .split_once('?')
-        .map(|(key, query)| (key, Some(query)))
-        .unwrap_or((key_and_query, None));
+        .map(|(key, _)| key)
+        .unwrap_or(key_and_query);
 
     let bucket = percent_decode_str(bucket_raw)
         .decode_utf8()
@@ -423,28 +423,20 @@ pub(super) fn parse_copy_source(
         })?
         .to_string();
 
-    let mut version_id = None;
-    if let Some(query) = query {
-        for pair in query.split('&') {
-            let Some((name, value)) = pair.split_once('=') else {
-                continue;
-            };
-            if name == "versionId" {
-                version_id = Some(
-                    percent_decode_str(value)
-                        .decode_utf8()
-                        .map_err(|_| {
-                            s3_error_response(S3Error::new(
-                                S3ErrorCode::InvalidArgument,
-                                "Invalid x-amz-copy-source versionId encoding",
-                            ))
-                        })?
-                        .to_string(),
-                );
-                break;
-            }
-        }
-    }
+    let version_id = match copy_source_version_id(copy_source) {
+        Some(value) => Some(
+            percent_decode_str(value)
+                .decode_utf8()
+                .map_err(|_| {
+                    s3_error_response(S3Error::new(
+                        S3ErrorCode::InvalidArgument,
+                        "Invalid x-amz-copy-source versionId encoding",
+                    ))
+                })?
+                .to_string(),
+        ),
+        None => None,
+    };
 
     Ok((bucket, key, version_id))
 }

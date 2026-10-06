@@ -447,6 +447,16 @@ pub fn query_has_version_id(query: Option<&str>) -> bool {
     })
 }
 
+pub fn copy_source_version_id(copy_source: &str) -> Option<&str> {
+    let (_, query) = copy_source.split_once('?')?;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == "versionId")
+        .map(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+}
+
 pub fn parse_object_subresource(
     query: Option<&str>,
 ) -> Result<Option<ObjectSubresource>, Vec<&'static str>> {

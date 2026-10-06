@@ -939,12 +939,18 @@ async fn authorize_request(
                 {
                     return Err(S3Error::new(S3ErrorCode::InvalidBucketName, reason));
                 }
+                let source_s3_action =
+                    if crate::handlers::copy_source_version_id(copy_source).is_some() {
+                        "s3:GetObjectVersion"
+                    } else {
+                        "s3:GetObject"
+                    };
                 let source_allowed = authorize_action(
                     state,
                     principal,
                     &src_bucket,
                     "read",
-                    Some("s3:GetObject"),
+                    Some(source_s3_action),
                     Some(&src_key),
                     Some(false),
                     ctx,
