@@ -15770,7 +15770,7 @@ async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
         .oneshot(anon_request_from(
             Method::GET,
             "/ip-bucket/public/a.txt",
-            "10.20.30.40, 127.0.0.1",
+            "10.20.30.40",
         ))
         .await
         .unwrap();
@@ -15781,11 +15781,22 @@ async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
         .oneshot(anon_request_from(
             Method::GET,
             "/ip-bucket/public/a.txt",
-            "203.0.113.7, 127.0.0.1",
+            "203.0.113.7",
         ))
         .await
         .unwrap();
     assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+
+    let spoofed = app
+        .clone()
+        .oneshot(anon_request_from(
+            Method::GET,
+            "/ip-bucket/public/a.txt",
+            "10.20.30.40, 203.0.113.7",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(spoofed.status(), StatusCode::FORBIDDEN);
 
     let no_ip = app
         .clone()
@@ -15799,7 +15810,7 @@ async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
         .oneshot(anon_request_from(
             Method::GET,
             "/ip-bucket/private/b.txt",
-            "10.20.30.40, 127.0.0.1",
+            "10.20.30.40",
         ))
         .await
         .unwrap();
@@ -15813,7 +15824,7 @@ async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
                 .uri("/ip-bucket/private/b.txt")
                 .header("x-access-key", COND_ACCESS_KEY)
                 .header("x-secret-key", COND_SECRET_KEY)
-                .header("x-forwarded-for", "10.1.1.1, 127.0.0.1")
+                .header("x-forwarded-for", "10.1.1.1")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -15829,7 +15840,7 @@ async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
                 .uri("/ip-bucket/private/b.txt")
                 .header("x-access-key", COND_ACCESS_KEY)
                 .header("x-secret-key", COND_SECRET_KEY)
-                .header("x-forwarded-for", "198.51.100.9, 127.0.0.1")
+                .header("x-forwarded-for", "198.51.100.9")
                 .body(Body::empty())
                 .unwrap(),
         )

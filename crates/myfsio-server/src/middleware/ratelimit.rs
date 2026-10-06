@@ -304,35 +304,32 @@ fn too_many_requests(retry_after: u64, resource: &str) -> Response {
 }
 
 pub(crate) fn client_ip(req: &Request, num_trusted_proxies: usize) -> Option<IpAddr> {
-    if num_trusted_proxies > 0 {
-        if let Some(value) = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(candidate) = value
-                .split(',')
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    if num_trusted_proxies == 0 {
+        return peer;
+    }
+
+    let forwarded: Option<Vec<&str>> = req
+        .headers()
+        .get_all("x-forwarded-for")
+        .iter()
+        .map(|value| value.to_str().ok())
+        .collect();
+    forwarded
+        .and_then(|values| {
+            values
+                .into_iter()
+                .flat_map(|value| value.split(','))
                 .map(str::trim)
                 .filter(|part| !part.is_empty())
                 .rev()
-                .nth(num_trusted_proxies)
-            {
-                if let Ok(ip) = candidate.parse() {
-                    return Some(ip);
-                }
-            }
-        }
-
-        if let Some(value) = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
-            if let Ok(ip) = value.trim().parse() {
-                return Some(ip);
-            }
-        }
-    }
-
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip())
+                .nth(num_trusted_proxies - 1)
+                .and_then(|candidate| candidate.parse().ok())
+        })
+        .or(peer)
 }
 
 #[cfg(test)]
@@ -350,8 +347,43 @@ mod tests {
             .header("x-forwarded-for", "198.51.100.1, 10.0.0.1, 10.0.0.2")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(client_ip(&req, 2), parsed_ip("198.51.100.1"));
-        assert_eq!(client_ip(&req, 1), parsed_ip("10.0.0.1"));
+        assert_eq!(client_ip(&req, 3), parsed_ip("198.51.100.1"));
+        assert_eq!(client_ip(&req, 2), parsed_ip("10.0.0.1"));
+        assert_eq!(client_ip(&req, 1), parsed_ip("10.0.0.2"));
+    }
+
+    #[test]
+    fn single_proxy_uses_the_address_it_appended() {
+        let req = Request::builder()
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
+    }
+
+    #[test]
+    fn ignores_forwarded_for_entries_supplied_by_the_client() {
+        let req = Request::builder()
+            .header("x-forwarded-for", "6.6.6.6, 203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
+
+        let req = Request::builder()
+            .header("x-forwarded-for", "6.6.6.6, 7.7.7.7, 203.0.113.7, 10.0.0.2")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(client_ip(&req, 2), parsed_ip("203.0.113.7"));
+    }
+
+    #[test]
+    fn reads_forwarded_for_across_repeated_header_lines() {
+        let req = Request::builder()
+            .header("x-forwarded-for", "6.6.6.6")
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
     }
 
     #[test]
@@ -364,6 +396,30 @@ mod tests {
             .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 443))));
 
         assert_eq!(client_ip(&req, 2), parsed_ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn falls_back_to_connect_info_when_the_trusted_entry_is_not_an_address() {
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "198.51.100.1, unknown")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 443))));
+
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn never_trusts_x_real_ip() {
+        let mut req = Request::builder()
+            .header("x-real-ip", "198.51.100.2")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 443))));
+
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.9"));
     }
 
     #[test]

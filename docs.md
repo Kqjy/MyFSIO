@@ -220,7 +220,7 @@ Background filesystem scans (the GC sweep, the integrity scan and stale-version 
 | `CORS_METHODS` | `GET,PUT,POST,DELETE,OPTIONS,HEAD` | Server-level allowed methods |
 | `CORS_ALLOW_HEADERS` | `*` | Allowed request headers |
 | `CORS_EXPOSE_HEADERS` | `*` | Headers exposed to the browser |
-| `NUM_TRUSTED_PROXIES` | `0` | Trusted reverse-proxy count. Forwarded-IP headers are ignored when `0` |
+| `NUM_TRUSTED_PROXIES` | `0` | Number of reverse proxies between clients and the server. With `N`, the client IP is the `N`-th `X-Forwarded-For` entry from the right. Forwarded-IP headers are ignored when `0`. See [Client IP behind reverse proxies](#client-ip-behind-reverse-proxies) |
 | `ALLOWED_REDIRECT_HOSTS` | empty | Comma-separated whitelist of safe UI login redirect hosts |
 | `ALLOW_INTERNAL_ENDPOINTS` | `false` | Permit outbound relay, replication, and webhook targets to resolve to loopback / RFC1918 / link-local / CGNAT addresses. Required for local cluster testing; leave disabled in production unless you intentionally federate over private networks |
 
@@ -965,7 +965,7 @@ Condition keys populated per request (keys are case-insensitive):
 
 | Key | Value |
 |-----|-------|
-| `aws:SourceIp` | Client IP after `NUM_TRUSTED_PROXIES` resolution (`X-Forwarded-For` / `X-Real-IP` behind a trusted proxy, else the socket peer). Absent when unknown, so an `IpAddress` Allow grants nothing without a resolvable client IP |
+| `aws:SourceIp` | Client IP after `NUM_TRUSTED_PROXIES` resolution (the `X-Forwarded-For` entry appended by the outermost trusted proxy, else the socket peer; see [Client IP behind reverse proxies](#client-ip-behind-reverse-proxies)). Absent when unknown, so an `IpAddress` Allow grants nothing without a resolvable client IP |
 | `aws:SecureTransport` | `true` when the request arrived over TLS or, behind a trusted proxy, with `X-Forwarded-Proto: https`; otherwise `false` |
 | `aws:CurrentTime`, `aws:EpochTime` | Request time (RFC 3339 / epoch seconds) |
 | `aws:username`, `aws:userid`, `aws:PrincipalArn`, `aws:PrincipalType`, `aws:PrincipalAccount` | Display name, user id, `arn:aws:iam::myfsio:user/<user-id>`, `User` or `Anonymous`, `myfsio` |
@@ -981,6 +981,19 @@ Condition keys populated per request (keys are case-insensitive):
 Condition keys that are not listed are simply absent. Requests made through the web UI carry only the principal and time keys.
 
 Both `aws:SourceIp` and `aws:SecureTransport` trust forwarding headers purely on `NUM_TRUSTED_PROXIES`. Only set it when clients cannot reach the server except through that proxy (bind `HOST` to the proxy's interface or firewall the port); a directly reachable server with `NUM_TRUSTED_PROXIES>0` lets any caller forge both keys.
+
+### Client IP behind reverse proxies
+
+`aws:SourceIp` and the per-IP rate limits (`RATE_LIMIT_*`, including `/login`) use the same client address:
+
+- `NUM_TRUSTED_PROXIES=0` (default): the TCP peer. `X-Forwarded-For` and `X-Real-IP` are ignored.
+- `NUM_TRUSTED_PROXIES=N`: the `N`-th `X-Forwarded-For` entry counted from the right. Each proxy appends the address that connected to it, so the last `N` entries were written by your proxies and everything to their left came from the client and is ignored. With one nginx or Caddy in front, `X-Forwarded-For: 6.6.6.6, 203.0.113.7` resolves to `203.0.113.7`; a caller cannot change it by sending its own header.
+- Repeated `X-Forwarded-For` header lines are read as one list in the order received.
+- When the header has fewer than `N` entries, or that entry is not an IP address, the TCP peer (the proxy itself) is used. `X-Real-IP` is never read, because a proxy that does not overwrite it passes the client's own value through.
+
+Every trusted proxy must append to `X-Forwarded-For` (nginx `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`, Caddy's default, HAProxy `option forwardfor`). Set `N` to the exact number of proxies: too high and callers choose their own address again, too low and every client appears as the next proxy.
+
+Upgrade note: earlier builds read one entry too far to the left, so with `NUM_TRUSTED_PROXIES=1` a caller-supplied `X-Forwarded-For` value was taken as the client IP, and without one the server fell back to `X-Real-IP`. Deployments that raised `NUM_TRUSTED_PROXIES` by one to compensate must lower it again, and proxies that only set `X-Real-IP` must also append to `X-Forwarded-For`. Review bucket policies that allow by `aws:SourceIp`: access granted while the old behavior was active may have relied on a forged address.
 
 ### Public detection
 
