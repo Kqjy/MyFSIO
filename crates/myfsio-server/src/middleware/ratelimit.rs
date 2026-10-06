@@ -312,23 +312,16 @@ pub(crate) fn client_ip(req: &Request, num_trusted_proxies: usize) -> Option<IpA
         return peer;
     }
 
-    let forwarded: Option<Vec<&str>> = req
-        .headers()
+    req.headers()
         .get_all("x-forwarded-for")
         .iter()
-        .map(|value| value.to_str().ok())
-        .collect();
-    forwarded
-        .and_then(|values| {
-            values
-                .into_iter()
-                .flat_map(|value| value.split(','))
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .rev()
-                .nth(num_trusted_proxies - 1)
-                .and_then(|candidate| candidate.parse().ok())
-        })
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(<[u8]>::trim_ascii)
+        .filter(|part| !part.is_empty())
+        .rev()
+        .nth(num_trusted_proxies - 1)
+        .and_then(|candidate| std::str::from_utf8(candidate).ok())
+        .and_then(|candidate| candidate.parse().ok())
         .or(peer)
 }
 
@@ -336,6 +329,7 @@ pub(crate) fn client_ip(req: &Request, num_trusted_proxies: usize) -> Option<IpA
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::http::HeaderValue;
 
     fn parsed_ip(raw: &str) -> Option<IpAddr> {
         Some(raw.parse().unwrap())
@@ -384,6 +378,55 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
+    }
+
+    #[test]
+    fn non_ascii_client_entries_do_not_displace_the_trusted_entry() {
+        let peer = ConnectInfo(SocketAddr::from(([10, 0, 0, 2], 443)));
+
+        let mut req = Request::builder()
+            .header(
+                "x-forwarded-for",
+                HeaderValue::from_bytes(b"\xff, 203.0.113.7").unwrap(),
+            )
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(peer.clone());
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
+
+        let mut req = Request::builder()
+            .header(
+                "x-forwarded-for",
+                HeaderValue::from_bytes(b"\xff, 6.6.6.6").unwrap(),
+            )
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(peer.clone());
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
+
+        let mut req = Request::builder()
+            .header("x-forwarded-for", HeaderValue::from_bytes(b"\xff").unwrap())
+            .header("x-forwarded-for", "203.0.113.7, 10.0.0.1")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(peer);
+        assert_eq!(client_ip(&req, 2), parsed_ip("203.0.113.7"));
+    }
+
+    #[test]
+    fn falls_back_to_connect_info_when_the_trusted_entry_is_not_ascii() {
+        let mut req = Request::builder()
+            .header(
+                "x-forwarded-for",
+                HeaderValue::from_bytes(b"198.51.100.1, \xff").unwrap(),
+            )
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 443))));
+
+        assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.9"));
     }
 
     #[test]

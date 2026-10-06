@@ -993,7 +993,7 @@ Both `aws:SourceIp` and `aws:SecureTransport` trust forwarding headers purely on
 
 Every trusted proxy must append to `X-Forwarded-For` (nginx `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`, Caddy's default, HAProxy `option forwardfor`). Set `N` to the exact number of proxies: too high and callers choose their own address again, too low and every client appears as the next proxy.
 
-Upgrade note: earlier builds read one entry too far to the left, so with `NUM_TRUSTED_PROXIES=1` a caller-supplied `X-Forwarded-For` value was taken as the client IP, and without one the server fell back to `X-Real-IP`. Deployments that raised `NUM_TRUSTED_PROXIES` by one to compensate must lower it again, and proxies that only set `X-Real-IP` must also append to `X-Forwarded-For`. Review bucket policies that allow by `aws:SourceIp`: access granted while the old behavior was active may have relied on a forged address.
+Upgrade note: earlier builds read one entry too far to the left, so with `NUM_TRUSTED_PROXIES=1` a caller-supplied `X-Forwarded-For` value was taken as the client IP, and without one the server fell back to `X-Real-IP`. A deployment that got correct addresses by setting `NUM_TRUSTED_PROXIES` one lower than its real proxy count (for example `1` with two proxies in a chain) must raise it: set it to the exact number of proxies in front of the server. Proxies that only set `X-Real-IP` must also append to `X-Forwarded-For`. Review bucket policies that allow by `aws:SourceIp`: access granted while the old behavior was active may have relied on a forged address.
 
 ### Public detection
 

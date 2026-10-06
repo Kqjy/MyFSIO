@@ -15871,6 +15871,71 @@ async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
 }
 
 #[tokio::test]
+async fn test_bucket_policy_source_ip_ignores_non_ascii_forwarded_prefix() {
+    let (app, _tmp) = test_app_with_iam_and(policy_test_iam(), |cfg| cfg.num_trusted_proxies = 1);
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/proxy-bucket", Body::empty()))
+        .await
+        .unwrap();
+    seed_object(&app, "proxy-bucket", "public/a.txt").await;
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Allow",
+        "Principal": "*",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::proxy-bucket/public/*",
+        "Condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
+      }]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "proxy-bucket", policy).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let via_proxy = |forwarded: &[&[u8]]| {
+        let mut builder = Request::builder()
+            .method(Method::GET)
+            .uri("/proxy-bucket/public/a.txt");
+        for value in forwarded {
+            builder = builder.header(
+                "x-forwarded-for",
+                axum::http::HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [10, 0, 0, 2],
+                443,
+            ))));
+        req
+    };
+
+    let combined = app
+        .clone()
+        .oneshot(via_proxy(&[b"\xff, 203.0.113.7"]))
+        .await
+        .unwrap();
+    assert_eq!(combined.status(), StatusCode::FORBIDDEN);
+
+    let repeated = app
+        .clone()
+        .oneshot(via_proxy(&[b"\xff", b"203.0.113.7"]))
+        .await
+        .unwrap();
+    assert_eq!(repeated.status(), StatusCode::FORBIDDEN);
+
+    let inside = app
+        .clone()
+        .oneshot(via_proxy(&[b"\xff, 10.20.30.40"]))
+        .await
+        .unwrap();
+    assert_eq!(inside.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_bucket_policy_prefix_condition_and_secure_transport() {
     let (app, _tmp) = test_app_with_iam(policy_test_iam());
     app.clone()
