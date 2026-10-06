@@ -8346,6 +8346,85 @@ async fn test_static_website_serves_plaintext_object() {
     assert_eq!(content_length, WEBSITE_INDEX_BODY.len());
 }
 
+async fn test_website_app_with_objects(keys: &[&str]) -> (axum::Router, tempfile::TempDir) {
+    let (state, tmp) = test_website_state();
+    let bucket = "site-bucket";
+
+    state.storage.create_bucket(bucket).await.unwrap();
+    for key in keys {
+        put_website_object(&state, bucket, key, key, "text/html").await;
+    }
+    let mut config = state.storage.get_bucket_config(bucket).await.unwrap();
+    config.website = Some(serde_json::json!({ "index_document": "index.html" }));
+    state
+        .storage
+        .set_bucket_config(bucket, &config)
+        .await
+        .unwrap();
+    state
+        .website_domains
+        .as_ref()
+        .unwrap()
+        .set_mapping("site.example.com", bucket);
+
+    (myfsio_server::create_router(state), tmp)
+}
+
+async fn website_get(app: &axum::Router, uri: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(website_request(Method::GET, uri))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    (status, body)
+}
+
+#[tokio::test]
+async fn test_static_website_percent_decodes_request_path() {
+    let (app, _tmp) = test_website_app_with_objects(&[
+        "docs/My Report.html",
+        "img/café.html",
+        "a+b%c#d.html",
+        "my dir/index.html",
+        "café/index.html",
+    ])
+    .await;
+
+    for (uri, key) in [
+        ("/docs/My%20Report.html", "docs/My Report.html"),
+        ("/img/caf%C3%A9.html", "img/café.html"),
+        ("/a+b%25c%23d.html", "a+b%c#d.html"),
+        ("/my%20dir/", "my dir/index.html"),
+        ("/my%20dir", "my dir/index.html"),
+        ("/caf%C3%A9", "café/index.html"),
+    ] {
+        let (status, body) = website_get(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_eq!(body, key, "{uri}");
+    }
+
+    let (status, _) = website_get(&app, "/docs/My%2520Report.html").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_static_website_rejects_path_that_is_not_utf8() {
+    let (app, _tmp) = test_website_app_with_objects(&["index.html"]).await;
+
+    let (status, _) = website_get(&app, "/img/caf%E9.html").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn test_static_website_range_request_returns_partial_slice() {
     let (app, _tmp) = test_website_app(None).await;

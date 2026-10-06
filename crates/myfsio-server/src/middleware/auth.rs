@@ -314,7 +314,6 @@ async fn maybe_serve_website(
     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
         return None;
     }
-    let request_path = uri_path.trim_start_matches('/').to_string();
     let include_error_body = method != axum::http::Method::HEAD;
     let store = state.website_domains.as_ref()?;
     let bucket = store.get_bucket(&host)?;
@@ -352,6 +351,16 @@ async fn maybe_serve_website(
             include_error_body,
         ));
     };
+
+    let Ok(uri_path) = percent_encoding::percent_decode_str(&uri_path).decode_utf8() else {
+        return Some(website_error_response(
+            StatusCode::BAD_REQUEST,
+            None,
+            "text/plain; charset=utf-8",
+            include_error_body,
+        ));
+    };
+    let request_path = uri_path.trim_start_matches('/').to_string();
 
     let mut object_key = if request_path.is_empty() || uri_path.ends_with('/') {
         if request_path.is_empty() {
