@@ -6235,6 +6235,74 @@ async fn test_object_tagging() {
 }
 
 #[tokio::test]
+async fn test_tagging_rejects_invalid_entity_references_and_keeps_existing_tags() {
+    let (app, _tmp) = test_app();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/entity-tags", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/entity-tags/obj.txt",
+            Body::from("content"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let valid = "<Tagging><TagSet><Tag><Key>a&amp;b&#x41;</Key>\
+        <Value>&lt;x&gt;&#66;</Value></Tag></TagSet></Tagging>";
+    for uri in ["/entity-tags?tagging", "/entity-tags/obj.txt?tagging"] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(Method::PUT, uri, Body::from(valid)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    }
+
+    for uri in ["/entity-tags?tagging", "/entity-tags/obj.txt?tagging"] {
+        for reference in ["&bogus;", "&#x110000;", "&#0;"] {
+            for invalid in [
+                format!(
+                    "<Tagging><TagSet><Tag><Key>a{reference}b</Key>\
+                    <Value>v</Value></Tag></TagSet></Tagging>"
+                ),
+                format!(
+                    "<Tagging><TagSet><Tag><Key>k</Key>\
+                    <Value>a{reference}b</Value></Tag></TagSet></Tagging>"
+                ),
+            ] {
+                let resp = app
+                    .clone()
+                    .oneshot(signed_request(Method::PUT, uri, Body::from(invalid)))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri} {reference}");
+                assert!(body_string(resp).await.contains("MalformedXML"));
+            }
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(signed_request(Method::GET, uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("<Key>a&amp;bA</Key>"), "{uri}: {body}");
+        assert!(body.contains("<Value>&lt;x&gt;B</Value>"), "{uri}: {body}");
+        assert!(!body.contains("<Key>ab</Key>"), "{uri}: {body}");
+        assert!(!body.contains("<Key>k</Key>"), "{uri}: {body}");
+    }
+}
+
+#[tokio::test]
 async fn test_object_acl() {
     let (app, _tmp) = test_app();
     let app = app.into_service();

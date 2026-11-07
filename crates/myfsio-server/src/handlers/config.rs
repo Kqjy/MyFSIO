@@ -198,7 +198,12 @@ pub async fn put_tagging(state: &AppState, bucket: &str, body: Body) -> Response
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
-    let tags = parse_tagging_xml(&xml_str);
+    let tags = match parse_tagging_xml(&xml_str) {
+        Ok(tags) => tags,
+        Err(message) => {
+            return xml_error_response(S3Error::new(S3ErrorCode::MalformedXML, message));
+        }
+    };
 
     mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
         config.tags = tags;
@@ -1830,7 +1835,12 @@ pub async fn put_object_tagging(state: &AppState, bucket: &str, key: &str, body:
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
-    let tags = parse_tagging_xml(&xml_str);
+    let tags = match parse_tagging_xml(&xml_str) {
+        Ok(tags) => tags,
+        Err(message) => {
+            return xml_error_response(S3Error::new(S3ErrorCode::MalformedXML, message));
+        }
+    };
     if tags.len() > state.config.object_tag_limit {
         return xml_error_response(S3Error::new(
             S3ErrorCode::InvalidTag,
@@ -2287,7 +2297,7 @@ mod tests {
     }
 }
 
-fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
+fn parse_tagging_xml(xml: &str) -> Result<Vec<myfsio_common::types::Tag>, String> {
     let mut tags = Vec::new();
     let mut in_tag = false;
     let mut current_key = String::new();
@@ -2320,7 +2330,7 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
             }
             Ok(quick_xml::events::Event::GeneralRef(ref e)) => {
                 if in_tag {
-                    let text = myfsio_xml::resolve_general_ref(e).unwrap_or_default();
+                    let text = myfsio_xml::resolve_general_ref(e)?;
                     match current_element.as_str() {
                         "Key" => current_key.push_str(&text),
                         "Value" => current_value.push_str(&text),
@@ -2348,7 +2358,7 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
         buf.clear();
     }
 
-    tags
+    Ok(tags)
 }
 
 #[cfg(test)]
@@ -2411,7 +2421,7 @@ mod tagging_xml_tests {
     fn parse_compact_tagging() {
         let xml =
             "<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>";
-        let tags = parse_tagging_xml(xml);
+        let tags = parse_tagging_xml(xml).unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].key, "env");
         assert_eq!(tags[0].value, "prod");
@@ -2432,7 +2442,7 @@ mod tagging_xml_tests {
     </Tag>
   </TagSet>
 </Tagging>"#;
-        let tags = parse_tagging_xml(xml);
+        let tags = parse_tagging_xml(xml).unwrap();
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0].key, "env");
         assert_eq!(tags[0].value, "production");
@@ -2450,7 +2460,7 @@ mod tagging_xml_tests {
     </Tag>
   </TagSet>
 </Tagging>"#;
-        let tags = parse_tagging_xml(xml);
+        let tags = parse_tagging_xml(xml).unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].key, "only-key");
         assert_eq!(tags[0].value, "");
@@ -2466,7 +2476,7 @@ mod tagging_xml_tests {
     </Tag>
   </TagSet>
 </Tagging>"#;
-        let tags = parse_tagging_xml(xml);
+        let tags = parse_tagging_xml(xml).unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].key, "spaced");
         assert_eq!(tags[0].value, "   ");
@@ -2476,7 +2486,7 @@ mod tagging_xml_tests {
     fn parse_compact_tagging_preserves_leading_and_trailing_spaces() {
         let xml =
             "<Tagging><TagSet><Tag><Key>k</Key><Value>  hello  </Value></Tag></TagSet></Tagging>";
-        let tags = parse_tagging_xml(xml);
+        let tags = parse_tagging_xml(xml).unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].value, "  hello  ");
     }
@@ -2485,10 +2495,26 @@ mod tagging_xml_tests {
     fn parse_tagging_resolves_entity_references() {
         let xml = "<Tagging><TagSet><Tag><Key>a&amp;b</Key>\
             <Value>&lt;x&gt; &quot;y&#39;</Value></Tag></TagSet></Tagging>";
-        let tags = parse_tagging_xml(xml);
+        let tags = parse_tagging_xml(xml).unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].key, "a&b");
         assert_eq!(tags[0].value, "<x> \"y'");
+    }
+
+    #[test]
+    fn parse_tagging_rejects_invalid_entity_references() {
+        for reference in ["&bogus;", "&#x110000;", "&#0;"] {
+            let in_key = format!(
+                "<Tagging><TagSet><Tag><Key>a{reference}b</Key>\
+                <Value>v</Value></Tag></TagSet></Tagging>"
+            );
+            assert!(parse_tagging_xml(&in_key).is_err(), "key {reference}");
+            let in_value = format!(
+                "<Tagging><TagSet><Tag><Key>k</Key>\
+                <Value>a{reference}b</Value></Tag></TagSet></Tagging>"
+            );
+            assert!(parse_tagging_xml(&in_value).is_err(), "value {reference}");
+        }
     }
 }
 
