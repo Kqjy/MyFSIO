@@ -3,7 +3,6 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -83,7 +82,7 @@ impl KmsService {
             Ok(key)
         } else {
             let mut key = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut key);
+            rand::fill(&mut key);
             let encoded = B64.encode(key);
             myfsio_common::fs_util::write_secret_file(path, encoded.as_bytes())
                 .map_err(CryptoError::Io)?;
@@ -97,7 +96,7 @@ impl KmsService {
     ) -> Result<String, CryptoError> {
         let cipher = Aes256Gcm::new(master_key.into());
         let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::fill(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -147,7 +146,7 @@ impl KmsService {
         let arn = format!("arn:aws:kms:local:000000000000:key/{}", key_id);
 
         let mut plaintext_key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut plaintext_key);
+        rand::fill(&mut plaintext_key);
 
         let master = self.master_key.read().await;
         let encrypted = Self::encrypt_key_material(&master, &plaintext_key)?;
@@ -246,7 +245,7 @@ impl KmsService {
         let key_arr: [u8; 32] = data_key.try_into().unwrap();
         let cipher = Aes256Gcm::new(&key_arr.into());
         let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::fill(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -296,12 +295,12 @@ impl KmsService {
         }
 
         let mut plaintext_key = vec![0u8; num_bytes];
-        rand::thread_rng().fill_bytes(&mut plaintext_key);
+        rand::fill(&mut plaintext_key);
 
         let key_arr: [u8; 32] = kms_key.try_into().unwrap();
         let cipher = Aes256Gcm::new(&key_arr.into());
         let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::fill(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let encrypted = cipher
@@ -334,7 +333,7 @@ pub async fn load_or_create_master_key(keys_dir: &Path) -> Result<[u8; 32], Cryp
         Ok(key)
     } else {
         let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::fill(&mut key);
         let encoded = B64.encode(key);
         myfsio_common::fs_util::write_secret_file(&path, encoded.as_bytes())
             .map_err(CryptoError::Io)?;

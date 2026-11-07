@@ -2,7 +2,6 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use hkdf::Hkdf;
 use md5::{Digest, Md5};
-use rand::RngCore;
 use sha2::Sha256;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -444,7 +443,7 @@ pub fn encrypt_part_block(
     let chunk_size = resolve_chunk_size(chunk_size)?;
 
     let mut salt = [0u8; PART_BLOCK_SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::fill(&mut salt);
     let base_nonce = derive_part_base_nonce(odk, part_number, &salt)?;
 
     let key_arr: [u8; 32] = *odk;

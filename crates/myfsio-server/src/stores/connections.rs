@@ -4,7 +4,6 @@ use std::sync::Arc;
 use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine;
 use parking_lot::RwLock;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 const ENCRYPTED_PREFIX: &str = "enc:";
@@ -267,7 +266,7 @@ impl ConnectionStore {
 
 fn ephemeral_connection_key() -> String {
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::fill(&mut key);
     tracing::error!(
         "Using an in-memory connection encryption key; connection secrets saved now cannot be decrypted after a restart"
     );
@@ -328,7 +327,7 @@ fn load_or_create_key(storage_root: &Path) -> String {
         }
     }
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::fill(&mut key);
     let encoded = URL_SAFE.encode(key);
     if let Some(parent) = key_path.parent() {
         let _ = std::fs::create_dir_all(parent);

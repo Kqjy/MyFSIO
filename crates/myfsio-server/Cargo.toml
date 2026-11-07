@@ -60,11 +60,11 @@ aws-credential-types = { workspace = true }
 aws-smithy-types = { workspace = true }
 aws-smithy-runtime-api = { version = "1", features = ["client", "http-1x"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio", "http1", "http2"] }
-hyper-rustls = { version = "0.27" }
+hyper-rustls = { version = "0.27", features = ["webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 tower-service = "0.3"
 http = "1"
-rand = "0.8"
+rand = "0.10"
 tera = { workspace = true }
 rust-embed = { version = "8", features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
 cookie = { workspace = true }

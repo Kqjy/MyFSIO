@@ -680,10 +680,9 @@ pub fn resolve_secret_key(
 
 fn generate_secret_file(path: &std::path::Path) -> Option<String> {
     use base64::Engine;
-    use rand::RngCore;
 
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::fill(&mut bytes);
     let secret = base64::engine::general_purpose::STANDARD.encode(bytes);
 
     if let Some(parent) = path.parent() {

@@ -6,7 +6,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use rand::RngCore;
 use serde_json::{json, Value};
 
 use crate::state::AppState;
@@ -438,7 +437,7 @@ pub async fn generate_random(State(state): State<AppState>, body: Body) -> Respo
     }
 
     let mut bytes = vec![0u8; num_bytes];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::fill(&mut bytes);
     json_ok(json!({
         "Plaintext": B64.encode(bytes),
     }))
@@ -448,7 +447,7 @@ pub async fn client_generate_key(State(state): State<AppState>) -> Response {
     let _ = state;
 
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::fill(&mut key);
     json_ok(json!({
         "Key": B64.encode(key),
         "Algorithm": "AES-256-GCM",
@@ -489,7 +488,7 @@ pub async fn client_encrypt(State(state): State<AppState>, body: Body) -> Respon
         Err(_) => return json_err(StatusCode::BAD_REQUEST, "Invalid encryption key"),
     };
     let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::fill(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     match cipher.encrypt(nonce, plaintext.as_ref()) {

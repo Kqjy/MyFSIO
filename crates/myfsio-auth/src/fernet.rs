@@ -1,7 +1,6 @@
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use base64::{engine::general_purpose::URL_SAFE, Engine};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use sha2::Sha256;
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -73,7 +72,7 @@ pub fn encrypt(key_b64: &str, plaintext: &[u8]) -> Result<String, &'static str> 
     let encryption_key = &key_bytes[16..];
 
     let mut iv = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut iv);
+    rand::fill(&mut iv);
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -1,6 +1,5 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use rand::RngCore;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -35,7 +34,7 @@ pub fn wrap_key_with(wrapping_key: &[u8; 32], data_key: &[u8; 32]) -> Result<Str
 
     let cipher = Aes256Gcm::new(wrapping_key.into());
     let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::fill(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let encrypted = cipher
@@ -208,8 +207,8 @@ impl EncryptionService {
     pub fn generate_data_key(&self) -> ([u8; 32], [u8; 12]) {
         let mut data_key = [0u8; 32];
         let mut nonce = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut data_key);
-        rand::thread_rng().fill_bytes(&mut nonce);
+        rand::fill(&mut data_key);
+        rand::fill(&mut nonce);
         (data_key, nonce)
     }
 
@@ -223,7 +222,7 @@ impl EncryptionService {
 
     pub fn generate_odk(&self) -> [u8; 32] {
         let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::fill(&mut key);
         key
     }
 

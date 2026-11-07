@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use parking_lot::RwLock;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 pub const SESSION_COOKIE_NAME: &str = "myfsio_session";
@@ -215,7 +214,7 @@ pub type SharedSessionStore = Arc<SessionStore>;
 
 pub fn generate_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::fill(&mut buf);
     URL_SAFE_NO_PAD.encode(&buf)
 }
 

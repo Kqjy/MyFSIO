@@ -58,7 +58,7 @@ sha1 = "0.10"
 sqlparser = "0.63"
 csv = "1.4"
 parquet = { version = "60", default-features = false, features = ["snap", "brotli", "flate2-zlib-rs", "lz4", "zstd", "base64", "simdutf8", "json"] }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "json"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "sigv4a", "default-https-client"] }
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
 aws-credential-types = "1"
