@@ -4970,19 +4970,24 @@ pub async fn clear_replication_failures(
 }
 
 static SERVER_START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-static SYSINFO: std::sync::OnceLock<Mutex<System>> = std::sync::OnceLock::new();
+static SYSINFO: std::sync::OnceLock<Option<Mutex<System>>> = std::sync::OnceLock::new();
 
 pub fn init_server_start_time() {
     SERVER_START_TIME.get_or_init(std::time::Instant::now);
 }
 
 async fn sample_system() -> (f64, u64, u64) {
-    let lock = SYSINFO.get_or_init(|| {
-        let mut system = System::new();
-        system.refresh_cpu_usage();
-        system.refresh_memory();
-        Mutex::new(system)
-    });
+    let Some(lock) = SYSINFO
+        .get_or_init(|| {
+            let mut system = System::new().ok()?;
+            system.refresh_cpu_usage();
+            system.refresh_memory();
+            Some(Mutex::new(system))
+        })
+        .as_ref()
+    else {
+        return (0.0, 0, 0);
+    };
     {
         let mut system = lock.lock().unwrap();
         system.refresh_cpu_usage();
@@ -5005,10 +5010,12 @@ fn normalize_path_for_mount(path: &FsPath) -> String {
 }
 
 fn sample_disk(path: &FsPath) -> (u64, u64) {
-    let disks = Disks::new_with_refreshed_list();
+    let Ok(disks) = Disks::new_with_refreshed_list() else {
+        return (0, 0);
+    };
     let path_str = normalize_path_for_mount(path);
     let mut best: Option<(usize, u64, u64)> = None;
-    for disk in disks.list() {
+    for disk in disks.iter() {
         let mount_raw = disk.mount_point().to_string_lossy().to_string();
         let mount = mount_raw
             .strip_prefix(r"\\?\")

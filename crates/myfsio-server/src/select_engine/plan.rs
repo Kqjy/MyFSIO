@@ -694,10 +694,13 @@ fn path_parts(expr: &sql::Expr) -> Option<Vec<String>> {
     }
 }
 
-fn escape_char_value(escape: &Option<sql::ValueWithSpan>) -> Result<Option<char>, String> {
-    match escape.as_ref().map(|v| &v.value) {
+fn escape_char_value(escape: &Option<Box<sql::Expr>>) -> Result<Option<char>, String> {
+    match escape.as_deref() {
         None => Ok(None),
-        Some(sql::Value::SingleQuotedString(s)) => {
+        Some(sql::Expr::Value(sql::ValueWithSpan {
+            value: sql::Value::SingleQuotedString(s),
+            ..
+        })) => {
             let mut chars = s.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) => Ok(Some(c)),

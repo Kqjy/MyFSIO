@@ -1,6 +1,8 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+use crate::resolve_general_ref;
+
 #[derive(Debug, Default, Clone)]
 pub struct DeleteObjectsRequest {
     pub objects: Vec<ObjectIdentifier>,
@@ -29,6 +31,7 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
     let mut result = CompleteMultipartUpload::default();
     let mut buf = Vec::new();
     let mut current_tag = String::new();
+    let mut text = String::new();
     let mut part_number: Option<u32> = None;
     let mut etag: Option<String> = None;
     let mut in_part = false;
@@ -36,8 +39,9 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
                 current_tag = name.clone();
+                text.clear();
                 if name == "Part" {
                     in_part = true;
                     part_number = None;
@@ -46,13 +50,19 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
             }
             Ok(Event::Text(ref e)) => {
                 if in_part {
-                    let text = e.unescape().map_err(|e| e.to_string())?.to_string();
-                    let trimmed = text.trim();
-                    if trimmed.is_empty() {
-                        buf.clear();
-                        continue;
-                    }
-                    match current_tag.as_str() {
+                    text.push_str(&e.xml10_content());
+                }
+            }
+            Ok(Event::GeneralRef(ref e)) => {
+                if in_part {
+                    text.push_str(&resolve_general_ref(e)?);
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let name = e.name().as_ref().to_string();
+                let trimmed = text.trim();
+                if in_part && name == current_tag && !trimmed.is_empty() {
+                    match name.as_str() {
                         "PartNumber" => {
                             part_number = Some(
                                 trimmed
@@ -66,9 +76,7 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
                         _ => {}
                     }
                 }
-            }
-            Ok(Event::End(ref e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                text.clear();
                 if name == "Part" && in_part {
                     match (part_number.take(), etag.take()) {
                         (Some(pn), Some(et)) => {
@@ -110,6 +118,7 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
     let mut result = DeleteObjectsRequest::default();
     let mut buf = Vec::new();
     let mut current_tag = String::new();
+    let mut text = String::new();
     let mut current_key: Option<String> = None;
     let mut current_version_id: Option<String> = None;
     let mut in_object = false;
@@ -120,8 +129,9 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
         let event = reader.read_event_into(&mut buf);
         match event {
             Ok(Event::Start(ref e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
                 current_tag = name.clone();
+                text.clear();
                 if !first_element_seen {
                     first_element_seen = true;
                     if name != "Delete" {
@@ -135,7 +145,7 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
                 if !first_element_seen {
                     first_element_seen = true;
                     if name != "Delete" {
@@ -145,27 +155,29 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
                 }
             }
             Ok(Event::Text(ref e)) => {
-                let text = e.unescape().map_err(|e| e.to_string())?.to_string();
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    buf.clear();
-                    continue;
-                }
-                match current_tag.as_str() {
-                    "Key" if in_object => {
-                        current_key = Some(trimmed.to_string());
-                    }
-                    "VersionId" if in_object => {
-                        current_version_id = Some(trimmed.to_string());
-                    }
-                    "Quiet" => {
-                        result.quiet = trimmed == "true";
-                    }
-                    _ => {}
-                }
+                text.push_str(&e.xml10_content());
+            }
+            Ok(Event::GeneralRef(ref e)) => {
+                text.push_str(&resolve_general_ref(e)?);
             }
             Ok(Event::End(ref e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
+                let trimmed = text.trim();
+                if name == current_tag && !trimmed.is_empty() {
+                    match name.as_str() {
+                        "Key" if in_object => {
+                            current_key = Some(trimmed.to_string());
+                        }
+                        "VersionId" if in_object => {
+                            current_version_id = Some(trimmed.to_string());
+                        }
+                        "Quiet" => {
+                            result.quiet = trimmed == "true";
+                        }
+                        _ => {}
+                    }
+                }
+                text.clear();
                 if name == "Object" && in_object {
                     if let Some(key) = current_key.take() {
                         result.objects.push(ObjectIdentifier {
@@ -211,6 +223,35 @@ mod tests {
         assert_eq!(result.parts[0].etag, "etag2");
         assert_eq!(result.parts[1].part_number, 1);
         assert_eq!(result.parts[1].etag, "etag1");
+    }
+
+    #[test]
+    fn test_parse_complete_multipart_resolves_entity_quoted_etags() {
+        let xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>\
+            <ETag>&quot;abc&#34;</ETag></Part></CompleteMultipartUpload>";
+
+        let result = parse_complete_multipart_upload(xml).unwrap();
+        assert_eq!(result.parts.len(), 1);
+        assert_eq!(result.parts[0].etag, "abc");
+    }
+
+    #[test]
+    fn test_parse_complete_multipart_rejects_unknown_entity() {
+        let xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>\
+            <ETag>&bogus;</ETag></Part></CompleteMultipartUpload>";
+
+        assert!(parse_complete_multipart_upload(xml).is_err());
+    }
+
+    #[test]
+    fn test_parse_delete_objects_resolves_entities_in_keys() {
+        let xml = "<Delete><Object><Key>a &amp; b&lt;c&gt;&#x41;.txt</Key>\
+            <VersionId>v&amp;1</VersionId></Object></Delete>";
+
+        let result = parse_delete_objects(xml).unwrap();
+        assert_eq!(result.objects.len(), 1);
+        assert_eq!(result.objects[0].key, "a & b<c>A.txt");
+        assert_eq!(result.objects[0].version_id.as_deref(), Some("v&1"));
     }
 
     #[test]

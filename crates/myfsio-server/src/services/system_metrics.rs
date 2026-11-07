@@ -375,7 +375,9 @@ fn aggregate_history(
 }
 
 fn sample_system_now() -> (f64, f64) {
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        return (0.0, 0.0);
+    };
     system.refresh_cpu_usage();
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
@@ -398,11 +400,13 @@ fn normalize_path_for_mount(path: &Path) -> String {
 }
 
 pub fn sample_disk(path: &Path) -> (u64, u64) {
-    let disks = Disks::new_with_refreshed_list();
+    let Ok(disks) = Disks::new_with_refreshed_list() else {
+        return (0, 0);
+    };
     let path_str = normalize_path_for_mount(path);
     let mut best: Option<(usize, u64, u64)> = None;
 
-    for disk in disks.list() {
+    for disk in disks.iter() {
         let mount_raw = disk.mount_point().to_string_lossy().to_string();
         let mount = mount_raw
             .strip_prefix(r"\\?\")

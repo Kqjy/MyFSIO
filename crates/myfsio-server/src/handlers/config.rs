@@ -2300,7 +2300,7 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
                 current_element = name.clone();
                 if name == "Tag" {
                     in_tag = true;
@@ -2310,7 +2310,17 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
             }
             Ok(quick_xml::events::Event::Text(ref e)) => {
                 if in_tag {
-                    let text = e.unescape().unwrap_or_default().to_string();
+                    let text = e.xml10_content();
+                    match current_element.as_str() {
+                        "Key" => current_key.push_str(&text),
+                        "Value" => current_value.push_str(&text),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::GeneralRef(ref e)) => {
+                if in_tag {
+                    let text = myfsio_xml::resolve_general_ref(e).unwrap_or_default();
                     match current_element.as_str() {
                         "Key" => current_key.push_str(&text),
                         "Value" => current_value.push_str(&text),
@@ -2319,7 +2329,7 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
                 }
             }
             Ok(quick_xml::events::Event::End(ref e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_string();
                 if name == "Tag" && in_tag {
                     if !current_key.is_empty() {
                         tags.push(myfsio_common::types::Tag {
@@ -2469,6 +2479,16 @@ mod tagging_xml_tests {
         let tags = parse_tagging_xml(xml);
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].value, "  hello  ");
+    }
+
+    #[test]
+    fn parse_tagging_resolves_entity_references() {
+        let xml = "<Tagging><TagSet><Tag><Key>a&amp;b</Key>\
+            <Value>&lt;x&gt; &quot;y&#39;</Value></Tag></TagSet></Tagging>";
+        let tags = parse_tagging_xml(xml);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, "a&b");
+        assert_eq!(tags[0].value, "<x> \"y'");
     }
 }
 

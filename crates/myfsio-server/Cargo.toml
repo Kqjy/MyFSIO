@@ -48,7 +48,7 @@ hex = { workspace = true }
 sqlparser = { workspace = true }
 csv = { workspace = true }
 parquet = { workspace = true }
-roxmltree = "0.20"
+roxmltree = "0.21"
 parking_lot = { workspace = true }
 lru = { workspace = true }
 regex = "1"
@@ -71,7 +71,7 @@ cookie = { workspace = true }
 subtle = { workspace = true }
 clap = { workspace = true }
 dotenvy = { workspace = true }
-sysinfo = "0.32"
+sysinfo = "0.40"
 aes-gcm = { workspace = true }
 tempfile = "3"
 
