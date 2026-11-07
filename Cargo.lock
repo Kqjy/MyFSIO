@@ -177,17 +177,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.92"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2280,7 +2269,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "thiserror",
  "tracing",
  "uuid",
 ]
@@ -2295,7 +2283,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "thiserror",
  "uuid",
 ]
 
@@ -2307,7 +2294,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "hex",
  "hkdf",
  "md-5 0.10.6",
  "myfsio-common",
@@ -2328,7 +2314,6 @@ name = "myfsio-server"
 version = "0.6.2"
 dependencies = [
  "aes-gcm",
- "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
@@ -2351,7 +2336,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
  "hyper-rustls",
  "hyper-util",
  "libc",
@@ -2432,7 +2416,6 @@ dependencies = [
  "myfsio-common",
  "percent-encoding",
  "quick-xml",
- "serde",
  "sha2 0.10.9",
 ]
 

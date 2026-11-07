@@ -10,7 +10,6 @@ workspace = true
 myfsio-common = { path = "../myfsio-common" }
 md-5 = { workspace = true }
 sha2 = { workspace = true }
-hex = { workspace = true }
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 thiserror = { workspace = true }
