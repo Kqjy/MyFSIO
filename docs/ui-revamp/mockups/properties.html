@@ -1,0 +1,26 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="mock.css"><title>MyFSIO mockup</title></head><body data-nav="Buckets"><div class="app"><aside class="nav"></aside><div class="main">
+<div class="top"><div class="crumbs"><span class="hide-m">Buckets</span><span class="sep hide-m">/</span><b>media-assets</b></div></div>
+<div class="content"><div class="pagehead"><div><h1>media-assets</h1><div class="sub"><span class="badge warn">Public read</span> <span class="badge acc">Website</span> <span class="hide-m">· 2,904,113 objects · 640 GB</span></div></div><div class="actions"><div class="btn hide-m">Copy S3 URI</div><div class="btn">Upload</div><div class="btn primary hide-m">+ New folder</div></div></div>
+<div class="tabs">
+<div class="tab">Objects</div>
+<div class="tab on">Properties</div>
+<div class="tab">Permissions</div>
+<div class="tab">Lifecycle</div>
+<div class="tab">Replication</div>
+<div class="tab">Metrics</div>
+</div>
+<div class="cols"><div class="subnav hide-m"><a class="on">Overview</a><a>Versioning</a><a>Encryption</a><a>Quota</a><a>Static website</a><a>CORS</a><a>Danger zone</a></div>
+<div style="display:grid;gap:16px">
+<div class="card"><div class="cardhead">Data protection</div>
+<div class="setting"><div><div class="t">Versioning</div><div class="h">Keep previous versions when objects are overwritten or deleted.</div></div><div class="x"><span class="badge ok">Enabled</span><div class="toggle on"></div></div></div>
+<div class="setting"><div><div class="t">Default encryption</div><div class="h">New objects are encrypted at rest with SSE-S3 (AES-256).</div></div><div class="x"><span class="badge">SSE-S3</span><div class="btn sm">Change</div></div></div>
+<div class="setting"><div><div class="t">Quota</div><div class="h">640 GB used · no limit set.</div></div><div class="x"><div class="btn sm">Set quota</div></div></div></div>
+<div class="card"><div class="cardhead">Static website <span class="badge ok" style="margin-left:6px">Live</span></div>
+<div class="setting"><div><div class="t">Index / error document</div><div class="h mono">index.html · 404.html</div></div><div class="x"><div class="btn sm">Edit</div></div></div>
+<div class="setting"><div><div class="t">Domains</div><div class="h">assets.example.com, cdn.example.com</div></div><div class="x"><div class="btn sm">Manage domains </div></div></div></div>
+<div class="card"><div class="cardhead">CORS <span class="muted" style="font-weight:500">2 rules</span><div class="btn sm" style="margin-left:auto">Edit rules</div></div>
+<table><tr><th>Origins</th><th>Methods</th><th class="hide-m">Headers</th><th class="r hide-m">Max age</th></tr><tr><td class="mono">https://example.com</td><td>GET, HEAD</td><td class="hide-m">*</td><td class="r hide-m">3600 s</td></tr><tr><td class="mono">https://app.example.com</td><td>GET, PUT, POST</td><td class="hide-m">Authorization, Content-*</td><td class="r hide-m">600 s</td></tr></table></div>
+<div class="card" style="border-color:var(--bad)"><div class="cardhead" style="color:var(--bad)">Danger zone</div>
+<div class="setting"><div><div class="t">Delete bucket</div><div class="h">The bucket must be empty. Type the bucket name to confirm.</div></div><div class="x"><div class="btn sm danger">Delete bucket…</div></div></div></div>
+</div></div>
+</div></div></div><script src="shell.js"></script></body></html>
