@@ -503,6 +503,11 @@ body {
 		display: inline-grid;
 	}
 
+	html.app-nav-locked,
+	html.app-nav-locked body {
+		overflow: hidden;
+	}
+
 	.app-scrim.is-open {
 		display: block;
 		position: fixed;

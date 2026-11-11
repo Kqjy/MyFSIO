@@ -227,9 +227,16 @@
         const openers = [document.getElementById('appMenuBtn'), document.getElementById('appTabMore')].filter(Boolean);
         let lastOpener = null;
 
+        const background = Array.from(document.querySelectorAll('.app-main, .app-tabbar'));
+        const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+        const isOpen = () => nav.classList.contains('is-open');
+        const focusableItems = () => Array.from(nav.querySelectorAll(focusableSelector)).filter(el => el.getClientRects().length > 0);
+
         const setOpen = (open) => {
           nav.classList.toggle('is-open', open);
           scrim.classList.toggle('is-open', open);
+          document.documentElement.classList.toggle('app-nav-locked', open);
+          background.forEach(el => { el.inert = open; });
           openers.forEach(btn => btn.setAttribute('aria-expanded', open ? 'true' : 'false'));
           if (open) {
             nav.querySelector('[aria-current="page"], .app-nav-link')?.focus();
@@ -241,7 +248,7 @@
 
         openers.forEach(btn => btn.addEventListener('click', () => {
           lastOpener = btn;
-          setOpen(!nav.classList.contains('is-open'));
+          setOpen(!isOpen());
         }));
         scrim.addEventListener('click', () => setOpen(false));
         document.getElementById('appNavClose')?.addEventListener('click', (event) => {
@@ -249,10 +256,33 @@
           setOpen(false);
         });
         document.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape' && nav.classList.contains('is-open')) setOpen(false);
+          if (!isOpen()) return;
+          if (event.key === 'Escape') {
+            setOpen(false);
+            return;
+          }
+          if (event.key !== 'Tab') return;
+          const items = focusableItems();
+          if (!items.length) return;
+          const first = items[0];
+          const last = items[items.length - 1];
+          const active = document.activeElement;
+          if (!nav.contains(active)) {
+            event.preventDefault();
+            (event.shiftKey ? last : first).focus();
+          } else if (event.shiftKey && active === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+          }
         });
         window.matchMedia('(min-width: 992px)').addEventListener('change', (event) => {
-          if (event.matches && nav.classList.contains('is-open')) setOpen(false);
+          if (event.matches && isOpen()) setOpen(false);
+        });
+        window.addEventListener('pageshow', (event) => {
+          if (event.persisted && isOpen()) setOpen(false);
         });
       })();
     </script>

@@ -2366,6 +2366,14 @@ pre code {
 	border-left: 4px solid var(--bs-success) !important;
 }
 
+.health-banner.health-warning {
+	border-left-color: var(--c-warn) !important;
+}
+
+.health-banner.health-critical {
+	border-left-color: var(--c-bad) !important;
+}
+
 .health-banner .health-icon {
 	width: 32px;
 	height: 32px;
@@ -2376,6 +2384,16 @@ pre code {
 	flex-shrink: 0;
 	background: var(--bs-success-bg-subtle);
 	color: var(--bs-success);
+}
+
+.health-banner.health-warning .health-icon {
+	background: var(--c-warn-weak);
+	color: var(--c-warn);
+}
+
+.health-banner.health-critical .health-icon {
+	background: var(--c-bad-weak);
+	color: var(--c-bad);
 }
 
 .health-issues {
