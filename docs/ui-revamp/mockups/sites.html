@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="mock.css"><title>MyFSIO mockup</title></head><body data-nav="Sites & peers"><div class="app"><aside class="nav"></aside><div class="main">
+<div class="top"><div class="crumbs"><span class="hide-m">Replication</span><span class="sep hide-m">/</span><b>Sites &amp; peers</b></div></div>
+<div class="content">
+<div class="pagehead"><div><h1>Sites &amp; peers</h1><div class="sub hide-m">This site and the peers it replicates with</div></div><div class="actions"><div class="btn hide-m">Peer credentials</div><div class="btn primary">+ Add peer</div></div></div>
+<div class="card" style="margin-bottom:16px"><div class="topo">
+<div class="node"><b>eu-west-1</b><small>s3.eu.example.com</small><div style="margin-top:6px"><span class="badge ok"><span class="dot"></span>Healthy</span></div></div>
+<div class="link">two-way · 4 buckets<br>lag 2 s</div>
+<div class="node self"><b>us-east-1 <span class="badge acc">this site</span></b><small>s3.example.com</small><div style="margin-top:6px"><span class="badge">priority 100</span></div></div>
+<div class="link bad">one-way · 1 bucket<br>3 failures</div>
+<div class="node"><b>ap-south-1</b><small>s3.ap.example.com</small><div style="margin-top:6px"><span class="badge bad"><span class="dot"></span>Unreachable 14 min</span></div></div>
+</div></div>
+<div class="card" style="margin-bottom:16px">
+<div class="cardhead">Peers<span class="muted" style="font-weight:400;margin-left:auto" >Checked 20 s ago</span></div>
+<table><tr><th>Site</th><th class="hide-m">Endpoint</th><th class="hide-m">Connection</th><th class="hide-m">Mode</th><th>Health</th><th class="r hide-m">Pending</th><th></th></tr>
+<tr><td><div class="name"><span class="fi dir"><i data-ic="sites"></i></span>eu-west-1</div></td><td class="mono muted hide-m">https://s3.eu.example.com</td><td class="hide-m">eu-replica</td><td class="hide-m"><span class="badge acc">Two-way</span></td><td><span class="badge ok"><span class="dot"></span>Healthy</span></td><td class="r hide-m">12 objects</td><td class="r faint"><i data-ic="more"></i></td></tr>
+<tr><td><div class="name"><span class="fi dir"><i data-ic="sites"></i></span>ap-south-1</div></td><td class="mono muted hide-m">https://s3.ap.example.com</td><td class="hide-m">ap-backup</td><td class="hide-m"><span class="badge">One-way</span></td><td><span class="badge bad"><span class="dot"></span>Unreachable</span></td><td class="r hide-m">1,804 objects</td><td class="r"><span class="btn sm">Retry</span></td></tr>
+</table></div>
+<div class="card">
+<div class="cardhead">Add peer<div class="steps" style="margin-left:auto;font-weight:400"><span class="done"><b>✓</b>Endpoint</span><span class="on"><b>2</b>Credentials</span><span class="hide-m"><b>3</b>Buckets</span><span class="hide-m"><b>4</b>Review</span></div></div>
+<div class="setting"><div><div class="t">Connection</div><div class="h">Access key this site uses to write to the peer</div></div><div class="x"><div class="input" style="min-width:210px">ap-backup <span class="faint"><i data-ic="down"></i></span></div><span class="btn sm hide-m">+ New connection</span></div></div>
+<div class="setting"><div><div class="t">Peer credentials</div><div class="h">Key the peer uses to write back here, needed for two-way sync</div></div><div class="x"><span class="badge ok"><span class="dot"></span>Created</span><span class="btn sm">Copy key</span></div></div>
+<div class="setting"><div><div class="t">Test</div><div class="h">Signed request to the peer with the chosen connection</div></div><div class="x"><span class="badge ok"><span class="dot"></span>200 in 84 ms</span><span class="btn sm">Test again</span></div></div>
+<div class="foot"><span class="btn sm">Back</span><span style="margin-left:auto" class="btn sm primary">Continue</span></div>
+</div>
+</div></div></div><script src="shell.js"></script></body></html>

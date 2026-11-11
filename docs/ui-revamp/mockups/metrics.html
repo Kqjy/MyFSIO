@@ -1,0 +1,30 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="mock.css"><title>MyFSIO mockup</title></head><body data-nav="Metrics"><div class="app"><aside class="nav"></aside><div class="main">
+<div class="top"><div class="crumbs"><span class="hide-m">Operations</span><span class="sep hide-m">/</span><b>Metrics</b></div></div>
+<div class="content">
+<div class="pagehead"><div><h1>Metrics</h1><div class="sub hide-m">Live, refreshed every 5 s</div></div><div class="actions"><div class="seg"><span>1 h</span><span class="on">24 h</span><span>7 d</span><span>30 d</span></div><div class="btn hide-m">Export CSV</div></div></div>
+<div class="stats">
+<div class="card stat"><div class="k">CPU</div><div class="v">23%</div><div class="bar" style="margin-top:8px"><i style="width:23%"></i></div></div>
+<div class="card stat"><div class="k">Memory</div><div class="v">3.1 GB</div><div class="bar" style="margin-top:8px"><i style="width:39%"></i></div></div>
+<div class="card stat"><div class="k">Disk</div><div class="v">1.84 TB</div><div class="bar" style="margin-top:8px"><i style="width:46%"></i></div></div>
+<div class="card stat"><div class="k">Uptime</div><div class="v">41 d</div><div class="d">v0.9.2</div></div>
+</div>
+<div class="grid2" style="margin-bottom:16px">
+<div class="card chart"><div style="display:flex;align-items:flex-end"><div><div class="k">Requests</div><div class="v">912 k</div></div><div class="legend"><span><i></i>2xx</span><span><i class="b"></i>4xx / 5xx</span></div></div><div data-chart="38,41,36,30,28,33,47,62,78,85,81,88,92,86,79,83,90,96,84,70,61,55,48,43" data-chart-b="2,2,3,2,2,2,3,4,4,5,4,9,14,6,4,4,5,5,4,4,3,3,2,2"></div><div class="axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>now</span></div></div>
+<div class="card chart"><div style="display:flex;align-items:flex-end"><div><div class="k">Latency p95</div><div class="v">42 ms</div></div><div class="legend"><span><i></i>GET</span><span><i class="b"></i>PUT</span></div></div><div data-chart="30,31,29,28,30,33,35,38,41,44,40,52,71,48,42,40,43,45,41,38,36,34,32,31" data-chart-b="52,55,51,50,54,58,63,66,70,74,69,81,96,78,71,68,72,75,70,66,62,59,56,54"></div><div class="axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>now</span></div></div>
+</div>
+<div class="grid2">
+<div class="card chart"><div><div class="k">Bytes in / out</div><div class="v">184 GB <span class="faint" style="font-size:14px;font-weight:500">in</span> · 96 GB <span class="faint" style="font-size:14px;font-weight:500">out</span></div></div><div data-chart="10,12,11,9,8,14,22,35,41,38,33,36,40,44,39,31,28,30,26,21,18,15,12,11" data-chart-b="6,6,7,5,5,7,11,15,19,22,20,18,21,24,20,17,15,16,13,11,9,8,7,6"></div><div class="axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>now</span></div></div>
+<div class="card"><div class="cardhead">Operations<span class="muted" style="margin-left:auto;font-weight:400">last 24 h</span></div>
+<table><tr><th>Operation</th><th class="r">Count</th><th class="r hide-m">p95</th><th class="r">Errors</th></tr>
+<tr><td class="mono">GetObject</td><td class="r">612,480</td><td class="r hide-m">31 ms</td><td class="r muted">0.01%</td></tr>
+<tr><td class="mono">PutObject</td><td class="r">188,904</td><td class="r hide-m">54 ms</td><td class="r muted">0.02%</td></tr>
+<tr><td class="mono">ListObjectsV2</td><td class="r">74,212</td><td class="r hide-m">88 ms</td><td class="r muted">0%</td></tr>
+<tr><td class="mono">HeadObject</td><td class="r">31,077</td><td class="r hide-m">9 ms</td><td class="r"><span class="badge warn">1.4%</span></td></tr>
+<tr><td class="mono">DeleteObject</td><td class="r">5,330</td><td class="r hide-m">22 ms</td><td class="r muted">0%</td></tr>
+</table></div>
+</div>
+</div></div></div><script src="shell.js"></script><script>
+const path=(v,max,close)=>{const p=v.map((y,i)=>(i/(v.length-1)*100).toFixed(2)+','+(100-y/max*92).toFixed(2));return 'M'+p.join('L')+(close?'L100,100L0,100Z':'')};
+document.querySelectorAll('[data-chart]').forEach(e=>{const a=e.dataset.chart.split(',').map(Number),b=(e.dataset.chartB||'').split(',').filter(Boolean).map(Number),max=Math.max(...a,...b);
+e.innerHTML='<svg viewBox="0 0 100 100" preserveAspectRatio="none">'+[25,50,75,100].map(y=>'<path class="grid" vector-effect="non-scaling-stroke" d="M0,'+y+'H100"/>').join('')+'<path class="area" d="'+path(a,max,1)+'"/><path class="line" d="'+path(a,max)+'"/>'+(b.length?'<path class="line b" d="'+path(b,max)+'"/>':'')+'</svg>'});
+</script></body></html>

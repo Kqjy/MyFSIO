@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="mock.css"><title>MyFSIO mockup</title></head><body data-nav="Maintenance"><div class="app"><aside class="nav"></aside><div class="main">
+<div class="top"><div class="crumbs"><span class="hide-m">Operations</span><span class="sep hide-m">/</span><b>Maintenance</b></div></div>
+<div class="content">
+<div class="pagehead"><div><h1>Maintenance</h1><div class="sub hide-m">Background jobs that keep storage clean and consistent</div></div></div>
+<div class="grid2" style="margin-bottom:16px">
+<div class="card"><div class="cardhead"><i data-ic="wrench"></i>Garbage collection<span class="badge ok" style="margin-left:auto"><span class="dot"></span>Idle</span></div>
+<div class="setting"><div><div class="t">Schedule</div><div class="h">Every 6 h · next run in 2 h 14 min</div></div><div class="x"><div class="toggle on"></div></div></div>
+<div class="setting"><div><div class="t">Last run</div><div class="h">Today 03:00 · 41 s · freed 3.2 GB (1,204 orphaned parts, 88 temp files)</div></div></div>
+<div class="setting"><div><div class="t">Dry run</div><div class="h">Report what would be removed without deleting</div></div><div class="x"><div class="toggle"></div></div></div>
+<div class="foot"><span class="btn sm">History</span><span style="margin-left:auto" class="btn sm primary">Run now</span></div></div>
+<div class="card"><div class="cardhead"><i data-ic="log"></i>Integrity scan<span class="badge acc" style="margin-left:auto"><span class="dot"></span>Running 62%</span></div>
+<div class="setting"><div style="flex:1"><div class="t">Progress</div><div class="h">2,116,003 of 3,412,908 objects · about 18 min left</div><div class="bar" style="margin-top:8px"><i style="width:62%"></i></div></div></div>
+<div class="setting"><div><div class="t">Findings so far</div><div class="h">2 checksum mismatches · 0 missing data files</div></div><div class="x"><span class="badge warn">2 issues</span></div></div>
+<div class="setting"><div><div class="t">Auto-heal</div><div class="h">Repair from a healthy replica when one exists</div></div><div class="x"><div class="toggle on"></div></div></div>
+<div class="foot"><span class="btn sm">History</span><span style="margin-left:auto" class="btn sm danger">Cancel scan</span></div></div>
+</div>
+<div class="card"><div class="cardhead">Findings<span class="chip" style="margin-left:auto;font-weight:400">Unresolved only <i data-ic="down"></i></span></div>
+<table><tr><th>Object</th><th>Problem</th><th class="hide-m">Found</th><th class="hide-m">Status</th><th></th></tr>
+<tr><td class="mono">backups-nightly/2026-11-02/db.tar.zst</td><td><span class="badge bad">Checksum mismatch</span></td><td class="muted hide-m">6 min ago</td><td class="hide-m"><span class="badge ok">Healed from eu-west-1</span></td><td class="r faint"><i data-ic="more"></i></td></tr>
+<tr><td class="mono">scratch/tmp/export.csv</td><td><span class="badge bad">Checksum mismatch</span></td><td class="muted hide-m">2 min ago</td><td class="hide-m"><span class="badge warn">No replica</span></td><td class="r"><span class="btn sm">Review</span></td></tr>
+</table><div class="foot">2 findings in this scan<span style="margin-left:auto">Download report</span></div></div>
+</div></div></div><script src="shell.js"></script></body></html>
