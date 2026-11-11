@@ -91,279 +91,214 @@
   <div class="tab-content" id="bucketTabsContent">
     
     <div class="tab-pane fade {% if active_tab == "objects" %}show active{% else %}{% endif %}" id="objects-pane" role="tabpanel" aria-labelledby="objects-tab" tabindex="0">
-<div class="row g-4">
-  <div class="col-lg-7">
-    <div class="card shadow-sm">
-      <div class="card-header bg-body">
-        <div class="objects-header-responsive">
-          <span class="fw-semibold header-title">Objects</span>
-          <div class="header-actions">
-            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
-                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-                <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
-              </svg>
-              Upload
-            </button>
-            <div class="dropdown sort-dropdown">
-              <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Sort objects">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M3.5 2.5a.5.5 0 0 0-1 0v8.793l-1.146-1.147a.5.5 0 0 0-.708.708l2 1.999.007.007a.497.497 0 0 0 .7-.006l2-2a.5.5 0 0 0-.707-.708L3.5 11.293V2.5zm3.5 1a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zM7.5 6a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1h-5zm0 3a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1h-3zm0 3a.5.5 0 0 0 0 1h1a.5.5 0 0 0 0-1h-1z"/>
-                </svg>
-                <span id="sort-dropdown-label">Name A-Z</span>
-              </button>
-              <ul class="dropdown-menu dropdown-menu-end">
-                <li><button class="dropdown-item active" type="button" data-sort-field="name" data-sort-dir="asc">Name A-Z</button></li>
-                <li><button class="dropdown-item" type="button" data-sort-field="name" data-sort-dir="desc">Name Z-A</button></li>
-                <li><hr class="dropdown-divider"></li>
-                <li><button class="dropdown-item" type="button" data-sort-field="size" data-sort-dir="desc">Size (largest)</button></li>
-                <li><button class="dropdown-item" type="button" data-sort-field="size" data-sort-dir="asc">Size (smallest)</button></li>
-                <li><hr class="dropdown-divider"></li>
-                <li><button class="dropdown-item" type="button" data-sort-field="date" data-sort-dir="desc">Date (newest)</button></li>
-                <li><button class="dropdown-item" type="button" data-sort-field="date" data-sort-dir="asc">Date (oldest)</button></li>
-              </ul>
-            </div>
-            <div class="position-relative search-wrapper">
-              <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects (press /)" style="max-width: 180px;" />
-            </div>
-            <div class="bulk-actions d-none" id="bulk-actions-wrapper">
-              <button class="btn btn-outline-danger btn-sm" type="button" data-bulk-delete-trigger disabled>
-                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
-                  <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
-                  <path d="m4.646 8.646-.708.708L7 12.414l5.354-5.354-.708-.708L7 10.293z" />
-                </svg>
-                <span data-bulk-delete-label>Delete</span>
-              </button>
-              <button class="btn btn-outline-secondary btn-sm" type="button" data-bulk-download-trigger disabled>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
-                  <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-                  <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
-                </svg>
-                Download
-              </button>
-            </div>
+<div class="ob-split" id="objectBrowser">
+  <div class="ui-card ob-list">
+    <div class="ui-toolbar">
+      <nav id="folder-breadcrumb" class="ob-crumbs" aria-label="Prefix">
+        <ol>
+          <li aria-current="page">{{ bucket_name }}</li>
+        </ol>
+      </nav>
+      <div class="ui-filter ob-filter">
+        <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
+        <input id="object-search" class="ui-input" type="search" placeholder="Filter by name (press /)" aria-label="Filter objects by name" />
+      </div>
+      <button class="ui-btn ui-hide-m" type="button" popovertarget="objectSortMenu" aria-haspopup="menu" aria-expanded="false" data-ui-tip="Sort objects">
+        <span id="sort-dropdown-label">Name A-Z</span>
+        <svg class="ic ob-caret" aria-hidden="true"><use href="#i-chevron"/></svg>
+      </button>
+      <div class="ui-menu" id="objectSortMenu" popover data-ui-align-end>
+        <button class="ui-menu-item active" type="button" data-sort-field="name" data-sort-dir="asc">Name A-Z</button>
+        <button class="ui-menu-item" type="button" data-sort-field="name" data-sort-dir="desc">Name Z-A</button>
+        <div class="ui-menu-sep"></div>
+        <button class="ui-menu-item" type="button" data-sort-field="size" data-sort-dir="desc">Size (largest)</button>
+        <button class="ui-menu-item" type="button" data-sort-field="size" data-sort-dir="asc">Size (smallest)</button>
+        <div class="ui-menu-sep"></div>
+        <button class="ui-menu-item" type="button" data-sort-field="date" data-sort-dir="desc">Date (newest)</button>
+        <button class="ui-menu-item" type="button" data-sort-field="date" data-sort-dir="asc">Date (oldest)</button>
+      </div>
+      <button class="ui-btn ui-btn-primary" type="button" data-bs-toggle="modal" data-bs-target="#uploadModal">
+        <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
+        Upload
+      </button>
+    </div>
+    <div class="ob-selbar d-none" id="bulk-actions-wrapper" role="region" aria-label="Selection">
+      <span id="bulk-selection-count" aria-live="polite"></span>
+      <span class="ob-selbar-actions">
+        <button class="ui-btn ui-btn-sm" type="button" data-bulk-download-trigger disabled>
+          <svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>
+          Download
+        </button>
+        <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" data-bulk-delete-trigger disabled>
+          <span data-bulk-delete-label>Delete</span>
+        </button>
+        <button class="ui-btn ui-btn-sm ui-btn-ghost" type="button" id="bulk-selection-clear">Clear</button>
+      </span>
+    </div>
+    <div id="filter-warning" class="ob-notice d-none" role="alert">
+      <span id="filter-warning-text">Filtering loaded objects only. Not all objects have been loaded yet.</span>
+      <button type="button" class="icon-btn" id="filter-warning-dismiss" aria-label="Dismiss"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div
+      class="objects-table-container drop-zone"
+      id="objects-drop-zone"
+      data-bucket="{{ bucket_name }}"
+      data-versioning="{% if versioning_enabled %}true{% else %}false{% endif %}"
+      data-objects-api="{{ objects_api_url }}"
+      data-objects-stream="{{ objects_stream_url }}"
+      data-bulk-delete-endpoint="{{ url_for(endpoint="ui.bulk_delete_objects", bucket_name=bucket_name) }}"
+      data-bulk-download-endpoint="{{ url_for(endpoint="ui.bulk_download_objects", bucket_name=bucket_name) }}"
+      data-buckets-for-copy-url="{{ buckets_for_copy_url }}"
+      data-bucket-total-objects="{{ bucket_stats.objects | default(value=0) }}"
+    >
+      <table class="ui-table ob-table" id="objects-table">
+        <thead>
+          <tr>
+            <th scope="col" class="ob-col-check">
+              <input type="checkbox" data-select-all aria-label="Select all objects" />
+            </th>
+            <th scope="col">Name</th>
+            <th scope="col" class="is-num ob-col-size">Size</th>
+            <th scope="col" class="ob-col-date ui-hide-m">Last modified</th>
+            <th scope="col" class="ob-col-actions"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr id="objects-loading-row">
+            <td colspan="5" class="ui-empty">Loading objects…</td>
+          </tr>
+        </tbody>
+      </table>
+      <div id="scroll-sentinel" style="height: 1px;"></div>
+    </div>
+    <div id="pagination-controls" class="ui-card-foot">
+      <div id="load-more-container" class="ob-foot-status">
+        <div id="load-more-spinner" class="d-none">
+          <div class="spinner-border spinner-border-sm" role="status">
+            <span class="visually-hidden">Loading...</span>
           </div>
         </div>
-        <nav id="folder-breadcrumb" class="mt-2 d-none" aria-label="Folder navigation">
-          <ol class="breadcrumb mb-0 small">
-            <li class="breadcrumb-item">
-              <a href="#" data-folder-nav="" class="text-decoration-none">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3H14.5A1.5 1.5 0 0 1 16 4.5v1.384l-4.578-.724a3 3 0 0 0-2.856 1.13l-2.847 3.55A3 3 0 0 0 5 11.373V14H2.5A1.5 1.5 0 0 1 1 12.5v-8A1.5 1.5 0 0 1 2.5 3H6c-.314 0-.6-.172-.742-.438l-.328-.658A.5.5 0 0 0 4.47 1.657z"/>
-                </svg>
-                Root
-              </a>
-            </li>
-          </ol>
-        </nav>
-        <div id="filter-warning" class="alert alert-warning fade show d-none py-1 px-2 mt-2 mb-0 small d-flex align-items-center" role="alert">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
-            <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-            <path d="M7.002 11a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 4.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 4.995z"/>
-          </svg>
-          <span id="filter-warning-text" class="me-2">Filtering loaded objects only. Not all objects have been loaded yet.</span>
-          <button type="button" class="btn-close ms-auto flex-shrink-0" style="font-size: 0.5rem;" data-bs-dismiss="alert" aria-label="Close"></button>
-        </div>
+        <span id="load-more-status"></span>
+        <span id="folder-view-status" class="d-none"></span>
       </div>
-      <div
-        class="table-responsive objects-table-container drop-zone"
-        id="objects-drop-zone"
-        data-bucket="{{ bucket_name }}"
-        data-versioning="{% if versioning_enabled %}true{% else %}false{% endif %}"
-        data-objects-api="{{ objects_api_url }}"
-        data-objects-stream="{{ objects_stream_url }}"
-        data-bulk-delete-endpoint="{{ url_for(endpoint="ui.bulk_delete_objects", bucket_name=bucket_name) }}"
-        data-bulk-download-endpoint="{{ url_for(endpoint="ui.bulk_download_objects", bucket_name=bucket_name) }}"
-        data-buckets-for-copy-url="{{ buckets_for_copy_url }}"
-        data-bucket-total-objects="{{ bucket_stats.objects | default(value=0) }}"
-      >
-        <table class="table table-hover align-middle mb-0" id="objects-table" style="table-layout: fixed;">
-          <thead class="table-light">
-            <tr>
-              <th scope="col" class="text-center" style="width: 3rem;">
-                <input class="form-check-input" type="checkbox" data-select-all aria-label="Select all objects" />
-              </th>
-              <th scope="col">Key</th>
-              <th scope="col" class="text-end" style="width: 6rem;">Size</th>
-              <th scope="col" class="text-end" style="width: 5.5rem;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr id="objects-loading-row">
-              <td colspan="4" class="py-5">
-                <div class="text-center">
-                  <div class="spinner-border text-primary mb-3" role="status">
-                    <span class="visually-hidden">Loading...</span>
-                  </div>
-                  <p class="text-muted mb-0">Loading objects...</p>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <div id="scroll-sentinel" style="height: 1px;"></div>
-      </div>
-      <div id="pagination-controls" class="card-footer d-flex justify-content-between align-items-center py-1 px-3 bg-body-tertiary" style="font-size: 0.75rem;">
-        <div id="load-more-container" class="d-flex align-items-center gap-2">
-          <div id="load-more-spinner" class="d-none">
-            <div class="spinner-border spinner-border-sm text-primary me-1" role="status">
-              <span class="visually-hidden">Loading...</span>
-            </div>
-          </div>
-          <span id="load-more-status" class="text-muted"></span>
-          <span id="folder-view-status" class="text-muted d-none"></span>
+      {% if versioning_enabled %}
+      <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost d-none" id="archived-objects-chip"></button>
+      {% endif %}
+      <span class="ui-toolbar-end ui-hide-m">Drop files anywhere to upload</span>
+    </div>
+  </div>
+
+  <div class="ui-menu" id="objectRowMenu" popover data-ui-align-end>
+    <button class="ui-menu-item" type="button" data-row-action="details">Details</button>
+    <button class="ui-menu-item" type="button" data-row-action="download">Download</button>
+    <button class="ui-menu-item" type="button" data-row-action="share">Share link</button>
+    <div class="ui-menu-sep"></div>
+    <button class="ui-menu-item" type="button" data-row-action="copy">Copy</button>
+    <button class="ui-menu-item" type="button" data-row-action="move">Move</button>
+    <div class="ui-menu-sep"></div>
+    <button class="ui-menu-item is-danger" type="button" data-row-action="delete">Delete</button>
+  </div>
+
+  <aside class="ui-card ob-drawer" id="objectDrawer" aria-label="Object details">
+    <div id="preview-empty" class="ui-empty">
+      <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>
+      <p>Select an object to view details</p>
+    </div>
+    <div id="preview-panel" class="d-none">
+      <div class="ob-drawer-head">
+        <div class="ob-drawer-title">
+          <h2 id="preview-key"></h2>
+          <div class="ui-muted" id="preview-size"></div>
         </div>
+        <button type="button" class="icon-btn" id="objectDrawerClose" aria-label="Close details"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="preview-stage ob-preview">
+        <div id="preview-placeholder" class="ui-muted">
+          <div>No preview available</div>
+        </div>
+        <img id="preview-image" class="d-none" alt="Object preview" />
+        <video id="preview-video" class="d-none" controls></video>
+        <audio id="preview-audio" class="d-none" controls></audio>
+        <pre id="preview-text" class="d-none"></pre>
+        <iframe id="preview-iframe" class="d-none"></iframe>
+      </div>
+      <div class="ob-drawer-actions">
+        <a class="ui-btn ui-btn-sm ui-btn-primary" id="downloadButton" target="_blank">
+          <svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>
+          Download
+        </a>
+        <button class="ui-btn ui-btn-sm" type="button" id="presignButton">Share link</button>
+        <button class="ui-btn ui-btn-sm" type="button" data-drawer-action="copy">Copy</button>
+        <button class="ui-btn ui-btn-sm" type="button" data-drawer-action="move">Move</button>
+        <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" data-drawer-action="delete">Delete</button>
+      </div>
+      <div id="preview-error-alert" class="ob-notice d-none" role="alert"></div>
+      <div class="ui-tabs ob-drawer-tabs" data-ui-tabs aria-label="Object details sections">
+        <button class="ui-tab" type="button" role="tab" id="obTabDetails" aria-controls="obPanelDetails" aria-selected="true">Details</button>
         {% if versioning_enabled %}
-        <button type="button" class="btn btn-link btn-sm py-0 px-1 text-decoration-none d-none" id="archived-objects-chip"></button>
+        <button class="ui-tab" type="button" role="tab" id="obTabVersions" aria-controls="obPanelVersions">Versions</button>
         {% endif %}
+        <button class="ui-tab" type="button" role="tab" id="obTabTags" aria-controls="obPanelTags">Tags <span class="ui-badge" id="preview-tags-count">0</span></button>
+        <button class="ui-tab" type="button" role="tab" id="obTabMetadata" aria-controls="obPanelMetadata">Metadata</button>
       </div>
-    </div>
-  </div>
-  <div class="col-lg-5">
-    <div class="card shadow-sm sticky-top preview-card" style="border-radius: 1rem;">
-      <div class="card-header bg-body d-flex align-items-center gap-2" style="border-radius: 1rem 1rem 0 0;">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-          <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-        </svg>
-        <span class="fw-semibold">Object Details</span>
+      <div id="obPanelDetails" aria-labelledby="obTabDetails">
+        <dl class="ob-facts" id="preview-details-meta">
+          <dt>Last modified</dt>
+          <dd id="preview-modified"></dd>
+          <dt>ETag</dt>
+          <dd class="ui-mono" id="preview-etag"></dd>
+          <dt>S3 URI</dt>
+          <dd class="ui-mono" id="preview-s3-uri"></dd>
+        </dl>
       </div>
-      <div class="card-body">
-        <div id="preview-empty" class="empty-state py-4">
-          <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
-            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
-              <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-            </svg>
+      {% if versioning_enabled %}
+      <div id="obPanelVersions" aria-labelledby="obTabVersions" hidden>
+        <div id="version-panel" class="d-none">
+          <div class="ob-panel-bar">
+            <button class="ui-btn ui-btn-sm" type="button" id="refreshVersionsButton">Refresh</button>
           </div>
-          <p class="text-muted mb-0">Select an object to view details</p>
+          <div id="version-list" class="version-list-stable list-group list-group-flush small rounded" style="border: 1px solid var(--myfsio-card-border);"></div>
         </div>
-        <div id="preview-panel" class="d-none">
-          <div class="d-flex align-items-start gap-3 mb-3 p-3 rounded" style="background: var(--myfsio-preview-bg);">
-            <div class="file-icon flex-shrink-0" style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--myfsio-hover-bg);">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-              </svg>
-            </div>
-            <div class="min-w-0 flex-grow-1">
-              <h2 class="h6 mb-1 text-break fw-semibold" id="preview-key"></h2>
-              <div class="text-muted small" id="preview-size"></div>
-            </div>
+      </div>
+      {% endif %}
+      <div id="obPanelTags" aria-labelledby="obTabTags" hidden>
+        <div id="preview-tags" class="d-none">
+          <div class="ob-panel-bar">
+            <button class="ui-btn ui-btn-sm" type="button" id="editTagsButton">Edit tags</button>
           </div>
-          <div class="d-flex gap-2 mb-3">
-            <a class="btn btn-primary btn-sm flex-grow-1" id="downloadButton" target="_blank">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-                <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
-              </svg>
-              Download
-            </a>
-            <button class="btn btn-outline-secondary btn-sm" id="presignButton">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
-                <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
-              </svg>
-              Share Link
-            </button>
-          </div>
-          <div id="preview-error-alert" class="alert alert-warning d-none py-2 px-3 mb-3 small" role="alert"></div>
-          <div id="preview-details-meta" class="p-3 rounded mb-3" style="background: var(--myfsio-preview-bg);">
-            <dl class="row small mb-0">
-              <dt class="col-5 text-muted fw-normal">Last modified</dt>
-              <dd class="col-7 mb-2 fw-medium" id="preview-modified"></dd>
-              <dt class="col-5 text-muted fw-normal">ETag</dt>
-              <dd class="col-7 mb-0"><code id="preview-etag" class="small" style="font-size: 0.75rem;"></code></dd>
-            </dl>
-          </div>
-          <div id="preview-metadata" class="mb-3 d-none">
-            <div class="d-flex align-items-center gap-2 mb-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-                <path d="M3 2v4.586l7 7L14.586 9l-7-7H3zM2 2a1 1 0 0 1 1-1h4.586a1 1 0 0 1 .707.293l7 7a1 1 0 0 1 0 1.414l-4.586 4.586a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 2 6.586V2z"/>
-                <path d="M5.5 5a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm0 1a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/>
-              </svg>
-              <span class="fw-semibold small text-uppercase">Metadata</span>
-            </div>
-            <div id="preview-metadata-list" class="metadata-stack small p-3 rounded" style="background: var(--myfsio-preview-bg);"></div>
-          </div>
-          <div id="preview-tags" class="mb-3 d-none">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="d-flex align-items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-                  <path d="M3 2v4.586l7 7L14.586 9l-7-7H3zM2 2a1 1 0 0 1 1-1h4.586a1 1 0 0 1 .707.293l7 7a1 1 0 0 1 0 1.414l-4.586 4.586a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 2 6.586V2z"/>
-                  <path d="M5.5 5a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm0 1a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM1 7.086a1 1 0 0 0 .293.707L8.75 15.25l-.043.043a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 0 7.586V3a1 1 0 0 1 1-1v5.086z"/>
-                </svg>
-                <span class="fw-semibold small text-uppercase">Tags</span>
-                <span class="badge bg-secondary" id="preview-tags-count">0</span>
+          <div id="preview-tags-list" class="ui-badges"></div>
+          <div id="preview-tags-empty" class="ui-muted">No tags</div>
+          <div id="preview-tags-editor" class="d-none mt-2">
+            <div class="tag-editor-card">
+              <div class="tag-editor-header">
+                <span>Key</span>
+                <span>Value</span>
+                <span></span>
               </div>
-              <button class="btn btn-outline-primary btn-sm" type="button" id="editTagsButton" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
-                </svg>
-                Edit
-              </button>
-            </div>
-            <div id="preview-tags-list" class="d-flex flex-wrap gap-2"></div>
-            <div id="preview-tags-empty" class="text-muted small p-2 bg-body-tertiary rounded">No tags</div>
-            <div id="preview-tags-editor" class="d-none mt-2">
-              <div class="tag-editor-card">
-                <div class="tag-editor-header">
-                  <span>Key</span>
-                  <span>Value</span>
-                  <span></span>
-                </div>
-                <div id="preview-tags-inputs"></div>
-                <div class="tag-editor-actions">
-                  <button class="btn btn-sm btn-outline-secondary" type="button" id="addTagRow">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
-                    </svg>
-                    Add Tag
-                  </button>
-                  <div class="ms-auto d-flex gap-2">
-                    <button class="btn btn-sm btn-outline-secondary" type="button" id="cancelTagsButton">Cancel</button>
-                    <button class="btn btn-sm btn-primary" type="button" id="saveTagsButton">Save</button>
-                  </div>
+              <div id="preview-tags-inputs"></div>
+              <div class="tag-editor-actions">
+                <button class="ui-btn ui-btn-sm" type="button" id="addTagRow">
+                  <svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>
+                  Add tag
+                </button>
+                <div class="ob-tag-actions">
+                  <button class="ui-btn ui-btn-sm" type="button" id="cancelTagsButton">Cancel</button>
+                  <button class="ui-btn ui-btn-sm ui-btn-primary" type="button" id="saveTagsButton">Save</button>
                 </div>
               </div>
-              <div class="form-text mt-1">Maximum 10 tags. Keys and values up to 256 characters.</div>
             </div>
-          </div>
-          <div id="version-panel" class="mb-3 d-none">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="d-flex align-items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-                  <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
-                  <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
-                  <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
-                </svg>
-                <span class="fw-semibold small text-uppercase">Versions</span>
-              </div>
-              <button class="btn btn-outline-secondary btn-sm" type="button" id="refreshVersionsButton" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                  <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-                </svg>
-                Refresh
-              </button>
-            </div>
-            <div id="version-list" class="version-list-stable list-group list-group-flush small rounded" style="border: 1px solid var(--myfsio-card-border);"></div>
-          </div>
-          <div class="preview-stage border rounded position-relative overflow-hidden" style="border-radius: 0.75rem !important;">
-            <div id="preview-placeholder" class="text-muted text-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
-                <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
-                <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
-              </svg>
-              <div class="small">No preview available</div>
-            </div>
-            <img id="preview-image" class="img-fluid d-none w-100" alt="Object preview" style="display: block;" />
-            <video id="preview-video" class="w-100 d-none" controls style="display: block;"></video>
-            <audio id="preview-audio" class="w-100 d-none" controls style="display: block;"></audio>
-            <pre id="preview-text" class="w-100 d-none m-0"></pre>
-            <iframe id="preview-iframe" class="w-100 h-100 d-none"></iframe>
+            <div class="ui-hint">Maximum 10 tags. Keys and values up to 256 characters.</div>
           </div>
         </div>
       </div>
+      <div id="obPanelMetadata" aria-labelledby="obTabMetadata" hidden>
+        <div id="preview-metadata" class="d-none">
+          <div id="preview-metadata-list" class="metadata-stack ob-metadata"></div>
+        </div>
+        <div class="ui-muted ob-panel-empty">No user metadata</div>
+      </div>
     </div>
-  </div>
+  </aside>
 </div>
 </div>
 
@@ -2320,169 +2255,107 @@
   </div>
 </div>
 
-<div class="modal fade" id="bulkDeleteModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
-            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-          </svg>
-          Delete selected objects
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="alert alert-danger d-flex align-items-start mb-3" role="alert">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
-            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
-          </svg>
-          <div>
-            <p id="bulkDeleteCount" class="fw-semibold mb-1"></p>
-            <p class="mb-0 small">Deleted items cannot be recovered.</p>
-          </div>
-        </div>
-        <ul class="list-group mb-3" id="bulkDeleteList" style="max-height: 200px; overflow-y: auto;"></ul>
-        <div class="text-muted small" id="bulkDeleteStatus"></div>
-        <div class="form-check mt-3 p-3 bg-body-tertiary rounded-3 {% if not versioning_enabled %}d-none{% endif %}" id="bulkDeletePurgeWrap">
-          <input class="form-check-input" type="checkbox" id="bulkDeletePurge" />
-          <label class="form-check-label" for="bulkDeletePurge">Also delete archived versions</label>
-          <div class="form-text">Removes any archived versions stored in the archive.</div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-danger" id="bulkDeleteConfirm" disabled>
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-          </svg>
-          Delete objects
-        </button>
+<dialog class="ui-dialog" id="bulkDeleteModal" aria-labelledby="bulkDeleteTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="bulkDeleteTitle">Delete selected objects</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="ui-dialog-body">
+    <div class="ob-notice ob-notice-danger" role="alert">
+      <div>
+        <strong id="bulkDeleteCount"></strong>
+        <div>Deleted items cannot be recovered.</div>
       </div>
     </div>
+    <ul class="ob-keylist" id="bulkDeleteList"></ul>
+    <div class="ui-hint" id="bulkDeleteStatus"></div>
+    <div class="ui-field {% if not versioning_enabled %}d-none{% endif %}" id="bulkDeletePurgeWrap">
+      <label class="ui-check" for="bulkDeletePurge">
+        <input type="checkbox" id="bulkDeletePurge" />
+        Also delete archived versions
+      </label>
+      <div class="ui-hint">Removes any archived versions stored in the archive.</div>
+    </div>
   </div>
-</div>
+  <div class="ui-dialog-foot">
+    <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+    <button type="button" class="ui-btn ui-btn-danger" id="bulkDeleteConfirm" disabled>Delete objects</button>
+  </div>
+</dialog>
 
-<div class="modal fade" id="deleteObjectModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
-            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-          </svg>
-          Delete object
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <form method="post" id="deleteObjectForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-        <div class="modal-body">
-          <p class="mb-3">
-            Are you sure you want to delete this object?
-          </p>
-          <div class="p-3 bg-body-tertiary rounded-3 mb-3">
-            <code id="deleteObjectKey" class="d-block text-break"></code>
-          </div>
-          <div id="deleteObjectVersioningWrap" class="{% if not versioning_enabled %}d-none{% endif %}">
-          <div class="alert alert-warning d-flex align-items-start small mb-3" role="alert">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-0" viewBox="0 0 16 16">
-              <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
-            </svg>
-            <div>Versioning is enabled. Deleting normally keeps previous versions in the archive.</div>
-          </div>
-          <div class="form-check p-3 bg-body-tertiary rounded-3">
-            <input class="form-check-input" type="checkbox" value="1" id="deletePurgeVersions" name="purge_versions" />
-            <label class="form-check-label" for="deletePurgeVersions">Also delete all archived versions</label>
-            <div class="form-text mb-0">Removes the live object and every stored version.</div>
-          </div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-danger" type="submit">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-              <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-            </svg>
-            Delete
-          </button>
-        </div>
-      </form>
+<dialog class="ui-dialog" id="deleteObjectModal" aria-labelledby="deleteObjectTitle">
+  <form method="post" id="deleteObjectForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="deleteObjectTitle">Delete object</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-body">
+      <p>Are you sure you want to delete this object?</p>
+      <code id="deleteObjectKey" class="ob-keybox"></code>
+      <div id="deleteObjectVersioningWrap" class="ui-field {% if not versioning_enabled %}d-none{% endif %}">
+        <div class="ob-notice" role="alert">Versioning is enabled. Deleting normally keeps previous versions in the archive.</div>
+        <label class="ui-check" for="deletePurgeVersions">
+          <input type="checkbox" value="1" id="deletePurgeVersions" name="purge_versions" />
+          Also delete all archived versions
+        </label>
+        <div class="ui-hint">Removes the live object and every stored version.</div>
+      </div>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button class="ui-btn ui-btn-danger" type="submit">Delete</button>
+    </div>
+  </form>
+</dialog>
 
-<div class="modal fade" id="presignModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
-            <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
-          </svg>
-          Presigned URL
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+<dialog class="ui-dialog" id="presignModal" aria-labelledby="presignTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="presignTitle">Share link</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="ui-dialog-body">
+    <p class="ui-muted">Generate a temporary signed URL to share access to this object.</p>
+    <div class="ob-form-row">
+      <div class="ui-field">
+        <label class="ui-label" for="presignMethod">HTTP method</label>
+        <select class="ui-select" id="presignMethod">
+          <option value="GET">GET (download)</option>
+          <option value="PUT">PUT (upload)</option>
+          <option value="DELETE">DELETE</option>
+        </select>
       </div>
-      <div class="modal-body">
-        <p class="text-muted small mb-3">Generate a temporary signed URL to share access to this object.</p>
-        <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label fw-medium">HTTP method</label>
-            <select class="form-select" id="presignMethod">
-              <option value="GET">GET (download)</option>
-              <option value="PUT">PUT (upload)</option>
-              <option value="DELETE">DELETE</option>
-            </select>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label fw-medium" for="presignExpiryPreset">Expires</label>
-            <select class="form-select" id="presignExpiryPreset">
-              <option value="900" selected>15 minutes</option>
-              <option value="3600">1 hour</option>
-              <option value="86400">24 hours</option>
-              <option value="604800">7 days</option>
-              <option value="custom">Custom</option>
-            </select>
-            <div class="mt-2 d-none" id="presignCustomExpiry">
-              <label class="form-label small" for="presignTtl">Seconds</label>
-              <input class="form-control" type="number" id="presignTtl" value="900" min="{{ presigned_url_min_expiry }}" max="{{ presigned_url_max_expiry }}" step="1" required aria-describedby="presignTtlHelp presignTtlFeedback" />
-              <div class="invalid-feedback" id="presignTtlFeedback">Enter a whole number from {{ presigned_url_min_expiry }} to {{ presigned_url_max_expiry }}.</div>
-              <div class="form-text" id="presignTtlHelp">Allowed: {{ presigned_url_min_expiry }}–{{ presigned_url_max_expiry }} seconds</div>
-            </div>
-          </div>
-        </div>
-        <div class="alert alert-warning py-2 px-3 small mt-3 mb-0 d-none" id="presignClampNote" role="status"></div>
-        <label class="form-label fw-medium mt-3">Signed URL</label>
-        <div class="input-group">
-          <input id="presignLink" class="form-control font-monospace bg-body-tertiary" type="text" readonly />
-          <button class="btn btn-outline-primary" type="button" id="copyPresignLink">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-              <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
-              <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
-            </svg>
-          </button>
-        </div>
+      <div class="ui-field">
+        <label class="ui-label" for="presignExpiryPreset">Expires</label>
+        <select class="ui-select" id="presignExpiryPreset">
+          <option value="900" selected>15 minutes</option>
+          <option value="3600">1 hour</option>
+          <option value="86400">24 hours</option>
+          <option value="604800">7 days</option>
+          <option value="custom">Custom</option>
+        </select>
       </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-primary" id="generatePresignButton">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-            <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-            <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-          </svg>
-          Generate
-        </button>
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+    </div>
+    <div class="ui-field d-none" id="presignCustomExpiry">
+      <label class="ui-label" for="presignTtl">Seconds</label>
+      <input class="ui-input" type="number" id="presignTtl" value="900" min="{{ presigned_url_min_expiry }}" max="{{ presigned_url_max_expiry }}" step="1" required aria-describedby="presignTtlHelp presignTtlFeedback" />
+      <div class="ui-error ob-when-invalid" id="presignTtlFeedback">Enter a whole number from {{ presigned_url_min_expiry }} to {{ presigned_url_max_expiry }}.</div>
+      <div class="ui-hint" id="presignTtlHelp">Allowed: {{ presigned_url_min_expiry }}–{{ presigned_url_max_expiry }} seconds</div>
+    </div>
+    <div class="ob-notice d-none" id="presignClampNote" role="status"></div>
+    <div class="ui-field">
+      <label class="ui-label" for="presignLink">Signed URL</label>
+      <div class="ob-copyfield">
+        <input id="presignLink" class="ui-input ui-mono" type="text" readonly />
+        <button class="ui-btn" type="button" id="copyPresignLink">Copy</button>
       </div>
     </div>
   </div>
-</div>
+  <div class="ui-dialog-foot">
+    <button type="button" class="ui-btn" data-ui-close>Close</button>
+    <button type="button" class="ui-btn ui-btn-primary" id="generatePresignButton">Generate</button>
+  </div>
+</dialog>
 
 <div class="modal fade" id="suspendVersioningModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">

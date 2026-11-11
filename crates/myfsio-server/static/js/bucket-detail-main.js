@@ -18,62 +18,20 @@
 
   setupJsonAutoIndent(document.getElementById('policyDocument'));
 
-  const getFileTypeIcon = (key) => {
-    const ext = (key.split('.').pop() || '').toLowerCase();
-    const iconMap = {
-      image: ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'tif'],
-      document: ['pdf', 'doc', 'docx', 'txt', 'rtf', 'odt', 'pages'],
-      spreadsheet: ['xls', 'xlsx', 'csv', 'ods', 'numbers'],
-      archive: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'],
-      code: ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'cpp', 'c', 'h', 'hpp', 'cs', 'go', 'rs', 'rb', 'php', 'html', 'htm', 'css', 'scss', 'sass', 'less', 'json', 'xml', 'yaml', 'yml', 'md', 'sh', 'bat', 'ps1', 'sql'],
-      audio: ['mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'wma', 'aiff'],
-      video: ['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'm4v', 'mpeg', 'mpg'],
-    };
-    const icons = {
-      image: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-success flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
-        <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
-      </svg>`,
-      document: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-danger flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-        <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 8h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5z"/>
-      </svg>`,
-      spreadsheet: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-success flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2zM9.5 3A1.5 1.5 0 0 0 11 4.5h2V9H3V2a1 1 0 0 1 1-1h5.5v2zM3 12v-2h2v2H3zm0 1h2v2H4a1 1 0 0 1-1-1v-1zm3 2v-2h3v2H6zm4 0v-2h3v1a1 1 0 0 1-1 1h-2zm3-3h-3v-2h3v2zm-7 0v-2h3v2H6z"/>
-      </svg>`,
-      archive: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-secondary flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M6.5 7.5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v.938l.4 1.599a1 1 0 0 1-.416 1.074l-.93.62a1 1 0 0 1-1.109 0l-.93-.62a1 1 0 0 1-.415-1.074l.4-1.599V7.5z"/>
-        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1h-2v1h-1v1h1v1h-1v1h1v1H6V5H5V4h1V3H5V2h1V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-      </svg>`,
-      code: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-info flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-        <path d="M8.646 6.646a.5.5 0 0 1 .708 0l2 2a.5.5 0 0 1 0 .708l-2 2a.5.5 0 0 1-.708-.708L10.293 9 8.646 7.354a.5.5 0 0 1 0-.708zm-1.292 0a.5.5 0 0 0-.708 0l-2 2a.5.5 0 0 0 0 .708l2 2a.5.5 0 0 0 .708-.708L5.707 9l1.647-1.646a.5.5 0 0 0 0-.708z"/>
-      </svg>`,
-      audio: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M6 13c0 1.105-1.12 2-2.5 2S1 14.105 1 13c0-1.104 1.12-2 2.5-2s2.5.896 2.5 2zm9-2c0 1.105-1.12 2-2.5 2s-2.5-.895-2.5-2 1.12-2 2.5-2 2.5.895 2.5 2z"/>
-        <path fill-rule="evenodd" d="M14 11V2h1v9h-1zM6 3v10H5V3h1z"/>
-        <path d="M5 2.905a1 1 0 0 1 .9-.995l8-.8a1 1 0 0 1 1.1.995V3L5 4V2.905z"/>
-      </svg>`,
-      video: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-danger flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M0 12V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2zm6.79-6.907A.5.5 0 0 0 6 5.5v5a.5.5 0 0 0 .79.407l3.5-2.5a.5.5 0 0 0 0-.814l-3.5-2.5z"/>
-      </svg>`,
-      default: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-muted flex-shrink-0" viewBox="0 0 16 16">
-        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-      </svg>`,
-    };
-    for (const [type, extensions] of Object.entries(iconMap)) {
-      if (extensions.includes(ext)) {
-        return icons[type];
-      }
-    }
-    return icons.default;
+  const fileTypeBadge = (key) => {
+    const name = key.split('/').pop() || '';
+    const dot = name.lastIndexOf('.');
+    const ext = dot > 0 ? name.slice(dot + 1) : '';
+    const label = ext && ext.length <= 4 && /^[a-z0-9]+$/i.test(ext) ? ext.toUpperCase() : 'FILE';
+    return `<span class="ui-fileicon" aria-hidden="true">${escapeHtml(label)}</span>`;
   };
 
   const selectAllCheckbox = document.querySelector('[data-select-all]');
   const bulkDeleteButton = document.querySelector('[data-bulk-delete-trigger]');
   const bulkDeleteLabel = bulkDeleteButton?.querySelector('[data-bulk-delete-label]');
   const bulkDeleteModalEl = document.getElementById('bulkDeleteModal');
-  const bulkDeleteModal = bulkDeleteModalEl ? new bootstrap.Modal(bulkDeleteModalEl) : null;
+  const dialogHandle = (el) => (el ? { show: () => window.UI.dialog.open(el), hide: () => window.UI.dialog.close(el) } : null);
+  const bulkDeleteModal = dialogHandle(bulkDeleteModalEl);
   const bulkDeleteList = document.getElementById('bulkDeleteList');
   const bulkDeleteCount = document.getElementById('bulkDeleteCount');
   const bulkDeleteStatus = document.getElementById('bulkDeleteStatus');
@@ -103,7 +61,7 @@
   const downloadButton = document.getElementById('downloadButton');
   const presignButton = document.getElementById('presignButton');
   const presignModalEl = document.getElementById('presignModal');
-  const presignModal = presignModalEl ? new bootstrap.Modal(presignModalEl) : null;
+  const presignModal = dialogHandle(presignModalEl);
   const presignMethod = document.getElementById('presignMethod');
   const presignExpiryPreset = document.getElementById('presignExpiryPreset');
   const presignCustomExpiry = document.getElementById('presignCustomExpiry');
@@ -240,56 +198,24 @@
     const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || obj.lastModified || obj.last_modified || '';
 
     tr.innerHTML = `
-      <td class="text-center align-middle">
-        <input class="form-check-input" type="checkbox" data-object-select aria-label="Select ${escapeHtml(obj.key)}" />
+      <td class="ob-col-check">
+        <input type="checkbox" data-object-select aria-label="Select ${escapeHtml(obj.key)}" />
       </td>
-      <td class="object-key text-break" title="${escapeHtml(obj.key)}">
-        <div class="fw-medium d-flex align-items-center gap-2">
-          ${getFileTypeIcon(obj.key)}
-          <span>${escapeHtml(keyToShow)}</span>
+      <td class="object-key" title="${escapeHtml(obj.key)}">
+        <div class="ui-name">
+          ${fileTypeBadge(obj.key)}
+          <span class="ob-name">
+            <span>${escapeHtml(keyToShow)}</span>
+            <span class="ob-name-sub ui-show-m">${escapeHtml(lastModDisplay)}</span>
+          </span>
         </div>
-        <div class="text-muted small ms-4 ps-2">Modified ${escapeHtml(lastModDisplay)}</div>
       </td>
-      <td class="text-end text-nowrap">
-        <span class="text-muted small">${formatBytes(obj.size)}</span>
-      </td>
-      <td class="text-end">
-        <div class="btn-group btn-group-sm" role="group">
-          <a
-            class="btn btn-outline-primary btn-icon"
-            href="${escapeHtml(obj.downloadUrl || obj.download_url)}"
-            target="_blank"
-            title="Download"
-            aria-label="Download"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="#0d6efd" class="bi bi-download" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z" />
-              <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z" />
-            </svg>
-          </a>
-          <div class="dropdown d-inline-block">
-            <button class="btn btn-outline-secondary btn-icon dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="true" data-bs-config='{"popperConfig":{"strategy":"fixed"}}' aria-expanded="false" title="More actions">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                <path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
-              </svg>
-            </button>
-            <ul class="dropdown-menu dropdown-menu-end">
-              <li><button class="dropdown-item" type="button" data-copy-object>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/></svg>
-                Copy
-              </button></li>
-              <li><button class="dropdown-item" type="button" data-move-object>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/></svg>
-                Move
-              </button></li>
-              <li><hr class="dropdown-divider"></li>
-              <li><button class="dropdown-item text-danger" type="button" data-delete-object>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
-                Delete
-              </button></li>
-            </ul>
-          </div>
-        </div>
+      <td class="is-num ob-col-size">${formatBytes(obj.size)}</td>
+      <td class="ui-muted ob-col-date ui-hide-m">${escapeHtml(lastModDisplay)}</td>
+      <td class="ob-col-actions">
+        <button class="icon-btn" type="button" data-row-menu aria-haspopup="menu" aria-label="Actions for ${escapeHtml(obj.key)}">
+          <svg class="ic" aria-hidden="true"><use href="#i-more"/></svg>
+        </button>
       </td>
     `;
 
@@ -300,7 +226,7 @@
     if (!objectsTableBody) return;
     objectsTableBody.innerHTML = `
       <tr>
-        <td colspan="4" class="py-5">
+        <td colspan="5" class="py-5">
           <div class="empty-state">
             <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
               <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
@@ -327,7 +253,7 @@
     if (!objectsTableBody) return;
     objectsTableBody.innerHTML = `
       <tr>
-        <td colspan="4" class="py-5">
+        <td colspan="5" class="py-5">
           <div class="text-center text-danger">
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="mb-2" viewBox="0 0 16 16">
               <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
@@ -439,12 +365,12 @@
     if (!topSpacer) {
       topSpacer = document.createElement('tr');
       topSpacer.id = 'virtual-top-spacer';
-      topSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
+      topSpacer.innerHTML = '<td colspan="5" style="padding: 0; border: none;"></td>';
     }
     if (!bottomSpacer) {
       bottomSpacer = document.createElement('tr');
       bottomSpacer.id = 'virtual-bottom-spacer';
-      bottomSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
+      bottomSpacer.innerHTML = '<td colspan="5" style="padding: 0; border: none;"></td>';
     }
   };
 
@@ -617,7 +543,7 @@
           : `This folder contains no objects${hasMoreObjects ? ' yet. Loading more...' : '.'}`;
         objectsTableBody.innerHTML = `
           <tr>
-            <td colspan="4" class="py-5">
+            <td colspan="5" class="py-5">
               <div class="empty-state">
                 <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
                   <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
@@ -950,32 +876,6 @@
       if (row.dataset.handlersAttached) return;
       row.dataset.handlersAttached = 'true';
 
-      const deleteBtn = row.querySelector('[data-delete-object]');
-      deleteBtn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const deleteModalEl = document.getElementById('deleteObjectModal');
-        const deleteModal = deleteModalEl ? bootstrap.Modal.getOrCreateInstance(deleteModalEl) : null;
-        const deleteObjectForm = document.getElementById('deleteObjectForm');
-        const deleteObjectKey = document.getElementById('deleteObjectKey');
-        if (deleteModal && deleteObjectForm) {
-          deleteObjectForm.setAttribute('action', row.dataset.deleteEndpoint);
-          if (deleteObjectKey) deleteObjectKey.textContent = row.dataset.key;
-          deleteModal.show();
-        }
-      });
-
-      const copyBtn = row.querySelector('[data-copy-object]');
-      copyBtn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        window.openCopyMoveModal('copy', row.dataset.key);
-      });
-
-      const moveBtn = row.querySelector('[data-move-object]');
-      moveBtn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        window.openCopyMoveModal('move', row.dataset.key);
-      });
-
       const selectCheckbox = row.querySelector('[data-object-select]');
       selectCheckbox?.addEventListener('click', (event) => event.stopPropagation());
       selectCheckbox?.addEventListener('change', () => {
@@ -984,11 +884,11 @@
 
       if (selectedRows.has(row.dataset.key)) {
         selectCheckbox.checked = true;
-        row.classList.add('table-active');
+        row.classList.add('is-selected');
       }
 
       if (activeRow && activeRow.dataset.key === row.dataset.key) {
-        row.classList.add('table-active');
+        row.classList.add('is-selected');
         activeRow = row;
       }
     });
@@ -1049,28 +949,6 @@
 
   if (scrollContainer) {
     scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
-
-    scrollContainer.addEventListener('show.bs.dropdown', (event) => {
-      const toggle = event.target;
-      const wrapper = toggle.closest ? toggle.closest('.dropdown') : null;
-      const menu = wrapper ? wrapper.querySelector('.dropdown-menu') : null;
-      if (!menu) return;
-      toggle._floatingMenu = menu;
-      toggle._floatingMenuHome = wrapper;
-      document.body.appendChild(menu);
-    });
-
-    const restoreFloatingMenu = (event) => {
-      const toggle = event.target;
-      const menu = toggle._floatingMenu;
-      const home = toggle._floatingMenuHome;
-      if (menu && home) {
-        home.appendChild(menu);
-        toggle._floatingMenu = null;
-        toggle._floatingMenuHome = null;
-      }
-    };
-    scrollContainer.addEventListener('hidden.bs.dropdown', restoreFloatingMenu);
   }
 
   const isSentinelVisible = () => {
@@ -1132,13 +1010,81 @@
       const row = e.target.closest('[data-object-row]');
       if (!row) return;
 
-      if (e.target.closest('[data-delete-object]') || e.target.closest('[data-object-select]') || e.target.closest('a') || e.target.closest('.dropdown')) {
+      const menuButton = e.target.closest('[data-row-menu]');
+      if (menuButton) {
+        rowMenuTarget = row;
+        window.UI.menu.open('#objectRowMenu', menuButton);
+        return;
+      }
+
+      if (e.target.closest('[data-object-select]') || e.target.closest('a')) {
         return;
       }
 
       selectRow(row);
     });
   }
+
+  let rowMenuTarget = null;
+
+  const openDeleteObjectDialog = (row) => {
+    const deleteModalEl = document.getElementById('deleteObjectModal');
+    const deleteModal = dialogHandle(deleteModalEl);
+    const deleteObjectForm = document.getElementById('deleteObjectForm');
+    const deleteObjectKey = document.getElementById('deleteObjectKey');
+    if (deleteModal && deleteObjectForm) {
+      deleteObjectForm.setAttribute('action', row.dataset.deleteEndpoint);
+      if (deleteObjectKey) deleteObjectKey.textContent = row.dataset.key;
+      deleteModal.show();
+    }
+  };
+
+  const runObjectAction = (action, row) => {
+    if (!row || !row.dataset.key) return;
+    if (action === 'details') {
+      selectRow(row);
+    } else if (action === 'download') {
+      if (row.dataset.downloadUrl) window.open(row.dataset.downloadUrl, '_blank', 'noopener');
+    } else if (action === 'share') {
+      selectRow(row);
+      presignButton?.click();
+    } else if (action === 'copy' || action === 'move') {
+      window.openCopyMoveModal(action, row.dataset.key);
+    } else if (action === 'delete') {
+      openDeleteObjectDialog(row);
+    }
+  };
+
+  document.getElementById('objectRowMenu')?.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-row-action]');
+    if (!item) return;
+    runObjectAction(item.dataset.rowAction, rowMenuTarget);
+  });
+
+  const closeObjectDrawer = () => {
+    document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('is-selected'));
+    if (previewPanel) previewPanel.classList.add('d-none');
+    if (previewEmpty) previewEmpty.classList.remove('d-none');
+    activeRow = null;
+  };
+
+  document.getElementById('objectDrawerClose')?.addEventListener('click', closeObjectDrawer);
+
+  document.querySelectorAll('[data-drawer-action]').forEach((button) => {
+    button.addEventListener('click', () => runObjectAction(button.dataset.drawerAction, activeRow));
+  });
+
+  document.getElementById('bulk-selection-clear')?.addEventListener('click', () => {
+    selectedRows.clear();
+    document.querySelectorAll('[data-object-select], [data-folder-select]').forEach((checkbox) => {
+      checkbox.checked = false;
+    });
+    updateBulkDeleteState();
+  });
+
+  document.getElementById('filter-warning-dismiss')?.addEventListener('click', () => {
+    document.getElementById('filter-warning')?.classList.add('d-none');
+  });
 
   const hasFolders = () => streamFolders.length > 0 || allObjects.some(obj => obj.key.includes('/'));
 
@@ -1176,69 +1122,37 @@
 
   const renderBreadcrumb = (prefix) => {
     if (!folderBreadcrumb) return;
-
-    if (!prefix && !hasFolders()) {
-      folderBreadcrumb.classList.add('d-none');
-      return;
-    }
-
-    folderBreadcrumb.classList.remove('d-none');
     const ol = folderBreadcrumb.querySelector('ol');
+    if (!ol) return;
     ol.innerHTML = '';
+    const rootLabel = objectsContainer?.dataset.bucket || 'Root';
+    const parts = (prefix || '').split('/').filter(Boolean);
 
-    const rootLi = document.createElement('li');
-    rootLi.className = 'breadcrumb-item';
-    if (!prefix) {
-      rootLi.classList.add('active');
-      rootLi.setAttribute('aria-current', 'page');
-      rootLi.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-          <path d="M8.354 1.146a.5.5 0 0 0-.708 0l-6 6A.5.5 0 0 0 1.5 7.5v7a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5v-4h2v4a.5.5 0 0 0 .5.5H14a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.146-.354L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293L8.354 1.146zM2.5 14V7.707l5.5-5.5 5.5 5.5V14H10v-4a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v4H2.5z"/>
-        </svg>
-        Root
-      `;
-    } else {
-      rootLi.innerHTML = `
-        <a href="${escapeHtml(folderUrl(''))}" data-folder-nav="" class="text-decoration-none">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-            <path d="M8.354 1.146a.5.5 0 0 0-.708 0l-6 6A.5.5 0 0 0 1.5 7.5v7a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5v-4h2v4a.5.5 0 0 0 .5.5H14a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.146-.354L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293L8.354 1.146zM2.5 14V7.707l5.5-5.5 5.5 5.5V14H10v-4a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v4H2.5z"/>
-          </svg>
-          Root
-        </a>
-      `;
-    }
-    ol.appendChild(rootLi);
+    const appendCrumb = (label, target, isCurrent) => {
+      const li = document.createElement('li');
+      if (isCurrent) {
+        li.setAttribute('aria-current', 'page');
+        li.textContent = label;
+      } else {
+        const a = document.createElement('a');
+        a.href = folderUrl(target);
+        a.dataset.folderNav = target;
+        a.textContent = label;
+        a.addEventListener('click', (e) => {
+          if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+          e.preventDefault();
+          navigateToFolder(target);
+        });
+        li.appendChild(a);
+      }
+      ol.appendChild(li);
+    };
 
-    if (prefix) {
-      const parts = prefix.split('/').filter(Boolean);
-      let accumulated = '';
-      parts.forEach((part, index) => {
-        accumulated += part + '/';
-        const li = document.createElement('li');
-        li.className = 'breadcrumb-item';
-
-        if (index === parts.length - 1) {
-          li.classList.add('active');
-          li.setAttribute('aria-current', 'page');
-          li.textContent = part;
-        } else {
-          const a = document.createElement('a');
-          a.href = folderUrl(accumulated);
-          a.className = 'text-decoration-none';
-          a.dataset.folderNav = accumulated;
-          a.textContent = part;
-          li.appendChild(a);
-        }
-        ol.appendChild(li);
-      });
-    }
-
-    ol.querySelectorAll('[data-folder-nav]').forEach(link => {
-      link.addEventListener('click', (e) => {
-        if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
-        e.preventDefault();
-        navigateToFolder(link.dataset.folderNav);
-      });
+    appendCrumb(rootLabel, '', parts.length === 0);
+    let accumulated = '';
+    parts.forEach((part, index) => {
+      accumulated += part + '/';
+      appendCrumb(part, accumulated, index === parts.length - 1);
     });
   };
 
@@ -1250,7 +1164,7 @@
       countLine = '';
     } else {
       const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
-      countLine = `<div class="text-muted small ms-4 ps-2">${countDisplay} object${objectCount !== 1 ? 's' : ''}</div>`;
+      countLine = `<span class="ob-name-sub">${countDisplay} object${objectCount !== 1 ? 's' : ''}</span>`;
     }
 
     const tr = document.createElement('tr');
@@ -1259,26 +1173,23 @@
     tr.style.cursor = 'pointer';
 
     tr.innerHTML = `
-      <td class="text-center align-middle" onclick="event.stopPropagation();">
-        <input class="form-check-input" type="checkbox" data-folder-select="${escapeHtml(folderPath)}" aria-label="Select folder" />
+      <td class="ob-col-check" onclick="event.stopPropagation();">
+        <input type="checkbox" data-folder-select="${escapeHtml(folderPath)}" aria-label="Select folder ${escapeHtml(folderName)}" />
       </td>
-      <td class="object-key text-break">
-        <div class="fw-medium d-flex align-items-center gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning flex-shrink-0" viewBox="0 0 16 16">
-            <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
-          </svg>
-          <a href="${escapeHtml(folderUrl(folderPath))}" class="text-decoration-none text-body" data-folder-link>${escapeHtml(folderName)}/</a>
+      <td class="object-key">
+        <div class="ui-name">
+          <span class="ui-fileicon is-accent" aria-hidden="true"><svg class="ic"><use href="#i-folder"/></svg></span>
+          <span class="ob-name">
+            <a href="${escapeHtml(folderUrl(folderPath))}" data-folder-link>${escapeHtml(folderName)}/</a>
+            ${countLine}
+          </span>
         </div>
-        ${countLine}
       </td>
-      <td class="text-end text-nowrap">
-        <span class="text-muted small">—</span>
-      </td>
-      <td class="text-end">
-        <button type="button" class="btn btn-outline-primary btn-sm" title="Open folder">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-            <path fill-rule="evenodd" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
-          </svg>
+      <td class="is-num ob-col-size ui-muted">—</td>
+      <td class="ui-muted ob-col-date ui-hide-m">Folder</td>
+      <td class="ob-col-actions">
+        <button type="button" class="icon-btn" aria-label="Open folder ${escapeHtml(folderName)}">
+          <svg class="ic" aria-hidden="true"><use href="#i-chevron"/></svg>
         </button>
       </td>
     `;
@@ -1359,7 +1270,7 @@
         : 'This folder contains no objects.';
       const emptyRow = document.createElement('tr');
       emptyRow.innerHTML = `
-        <td colspan="4" class="py-5">
+        <td colspan="5" class="py-5">
           <div class="empty-state">
             <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
               <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
@@ -1547,6 +1458,7 @@
   });
 
   const bulkActionsWrapper = document.getElementById('bulk-actions-wrapper');
+  const bulkSelectionCount = document.getElementById('bulk-selection-count');
   const bulkDownloadButton = document.querySelector('[data-bulk-download-trigger]');
   const updateBulkDownloadState = () => {
     if (!bulkDownloadButton) return;
@@ -1562,6 +1474,14 @@
       }
       if (bulkActionsWrapper) {
         bulkActionsWrapper.classList.toggle('d-none', !shouldShow);
+      }
+      if (bulkSelectionCount) {
+        let selectedBytes = 0;
+        selectedRows.forEach((entry) => {
+          const size = Number(entry?.dataset ? entry.dataset.size : entry?.size);
+          if (Number.isFinite(size)) selectedBytes += size;
+        });
+        bulkSelectionCount.textContent = `${selectedCount} selected` + (selectedBytes > 0 ? ` · ${formatBytes(selectedBytes)}` : '');
       }
     }
     if (bulkDeleteConfirm) {
@@ -1605,7 +1525,7 @@
     }
     if (!keys.length) {
       const empty = document.createElement('li');
-      empty.className = 'list-group-item py-2 small text-muted';
+      empty.className = 'ui-muted';
       empty.textContent = 'No objects selected.';
       bulkDeleteList.appendChild(empty);
       if (bulkDeleteStatus) {
@@ -1616,7 +1536,7 @@
     const preview = keys.slice(0, 6);
     preview.forEach((key) => {
       const item = document.createElement('li');
-      item.className = 'list-group-item py-1 small text-break';
+      item.className = 'ui-mono';
       item.textContent = key;
       bulkDeleteList.appendChild(item);
     });
@@ -2257,7 +2177,7 @@
 
   renderMetadata(null);
   const deleteModalEl = document.getElementById('deleteObjectModal');
-  const deleteModal = deleteModalEl ? new bootstrap.Modal(deleteModalEl) : null;
+  const deleteModal = dialogHandle(deleteModalEl);
   const deleteObjectForm = document.getElementById('deleteObjectForm');
   const deleteObjectKey = document.getElementById('deleteObjectKey');
 
@@ -2386,8 +2306,8 @@
   }
 
   async function selectRow(row) {
-    document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('table-active'));
-    row.classList.add('table-active');
+    document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('is-selected'));
+    row.classList.add('is-selected');
     previewEmpty.classList.add('d-none');
     previewPanel.classList.remove('d-none');
     activeRow = row;
@@ -2398,6 +2318,8 @@
     previewSize.textContent = formatBytes(Number(row.dataset.size));
     previewModified.textContent = row.dataset.lastModifiedDisplay || row.dataset.lastModifiedIso || row.dataset.lastModified;
     previewEtag.textContent = row.dataset.etag;
+    const previewS3Uri = document.getElementById('preview-s3-uri');
+    if (previewS3Uri) previewS3Uri.textContent = `s3://${objectsContainer?.dataset.bucket || ''}/${row.dataset.key}`;
     downloadButton.href = row.dataset.downloadUrl;
     downloadButton.classList.remove('disabled');
     if (presignButton) {
@@ -2761,7 +2683,7 @@
           if (deleteEndpoint) {
             selectRow(ctxTargetRow);
             const deleteModalEl = document.getElementById('deleteObjectModal');
-            const deleteModal = deleteModalEl ? bootstrap.Modal.getOrCreateInstance(deleteModalEl) : null;
+            const deleteModal = dialogHandle(deleteModalEl);
             const deleteObjectForm = document.getElementById('deleteObjectForm');
             const deleteObjectKey = document.getElementById('deleteObjectKey');
             if (deleteModal && deleteObjectForm) {
@@ -4633,19 +4555,6 @@
         btn.disabled = false;
       }
     });
-  });
-
-  document.getElementById('objects-table')?.addEventListener('show.bs.dropdown', function (e) {
-    const dropdown = e.target.closest('.dropdown');
-    const menu = dropdown?.querySelector('.dropdown-menu');
-    const btn = e.target;
-    if (!menu || !btn) return;
-    const btnRect = btn.getBoundingClientRect();
-    menu.style.position = 'fixed';
-    menu.style.top = (btnRect.bottom + 4) + 'px';
-    menu.style.left = 'auto';
-    menu.style.right = (window.innerWidth - btnRect.right) + 'px';
-    menu.style.transform = 'none';
   });
 
   const previewTagsPanel = document.getElementById('preview-tags');

@@ -346,11 +346,11 @@ impl BucketAccess {
         }
     }
 
-    fn badge(&self) -> &'static str {
+    fn tone(&self) -> &'static str {
         match self {
-            BucketAccess::Private => "bg-secondary-subtle text-secondary-emphasis",
-            BucketAccess::PublicRead => "bg-warning-subtle text-warning-emphasis",
-            BucketAccess::Custom => "bg-info-subtle text-info-emphasis",
+            BucketAccess::Private => "neutral",
+            BucketAccess::PublicRead => "warn",
+            BucketAccess::Custom => "accent",
         }
     }
 
@@ -425,12 +425,45 @@ pub async fn buckets_overview(
                 let total_bytes = stats.as_ref().map(|stats| stats.total_bytes()).unwrap_or(0);
                 let objects = stats.as_ref().map(|stats| stats.objects).unwrap_or(0);
                 let version_count = stats.as_ref().map(|stats| stats.version_count).unwrap_or(0);
-                let policy = state
-                    .storage
-                    .get_bucket_config(&bucket.name)
-                    .await
-                    .ok()
-                    .and_then(|config| config.policy);
+                let config = state.storage.get_bucket_config(&bucket.name).await.ok();
+                let policy = config.as_ref().and_then(|config| config.policy.clone());
+                let mut features: Vec<&'static str> = Vec::new();
+                let mut quota = Value::Null;
+                if let Some(config) = config.as_ref() {
+                    if config.versioning_enabled {
+                        features.push("Versioned");
+                    }
+                    if config.encryption.is_some() {
+                        features.push("Encrypted");
+                    }
+                    if config.website.is_some() {
+                        features.push("Website");
+                    }
+                    if config.replication.is_some() {
+                        features.push("Replicated");
+                    }
+                    if config.lifecycle.is_some() {
+                        features.push("Lifecycle");
+                    }
+                    if config.object_lock.is_some() {
+                        features.push("Object lock");
+                    }
+                    if let Some(max_bytes) = config
+                        .quota
+                        .as_ref()
+                        .and_then(|quota| quota.max_bytes)
+                        .filter(|max_bytes| *max_bytes > 0)
+                    {
+                        let percent = ((total_bytes as f64 / max_bytes as f64) * 100.0)
+                            .round()
+                            .min(100.0) as u64;
+                        quota = json!({
+                            "human_limit": human_size(max_bytes),
+                            "percent": percent,
+                            "tone": if percent >= 95 { "bad" } else if percent >= 80 { "warn" } else { "ok" },
+                        });
+                    }
+                }
                 let access = bucket_access_descriptor(policy.as_ref(), &bucket.name);
                 Some((
                     index,
@@ -441,11 +474,14 @@ pub async fn buckets_overview(
                         },
                         "summary": {
                             "human_size": human_size(total_bytes),
+                            "bytes": total_bytes,
                             "objects": objects,
                             "version_count": version_count,
                         },
+                        "features": features,
+                        "quota": quota,
                         "detail_url": format!("/ui/buckets/{}", bucket.name),
-                        "access_badge": access.badge(),
+                        "access_tone": access.tone(),
                         "access_label": access.label(),
                         "access_kind": access.kind(),
                     }),
@@ -462,6 +498,35 @@ pub async fn buckets_overview(
         .map(|(_, item)| item)
         .collect::<Vec<Value>>();
 
+    let sum_of = |pointer: &str| -> u64 {
+        items
+            .iter()
+            .filter_map(|item| item.pointer(pointer).and_then(Value::as_u64))
+            .sum()
+    };
+    let public_count = items
+        .iter()
+        .filter(|item| item["access_kind"] == "public")
+        .count();
+    let versioned_count = items
+        .iter()
+        .filter(|item| {
+            item["features"]
+                .as_array()
+                .is_some_and(|features| features.iter().any(|feature| feature == "Versioned"))
+        })
+        .count();
+    ctx.insert(
+        "usage",
+        &json!({
+            "human_size": human_size(sum_of("/summary/bytes")),
+            "objects": sum_of("/summary/objects"),
+            "versions": sum_of("/summary/version_count"),
+            "buckets": items.len(),
+            "public": public_count,
+            "versioned": versioned_count,
+        }),
+    );
     ctx.insert("buckets", &items);
     render(&state, "buckets.html", &ctx)
 }

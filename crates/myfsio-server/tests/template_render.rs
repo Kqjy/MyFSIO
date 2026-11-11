@@ -82,10 +82,16 @@ fn render_buckets() {
             "meta": {"name": "b1", "creation_date": "2024-01-01T00:00:00Z"},
             "summary": {"human_size": "0 B", "objects": 0, "version_count": 0},
             "detail_url": "/ui/buckets/b1",
-            "access_badge": "bg-secondary",
+            "access_tone": "neutral",
             "access_label": "Private",
-            "access_kind": "private"
+            "access_kind": "private",
+            "features": ["Versioned"],
+            "quota": {"human_limit": "1.0 GiB", "percent": 12, "tone": "ok"}
         }]),
+    );
+    ctx.insert(
+        "usage",
+        &json!({"human_size": "0 B", "objects": 0, "versions": 0, "buckets": 1, "public": 0, "versioned": 1}),
     );
     render_or_panic("buckets.html", &ctx);
 }
