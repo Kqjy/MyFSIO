@@ -215,7 +215,7 @@ fn render_metrics() {
     assert!(rendered.contains("id=\"storageHistoryChart\""));
     assert!(rendered.contains("id=\"storageBucketChart\""));
     assert!(rendered.contains("title=\"Last hour\""));
-    assert!(rendered.contains("var historySparklines = true;"));
+    assert!(rendered.contains("data-history-enabled=\"true\""));
 }
 
 #[test]

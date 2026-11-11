@@ -31,7 +31,7 @@
   function renderTrend(history, enabled) {
     var wrap = document.getElementById('diskPressureTrendWrap');
     if (wrap) wrap.classList.toggle('d-none', !enabled);
-    if (!enabled || typeof Chart === 'undefined') return;
+    if (!enabled || typeof SvgChart === 'undefined') return;
     var canvas = document.getElementById('diskPressureTrend');
     if (!canvas) return;
     var buckets = Array.isArray(history) ? history : [];
@@ -47,7 +47,7 @@
       trendChart.update('none');
       return;
     }
-    trendChart = new Chart(canvas, {
+    trendChart = new SvgChart(canvas, {
       type: 'bar',
       data: {
         labels: labels,
