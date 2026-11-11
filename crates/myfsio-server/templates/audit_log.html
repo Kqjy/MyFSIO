@@ -9,7 +9,7 @@
       <h1 class="h3 mb-1">Audit log</h1>
       <p class="text-muted mb-0 small">Append-only log of cross-site relayed admin actions. Each entry links origin and target by <code>correlation_id</code>.</p>
     </div>
-    <a href="/ui/audit-log" class="btn btn-outline-secondary btn-sm">Refresh</a>
+    <a href="{{ url_for(endpoint="ui.audit_log") }}" class="btn btn-outline-secondary btn-sm">Refresh</a>
   </div>
 
   {% if not audit_enabled %}
@@ -18,10 +18,25 @@
   </div>
   {% endif %}
 
+  <div class="audit-filters" id="auditFilters" role="search">
+    <input class="form-control form-control-sm" type="search" id="auditSearch" placeholder="Filter by site, admin, action or correlation ID" aria-label="Filter audit entries" autocomplete="off" spellcheck="false">
+    <select class="form-select form-select-sm" id="auditDirection" aria-label="Direction">
+      <option value="">Any direction</option>
+      <option value="outbound">Outbound</option>
+      <option value="inbound">Inbound</option>
+    </select>
+    <select class="form-select form-select-sm" id="auditResult" aria-label="Result">
+      <option value="">Any result</option>
+      <option value="ok">Succeeded</option>
+      <option value="failed">Failed</option>
+    </select>
+    <span class="audit-count text-muted small" id="auditCount" aria-live="polite">{{ entries | length }} entries</span>
+  </div>
+
   <div class="card">
     <div class="card-body p-0">
       <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0">
+        <table class="table table-sm align-middle mb-0 audit-table" id="auditTable">
           <thead class="table-light">
             <tr>
               <th class="ps-3">When</th>
@@ -38,7 +53,7 @@
               <tr><td colspan="7" class="text-center text-muted py-4">No entries.</td></tr>
             {% else %}
               {% for e in entries %}
-                <tr>
+                <tr data-audit-row data-direction="{% if e.target == "outbound" %}outbound{% else %}inbound{% endif %}" data-result="{% if e.result == 'ok' %}ok{% else %}failed{% endif %}">
                   <td class="ps-3 small text-muted">{{ e.ts | format_datetime }}</td>
                   <td>{% if e.origin_site_id %}<code class="small">{{ e.origin_site_id }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</td>
                   <td class="small">{{ e.admin_user_id | default(value="") }}</td>
@@ -54,6 +69,7 @@
                   <td class="pe-3 small text-muted"><code>{{ e.correlation_id }}</code></td>
                 </tr>
               {% endfor %}
+              <tr id="auditNoMatch" hidden><td colspan="7" class="text-center text-muted py-4">No entries match these filters.</td></tr>
             {% endif %}
           </tbody>
         </table>
@@ -61,4 +77,8 @@
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ url_for(endpoint="static", filename="js/audit-log.js") }}"></script>
 {% endblock %}
