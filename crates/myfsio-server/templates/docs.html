@@ -1,71 +1,73 @@
 {% extends "base.html" %}
 {% block title %}Documentation{% endblock %}
 {% block content %}
-<section class="docs-hero p-4 p-md-5 rounded-4 mb-4">
-  <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
-    <div>
-      <p class="text-uppercase fw-semibold small text-white-50 mb-2">Documentation</p>
-      <h1 class="display-6 fw-semibold mb-2">Your guide to MyFSIO</h1>
-      <p class="lead mb-0 text-light">Follow these steps to install, authenticate, master the console, and automate everything through the API.</p>
-    </div>
-    <div class="docs-callout text-light">
-      <div class="small text-uppercase opacity-75">API base URL</div>
-      <code class="fs-6 text-wrap">{{ api_base }}</code>
-    </div>
+<div class="docs-head">
+  <div>
+    <h1 class="h3 mb-1">Documentation</h1>
+    <p class="text-muted mb-0">Install, authenticate, use the console, and automate everything through the API.</p>
   </div>
-</section>
-<div class="row g-4">
-  <div class="col-12 d-xl-none">
-    <div class="card shadow-sm docs-sidebar-mobile mb-0">
-      <div class="card-body py-3">
-        <div class="d-flex align-items-center justify-content-between mb-2">
-          <h3 class="h6 text-uppercase text-muted mb-0">On this page</h3>
-          <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#mobileDocsToc" aria-expanded="false" aria-controls="mobileDocsToc">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-              <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
-            </svg>
-          </button>
-        </div>
-        <div class="collapse" id="mobileDocsToc">
-          <ul class="list-unstyled docs-toc mb-0 small">
-            <li><a href="#setup">Set up &amp; run</a></li>
-            <li><a href="#background">Running in background</a></li>
-            <li><a href="#auth">Authentication &amp; IAM</a></li>
-            <li><a href="#console">Console tour</a></li>
-            <li><a href="#automation">Automation / CLI</a></li>
-            <li><a href="#api">REST endpoints</a></li>
-            <li><a href="#examples">API Examples</a></li>
-            <li><a href="#replication">Site Replication &amp; Sync</a></li>
-            <li><a href="#site-registry">Site Registry</a></li>
-            <li><a href="#versioning">Object Versioning</a></li>
-            <li><a href="#quotas">Bucket Quotas</a></li>
-            <li><a href="#encryption">Encryption</a></li>
-            <li><a href="#lifecycle">Lifecycle Rules</a></li>
-            <li><a href="#garbage-collection">Garbage Collection</a></li>
-            <li><a href="#integrity">Integrity Scanner</a></li>
-            <li><a href="#metrics">Metrics History</a></li>
-            <li><a href="#operation-metrics">Operation Metrics</a></li>
-            <li><a href="#troubleshooting">Troubleshooting</a></li>
-            <li><a href="#health-check">Health Check</a></li>
-            <li><a href="#object-lock">Object Lock &amp; Retention</a></li>
-            <li><a href="#access-logging">Access Logging</a></li>
-            <li><a href="#notifications">Notifications &amp; Webhooks</a></li>
-            <li><a href="#select-content">SelectObjectContent</a></li>
-            <li><a href="#advanced-ops">Advanced Operations</a></li>
-            <li><a href="#acls">Access Control Lists</a></li>
-            <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
-            <li><a href="#website-hosting">Static Website Hosting</a></li>
-            <li><a href="#cors-config">CORS Configuration</a></li>
-            <li><a href="#post-object">PostObject (Form Upload)</a></li>
-            <li><a href="#list-objects-v2">List Objects API v2</a></li>
-            <li><a href="#upgrading">Upgrading &amp; Updates</a></li>
-            <li><a href="#api-matrix">Full API Reference</a></li>
-          </ul>
-        </div>
-      </div>
-    </div>
+  <div class="docs-head-api">
+    <div class="small text-uppercase text-muted">API base URL</div>
+    <code class="text-wrap">{{ api_base }}</code>
   </div>
-  <div class="col-xl-8">
+</div>
+<div class="docs-layout" id="docsLayout">
+  <aside class="docs-index" id="docsIndex" aria-label="Documentation sections">
+    <div class="docs-index-search">
+      <input class="form-control form-control-sm" type="search" id="docsSearch" placeholder="Search the docs" aria-label="Search the docs" autocomplete="off" spellcheck="false">
+      <button class="btn btn-sm btn-outline-secondary docs-index-toggle" type="button" id="docsIndexToggle" aria-expanded="false" aria-controls="docsToc">Sections</button>
+    </div>
+    <p class="docs-index-status small text-muted mb-0" id="docsSearchStatus" aria-live="polite" hidden></p>
+    <ul class="list-unstyled docs-toc mb-0" id="docsToc">
+    <li><a href="#setup">Set up &amp; run</a></li>
+    <li><a href="#background">Running in background</a></li>
+    <li><a href="#auth">Authentication &amp; IAM</a></li>
+    <li><a href="#console">Console tour</a></li>
+    <li><a href="#automation">Automation / CLI</a></li>
+    <li><a href="#api">REST endpoints</a></li>
+    <li><a href="#examples">API Examples</a></li>
+    <li><a href="#replication">Site Replication &amp; Sync</a></li>
+    <li><a href="#site-registry">Site Registry</a></li>
+    <li><a href="#versioning">Object Versioning</a></li>
+    <li><a href="#quotas">Bucket Quotas</a></li>
+    <li><a href="#encryption">Encryption</a></li>
+    <li><a href="#lifecycle">Lifecycle Rules</a></li>
+    <li><a href="#garbage-collection">Garbage Collection</a></li>
+    <li><a href="#integrity">Integrity Scanner</a></li>
+    <li><a href="#metrics">Metrics History</a></li>
+    <li><a href="#operation-metrics">Operation Metrics</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#health-check">Health Check</a></li>
+    <li><a href="#object-lock">Object Lock &amp; Retention</a></li>
+    <li><a href="#access-logging">Access Logging</a></li>
+    <li><a href="#notifications">Notifications &amp; Webhooks</a></li>
+    <li><a href="#select-content">SelectObjectContent</a></li>
+    <li><a href="#advanced-ops">Advanced Operations</a></li>
+    <li><a href="#acls">Access Control Lists</a></li>
+    <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
+    <li><a href="#website-hosting">Static Website Hosting</a></li>
+    <li><a href="#cors-config">CORS Configuration</a></li>
+    <li><a href="#post-object">PostObject (Form Upload)</a></li>
+    <li><a href="#list-objects-v2">List Objects API v2</a></li>
+    <li><a href="#upgrading">Upgrading &amp; Updates</a></li>
+    <li><a href="#api-matrix">Full API Reference</a></li>
+    </ul>
+        <div class="docs-sidebar-callouts docs-index-callouts">
+          <div>
+            <div class="small text-uppercase text-muted">API base</div>
+            <code class="d-block">{{ api_base }}</code>
+          </div>
+          <div>
+            <div class="small text-uppercase text-muted">Initial credentials</div>
+            <span class="text-muted small">Generated on first run (check console)</span>
+          </div>
+          <div>
+            <div class="small text-uppercase text-muted">Logs</div>
+            <span class="text-muted small">stdout, journald, or container logs</span>
+          </div>
+        </div>
+  </aside>
+  <div class="docs-body" id="docsBody">
     <article id="setup" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
@@ -2989,64 +2991,14 @@ POST   /myfsio/kms/client/decrypt                    # Client-side decrypt helpe
 POST   /myfsio/kms/materials/&lt;id&gt;                    # Fetch wrapped key materials</code></pre>
       </div>
     </article>
-  </div>
-  <div class="col-xl-4 docs-sidebar-col">
-    <aside class="card shadow-sm docs-sidebar">
-      <div class="card-body">
-        <h3 class="h6 text-uppercase text-muted mb-3">On this page</h3>
-        <ul class="list-unstyled docs-toc mb-4">
-          <li><a href="#setup">Set up &amp; run</a></li>
-          <li><a href="#background">Running in background</a></li>
-          <li><a href="#auth">Authentication &amp; IAM</a></li>
-          <li><a href="#console">Console tour</a></li>
-          <li><a href="#automation">Automation / CLI</a></li>
-          <li><a href="#api">REST endpoints</a></li>
-          <li><a href="#examples">API Examples</a></li>
-          <li><a href="#replication">Site Replication &amp; Sync</a></li>
-          <li><a href="#site-registry">Site Registry</a></li>
-          <li><a href="#versioning">Object Versioning</a></li>
-          <li><a href="#quotas">Bucket Quotas</a></li>
-          <li><a href="#encryption">Encryption</a></li>
-          <li><a href="#lifecycle">Lifecycle Rules</a></li>
-          <li><a href="#garbage-collection">Garbage Collection</a></li>
-          <li><a href="#integrity">Integrity Scanner</a></li>
-          <li><a href="#metrics">Metrics History</a></li>
-          <li><a href="#operation-metrics">Operation Metrics</a></li>
-          <li><a href="#troubleshooting">Troubleshooting</a></li>
-          <li><a href="#health-check">Health Check</a></li>
-          <li><a href="#object-lock">Object Lock &amp; Retention</a></li>
-          <li><a href="#access-logging">Access Logging</a></li>
-          <li><a href="#notifications">Notifications &amp; Webhooks</a></li>
-          <li><a href="#select-content">SelectObjectContent</a></li>
-          <li><a href="#advanced-ops">Advanced Operations</a></li>
-          <li><a href="#acls">Access Control Lists</a></li>
-          <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
-          <li><a href="#website-hosting">Static Website Hosting</a></li>
-          <li><a href="#cors-config">CORS Configuration</a></li>
-          <li><a href="#post-object">PostObject (Form Upload)</a></li>
-          <li><a href="#list-objects-v2">List Objects API v2</a></li>
-          <li><a href="#upgrading">Upgrading &amp; Updates</a></li>
-          <li><a href="#api-matrix">Full API Reference</a></li>
-        </ul>
-        <div class="docs-sidebar-callouts">
-          <div>
-            <div class="small text-uppercase text-muted">API base</div>
-            <code class="d-block">{{ api_base }}</code>
-          </div>
-          <div>
-            <div class="small text-uppercase text-muted">Initial credentials</div>
-            <span class="text-muted small">Generated on first run (check console)</span>
-          </div>
-          <div>
-            <div class="small text-uppercase text-muted">Logs</div>
-            <span class="text-muted small">stdout, journald, or container logs</span>
-          </div>
-        </div>
-        <div class="mt-4">
-          <p class="small text-muted mb-1">Need more automation? Integrate against the S3, admin, or KMS routes directly, or package the Rust binary behind systemd or containers for production deployments.</p>
-        </div>
-      </div>
-    </aside>
+    <nav class="docs-pager" id="docsPager" aria-label="Section navigation" hidden>
+      <a class="docs-pager-prev" id="docsPrev" href="#"></a>
+      <a class="docs-pager-next" id="docsNext" href="#"></a>
+    </nav>
   </div>
 </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ url_for(endpoint="static", filename="js/docs.js") }}"></script>
 {% endblock %}
