@@ -356,3 +356,18 @@ window.ConnectionsManagement = (function() {
     checkConnectionHealth: checkConnectionHealth
   };
 })();
+
+(function() {
+  var el = document.getElementById('connectionsConfig');
+  if (!el) return;
+  var data = el.dataset;
+  ConnectionsManagement.init({
+    csrfToken: data.csrfToken,
+    endpoints: {
+      test: data.test,
+      updateTemplate: data.updateTemplate,
+      deleteTemplate: data.deleteTemplate,
+      healthTemplate: data.healthTemplate
+    }
+  });
+})();

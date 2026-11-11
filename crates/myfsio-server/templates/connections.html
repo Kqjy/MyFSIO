@@ -368,16 +368,14 @@
     </div>
 </div>
 
+<div id="connectionsConfig" hidden
+  data-csrf-token="{{ csrf_token_value }}"
+  data-test="{{ url_for(endpoint="ui.test_connection") }}"
+  data-update-template="{{ url_for(endpoint="ui.update_connection", connection_id="CONNECTION_ID") }}"
+  data-delete-template="{{ url_for(endpoint="ui.delete_connection", connection_id="CONNECTION_ID") }}"
+  data-health-template="/ui/connections/CONNECTION_ID/health"></div>
+{% endblock %}
+
+{% block extra_scripts %}
 <script src="{{ url_for(endpoint="static", filename="js/connections-management.js") }}"></script>
-<script>
-  ConnectionsManagement.init({
-    csrfToken: "{{ csrf_token_value }}",
-    endpoints: {
-      test: "{{ url_for(endpoint="ui.test_connection") }}",
-      updateTemplate: "{{ url_for(endpoint="ui.update_connection", connection_id="CONNECTION_ID") }}",
-      deleteTemplate: "{{ url_for(endpoint="ui.delete_connection", connection_id="CONNECTION_ID") }}",
-      healthTemplate: "/ui/connections/CONNECTION_ID/health"
-    }
-  });
-</script>
 {% endblock %}

@@ -1576,20 +1576,8 @@ fn cluster_totals(sites: &[Value]) -> Value {
     })
 }
 
-pub async fn peer_credentials_page(
-    State(state): State<AppState>,
-    Extension(session): Extension<SessionHandle>,
-) -> Response {
-    let mut ctx = page_context(&state, &session, "ui.peer_credentials");
-    let (api_base, _) = parse_api_base(&state);
-    ctx.insert("api_base", &api_base);
-    let credentials = state.iam.list_peer_credentials();
-    ctx.insert("credentials", &credentials);
-    let issued_payload = session
-        .write(|s| s.extra.remove("peer_cred_issued"))
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    ctx.insert("issued_payload", &issued_payload);
-    render(&state, "peer_credentials.html", &ctx)
+pub async fn peer_credentials_page() -> Response {
+    axum::response::Redirect::to("/ui/sites#peer-credentials").into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -1597,21 +1585,6 @@ pub struct PeerCredentialForm {
     pub site_id: String,
     #[serde(default)]
     pub display_name: String,
-    #[serde(default)]
-    pub return_to: String,
-}
-
-#[derive(serde::Deserialize)]
-pub struct PeerCredentialDeleteForm {
-    #[serde(default)]
-    pub return_to: String,
-}
-
-fn resolve_peer_credential_return(raw: &str) -> &'static str {
-    match raw.trim() {
-        "/ui/sites" => "/ui/sites",
-        _ => "/ui/peer-credentials",
-    }
 }
 
 pub async fn ui_create_peer_credential(
@@ -1619,7 +1592,7 @@ pub async fn ui_create_peer_credential(
     Extension(session): Extension<SessionHandle>,
     axum::Form(form): axum::Form<PeerCredentialForm>,
 ) -> Response {
-    let target = resolve_peer_credential_return(&form.return_to);
+    let target = "/ui/sites#peer-credentials";
     let site_id = form.site_id.trim();
     if site_id.is_empty() {
         session.write(|s| s.push_flash("danger", "Site ID is required."));
@@ -1654,9 +1627,8 @@ pub async fn ui_delete_peer_credential(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     axum::extract::Path(access_key): axum::extract::Path<String>,
-    axum::Form(form): axum::Form<PeerCredentialDeleteForm>,
 ) -> Response {
-    let target = resolve_peer_credential_return(&form.return_to);
+    let target = "/ui/sites#peer-credentials";
     match state.iam.delete_peer_credential(&access_key) {
         Ok(()) => {
             session.write(|s| s.push_flash("success", "Peer credential revoked."));

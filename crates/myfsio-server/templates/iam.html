@@ -593,26 +593,20 @@
   </div>
 </div>
 
+<div id="iamConfig" hidden
+  data-current-user-key="{{ principal.access_key }}"
+  data-iam-locked="{% if iam_locked %}true{% else %}false{% endif %}"
+  data-csrf-token="{{ csrf_token_value }}"
+  data-create-user="{{ url_for(endpoint="ui.create_iam_user") }}"
+  data-update-user="{{ url_for(endpoint="ui.update_iam_user", user_id="USER_ID") }}"
+  data-delete-user="{{ url_for(endpoint="ui.delete_iam_user", user_id="USER_ID") }}"
+  data-update-policies="{{ url_for(endpoint="ui.update_iam_policies", user_id="USER_ID") }}"
+  data-rotate-secret="{{ url_for(endpoint="ui.rotate_iam_secret", user_id="USER_ID") }}"
+  data-update-expiry="{{ url_for(endpoint="ui.update_iam_expiry", user_id="USER_ID") }}"></div>
 <script id="iamUsersJson" type="application/json">{{ users | json_island | safe }}</script>
 {% endblock %}
 
 {% block extra_scripts %}
 {{ super() }}
 <script src="{{ url_for(endpoint="static", filename="js/iam-management.js") }}"></script>
-<script>
-  IAMManagement.init({
-    users: JSON.parse(document.getElementById('iamUsersJson').textContent || '[]'),
-    currentUserKey: {{ principal.access_key | json_island | safe }},
-    iamLocked: {{ iam_locked | json_island | safe }},
-    csrfToken: "{{ csrf_token_value }}",
-    endpoints: {
-      createUser: "{{ url_for(endpoint="ui.create_iam_user") }}",
-      updateUser: "{{ url_for(endpoint="ui.update_iam_user", user_id="USER_ID") }}",
-      deleteUser: "{{ url_for(endpoint="ui.delete_iam_user", user_id="USER_ID") }}",
-      updatePolicies: "{{ url_for(endpoint="ui.update_iam_policies", user_id="USER_ID") }}",
-      rotateSecret: "{{ url_for(endpoint="ui.rotate_iam_secret", user_id="USER_ID") }}",
-      updateExpiry: "{{ url_for(endpoint="ui.update_iam_expiry", user_id="USER_ID") }}"
-    }
-  });
-</script>
 {% endblock %}

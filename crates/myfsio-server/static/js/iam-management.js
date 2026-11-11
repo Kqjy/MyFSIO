@@ -855,3 +855,24 @@ window.IAMManagement = (function() {
     init: init
   };
 })();
+
+(function() {
+  var el = document.getElementById('iamConfig');
+  if (!el) return;
+  var data = el.dataset;
+  var usersEl = document.getElementById('iamUsersJson');
+  IAMManagement.init({
+    users: JSON.parse((usersEl && usersEl.textContent) || '[]'),
+    currentUserKey: data.currentUserKey,
+    iamLocked: data.iamLocked === 'true',
+    csrfToken: data.csrfToken,
+    endpoints: {
+      createUser: data.createUser,
+      updateUser: data.updateUser,
+      deleteUser: data.deleteUser,
+      updatePolicies: data.updatePolicies,
+      rotateSecret: data.rotateSecret,
+      updateExpiry: data.updateExpiry
+    }
+  });
+})();
