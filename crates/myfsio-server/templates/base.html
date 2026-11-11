@@ -127,6 +127,7 @@
               {% else %}<li aria-current="page">{% block crumb %}Console{% endblock %}</li>{% endif %}
             </ol>
           </nav>
+          <button class="cmdk-open" type="button" data-command-palette-open aria-label="Search and jump to (Ctrl K)"><span class="cmdk-open-text">Jump to…</span><kbd>Ctrl K</kbd></button>
           <a class="icon-btn" href="{{ url_for(endpoint="ui.docs_page") }}" aria-label="Documentation" data-ui-tip="Documentation" data-ui-tip-side="bottom"><svg class="ic" aria-hidden="true"><use href="#i-help"/></svg></a>
           <button class="icon-btn" type="button" id="themeToggle" aria-label="Toggle dark mode" data-ui-tip-side="bottom"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
         </header>
@@ -300,6 +301,7 @@
       })();
     </script>
     <script src="{{ url_for(endpoint="static", filename="js/ui-core.js") }}"></script>
+    <script src="{{ url_for(endpoint="static", filename="js/command-palette.js") }}"></script>
     {% block extra_scripts %}{% endblock %}
 
   </body>
