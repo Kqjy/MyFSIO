@@ -90,10 +90,6 @@ window.IAMManagement = (function() {
     }) || null;
   }
 
-  function getUserById(userId) {
-    return users.find(function(u) { return u.user_id === userId; }) || null;
-  }
-
   function init(config) {
     users = config.users || [];
     currentUserKey = config.currentUserKey || null;

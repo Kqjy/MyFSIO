@@ -1,15 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Identity and Access Management{% endblock %}
+{% block title %}Users & keys{% endblock %}
 {% block content %}
 {% if iam_locked %}{% set iam_disabled = "disabled" %}{% else %}{% set iam_disabled = "" %}{% endif %}
 <div class="page-header d-flex justify-content-between align-items-center mb-4">
   <div>
-    <p class="text-uppercase text-muted small mb-1">Identity & Access Management</p>
+    <p class="text-uppercase text-muted small mb-1">Access</p>
     <h1 class="h3 mb-1 d-flex align-items-center gap-2">
       <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
         <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
       </svg>
-      IAM Configuration
+      Users &amp; keys
     </h1>
     <p class="text-muted mb-0 mt-1">Create and manage users with fine-grained bucket permissions.</p>
   </div>
@@ -134,7 +134,7 @@
     {% endif %}
     <div class="row g-3">
       {% for user in users %}
-      <div class="col-md-6 col-xl-4 iam-user-item" data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}" data-update-url="{{ url_for(endpoint="ui.update_iam_user", user_id=user.user_id) }}">
+      <div class="col-md-6 col-xl-4 iam-user-item" data-user-id="{{ user.user_id }}" data-update-url="{{ url_for(endpoint="ui.update_iam_user", user_id=user.user_id) }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}">
         <div class="card h-100 iam-user-card{% if user.is_admin %} iam-admin-card{% else %}{% endif %}">
           <div class="card-body">
             <div class="d-flex align-items-start justify-content-between mb-3">

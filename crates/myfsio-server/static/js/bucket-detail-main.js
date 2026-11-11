@@ -1242,10 +1242,6 @@
     });
   };
 
-  const getObjectsInFolder = (folderPrefix) => {
-    return allObjects.filter(obj => obj.key.startsWith(folderPrefix));
-  };
-
   const createFolderRow = (folderPath, displayName = null) => {
     const folderName = displayName || folderPath.slice(currentPrefix.length).replace(/\/$/, '');
     const { count: objectCount, mayHaveMore } = countObjectsInFolder(folderPath);
@@ -2545,19 +2541,6 @@
   }
 
   updateBulkDeleteState();
-
-  function initFolderNavigation() {
-    if (hasFolders()) {
-      renderBreadcrumb(currentPrefix);
-      renderObjectsView();
-    }
-    if (typeof updateFolderViewStatus === 'function') {
-      updateFolderViewStatus();
-    }
-    if (typeof updateFilterWarning === 'function') {
-      updateFilterWarning();
-    }
-  }
 
   bulkDeleteButton?.addEventListener('click', () => openBulkDeleteModal());
   bulkDeleteConfirm?.addEventListener('click', () => performBulkDelete());
@@ -4600,7 +4583,6 @@
   const aclGrantsList = document.getElementById('acl-grants-list');
   const aclLoading = document.getElementById('acl-loading');
   const aclContent = document.getElementById('acl-content');
-  const cannedAclSelect = document.getElementById('cannedAclSelect');
 
   const loadAcl = async () => {
     if (!aclUrl) return;
@@ -4625,24 +4607,6 @@
       if (aclGrantsList) aclGrantsList.innerHTML = `<div class="list-group-item text-danger text-center py-2">${escapeHtml(err.message)}</div>`;
     }
   };
-
-  cannedAclSelect?.addEventListener('change', async () => {
-    const canned = cannedAclSelect.value;
-    if (!canned || !aclUrl) return;
-    try {
-      const resp = await fetch(aclUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
-        body: JSON.stringify({ canned_acl: canned })
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Failed to set ACL');
-      showMessage({ title: 'ACL updated', body: `Bucket ACL set to "${canned}"`, variant: 'success' });
-      await loadAcl();
-    } catch (err) {
-      showMessage({ title: 'ACL update failed', body: err.message, variant: 'danger' });
-    }
-  });
 
   document.querySelectorAll('[data-set-acl]').forEach(btn => {
     btn.addEventListener('click', async () => {

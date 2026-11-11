@@ -174,7 +174,6 @@
         data-objects-stream="{{ objects_stream_url }}"
         data-bulk-delete-endpoint="{{ url_for(endpoint="ui.bulk_delete_objects", bucket_name=bucket_name) }}"
         data-bulk-download-endpoint="{{ url_for(endpoint="ui.bulk_download_objects", bucket_name=bucket_name) }}"
-        data-folders-url="{{ folders_url }}"
         data-buckets-for-copy-url="{{ buckets_for_copy_url }}"
         data-bucket-total-objects="{{ bucket_stats.objects | default(value=0) }}"
       >
@@ -1770,7 +1769,7 @@
       {% endif %}
       <div class="row g-4">
         <div class="col-lg-8">
-          <div class="card shadow-sm" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}" data-lifecycle-enabled="{% if lifecycle_enabled %}true{% else %}false{% endif %}">
+          <div class="card shadow-sm" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}">
             <div class="card-header d-flex justify-content-between align-items-center">
               <div class="d-flex align-items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
