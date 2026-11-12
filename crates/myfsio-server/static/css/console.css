@@ -1298,3 +1298,9 @@ body {
 		display: block;
 	}
 }
+
+#gcHistoryContainer .table-responsive,
+#integrityHistoryContainer .table-responsive {
+	margin: 0;
+	width: 100%;
+}
