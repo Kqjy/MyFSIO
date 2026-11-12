@@ -33,14 +33,14 @@
       .then(function(html) {
         var seen = Object.create(null);
         var parsed = new DOMParser().parseFromString(html, 'text/html');
-        parsed.querySelectorAll('a[href^="' + base + '/"]').forEach(function(link) {
-          var path = link.getAttribute('href').split('?')[0];
+        parsed.querySelectorAll('a[href^="' + base + '/"], [data-href^="' + base + '/"]').forEach(function(link) {
+          var path = (link.getAttribute('href') || link.getAttribute('data-href')).split('?')[0];
           var name = decodeURIComponent(path.slice(base.length + 1));
           if (!name || name.indexOf('/') !== -1 || seen[name]) return;
           seen[name] = true;
           buckets.push({ kind: 'Bucket', label: name, href: path });
           bucketTabs.forEach(function(tab) {
-            buckets.push({ kind: 'Setting', label: name + ' › ' + tab.charAt(0).toUpperCase() + tab.slice(1), href: path + '?tab=' + tab, secondary: true });
+            buckets.push({ kind: 'Setting', label: name + ' › ' + (tab === 'cors' ? 'CORS' : tab.charAt(0).toUpperCase() + tab.slice(1)), href: path + '?tab=' + tab, secondary: true });
           });
         });
         if (dialog.open) render();

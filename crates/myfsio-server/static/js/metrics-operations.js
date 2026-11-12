@@ -180,7 +180,7 @@ function bootstrapOperationsSection() {
       trendThroughput = new SvgChart(ttCtx, trendChartOpts('#10b981', function(v) { return formatBytes(v) + '/s'; }));
       trendThroughput.options.scales.y.ticks.precision = 0;
     }
-    if (tlCtx) trendLatency = new SvgChart(tlCtx, trendChartOpts('#8b5cf6', function(v) { return v.toFixed(0) + 'ms'; }));
+    if (tlCtx) trendLatency = new SvgChart(tlCtx, trendChartOpts('#8b5cf6', function(v) { return v.toFixed(Number.isInteger(v) ? 0 : 1) + 'ms'; }));
     if (teCtx) trendErrorRate = new SvgChart(teCtx, trendChartOpts('#ef4444', function(v) { return v.toFixed(1) + '%'; }));
     if (ecCtx) {
       trendErrorCodes = new SvgChart(ecCtx, {
