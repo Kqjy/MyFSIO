@@ -1762,6 +1762,224 @@ body {
 	}
 }
 
+.ui-dialog > form {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+textarea.ui-input {
+	display: block;
+	resize: vertical;
+}
+
+.ob-message-body {
+	overflow-wrap: anywhere;
+}
+
+.ui-dialog.ob-shortcuts {
+	width: min(340px, calc(100vw - 24px));
+}
+
+.ob-shortcut-list {
+	margin: 0;
+}
+
+.ob-shortcut-list > div {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 7px 0;
+	border-bottom: 1px solid var(--c-line-soft);
+}
+
+.ob-shortcut-list > div:last-child {
+	border-bottom: 0;
+}
+
+.ob-shortcut-list dt {
+	color: var(--c-muted);
+	font-weight: 500;
+}
+
+.ob-shortcut-list dd {
+	margin: 0;
+}
+
+.ob-shortcut-list kbd {
+	padding: 2px 6px;
+	border: 1px solid var(--c-line);
+	border-radius: 5px;
+	background: var(--c-bg);
+	color: var(--c-text);
+	font-family: var(--c-mono);
+	font-size: 12px;
+}
+
+.ob-upload-input {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	opacity: 0;
+	pointer-events: none;
+}
+
+.ob-dropzone {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	padding: 26px 16px;
+	border: 1.5px dashed var(--c-line);
+	border-radius: var(--c-radius-lg);
+	background: var(--c-bg);
+	text-align: center;
+	cursor: pointer;
+	overflow-wrap: anywhere;
+}
+
+.ob-dropzone .ic {
+	width: 22px;
+	height: 22px;
+	color: var(--c-accent);
+}
+
+.ob-dropzone:hover,
+.ob-dropzone:focus-visible,
+.ob-dropzone.is-dragover {
+	border-color: var(--c-accent);
+	background: var(--c-accent-weak);
+	outline: none;
+}
+
+.ob-upload-advanced {
+	margin: 10px 0 0 -6px;
+}
+
+#uploadAdvancedOptions {
+	margin-top: 10px;
+}
+
+.ob-upload-tray {
+	position: fixed;
+	left: calc(var(--c-nav-width) + 20px);
+	bottom: 20px;
+	z-index: 1028;
+	width: 340px;
+	max-width: calc(100vw - 24px);
+	border: 1px solid var(--c-line);
+	border-radius: var(--c-radius-lg);
+	background: var(--c-panel);
+	color: var(--c-text);
+	box-shadow: var(--c-shadow-pop);
+	overflow: hidden;
+}
+
+.ob-upload-head {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 8px 8px 8px 14px;
+}
+
+.ob-upload-heading {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	margin-right: auto;
+	font-size: 13.5px;
+}
+
+.ob-upload-heading .ui-hint {
+	margin: 0;
+}
+
+.ob-upload-caret {
+	transform: rotate(90deg);
+}
+
+.ob-upload-tray.is-collapsed .ob-upload-caret {
+	transform: rotate(-90deg);
+}
+
+.ob-upload-total {
+	height: 3px;
+	border-radius: 0;
+}
+
+.ob-upload-tray[data-state='success'] .ob-upload-total > i {
+	background: var(--c-ok);
+}
+
+.ob-upload-tray[data-state='error'] .ob-upload-total > i {
+	background: var(--c-bad);
+}
+
+.ob-upload-tray[data-state='cancelled'] .ob-upload-total > i {
+	background: var(--c-faint);
+}
+
+.ob-upload-list {
+	max-height: 260px;
+	overflow-y: auto;
+}
+
+.ob-upload-tray.is-collapsed .ob-upload-list {
+	display: none;
+}
+
+.ob-upload-row {
+	display: grid;
+	gap: 5px;
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--c-line-soft);
+}
+
+.ob-upload-row:last-child {
+	border-bottom: 0;
+}
+
+.ob-upload-line {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.ob-upload-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 550;
+}
+
+.ob-upload-state,
+.ob-upload-sub {
+	color: var(--c-muted);
+	font-size: 12px;
+}
+
+.ob-upload-sub {
+	overflow-wrap: anywhere;
+}
+
+@media (max-width: 991.98px) {
+	.ob-upload-tray {
+		left: 12px;
+		right: 12px;
+		bottom: calc(var(--c-tabbar-height) + 12px);
+		width: auto;
+		max-width: none;
+	}
+
+	.ob-upload-list {
+		max-height: 34vh;
+	}
+}
+
 [hidden] {
 	display: none !important;
 }

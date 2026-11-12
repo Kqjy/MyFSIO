@@ -117,7 +117,7 @@
         <button class="ui-menu-item" type="button" data-sort-field="date" data-sort-dir="desc">Date (newest)</button>
         <button class="ui-menu-item" type="button" data-sort-field="date" data-sort-dir="asc">Date (oldest)</button>
       </div>
-      <button class="ui-btn ui-btn-primary" type="button" data-bs-toggle="modal" data-bs-target="#uploadModal">
+      <button class="ui-btn ui-btn-primary" type="button" data-ui-open="#uploadModal">
         <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
         Upload
       </button>
@@ -2024,170 +2024,71 @@
   </div>
 </div>
 
-<div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-            <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
-          </svg>
-          Upload objects
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <form
-        method="post"
-        action="{{ url_for(endpoint="ui.upload_object", bucket_name=bucket_name) }}"
-        enctype="multipart/form-data"
-        data-upload-form
-        data-multipart-init-url="{{ url_for(endpoint="ui.initiate_multipart_upload", bucket_name=bucket_name) }}"
-        data-multipart-part-template="{{ url_for(endpoint="ui.upload_multipart_part", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
-        data-multipart-complete-template="{{ url_for(endpoint="ui.complete_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
-        data-multipart-abort-template="{{ url_for(endpoint="ui.abort_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
-      >
-          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-        <div class="modal-body">
-          <p class="text-muted small mb-3">Upload files to <code id="uploadDestination"></code>. You can select multiple files at once.</p>
-          <div class="row g-3">
-            <div class="col-12">
-              <label class="form-label fw-medium">Select files</label>
-              <input class="form-control" type="file" name="object" id="uploadFileInput" multiple required />
-              <div class="form-text">Select one or more files from your device. Files ≥ 8&nbsp;MB use multipart uploads with automatic retry.</div>
-            </div>
-            <div class="col-12">
-              <div class="upload-dropzone text-center" data-dropzone>
-                <p class="fw-semibold mb-1">Drag &amp; drop files here</p>
-                <p class="text-muted small mb-2">or click to browse (multiple files supported)</p>
-                <div class="text-muted small" data-dropzone-label>No files selected</div>
-              </div>
-            </div>
-            <div class="col-12">
-              <div class="border rounded-3">
-                <button
-                  class="btn btn-link text-decoration-none w-100 text-start collapse-toggle"
-                  type="button"
-                  data-bs-toggle="collapse"
-                  data-bs-target="#uploadAdvancedOptions"
-                  aria-expanded="false"
-                  aria-controls="uploadAdvancedOptions"
-                >
-                  <span class="fw-semibold">Advanced options</span>
-                  <span class="text-muted">(optional)</span>
-                </button>
-                <div class="collapse" id="uploadAdvancedOptions">
-                  <div class="p-3 border-top">
-                    <div id="singleFileOptions">
-                      <label class="form-label fw-medium">Object key</label>
-                      <input class="form-control font-monospace" type="text" name="object_key" placeholder="folder/document.pdf" />
-                      <div class="form-text mb-3">Leave blank to reuse the original filename. (Only applies when uploading a single file)</div>
-                    </div>
-                    <label class="form-label fw-medium">Key prefix <span class="text-muted fw-normal">(optional)</span></label>
-                    <input class="form-control font-monospace" type="text" name="key_prefix" id="uploadKeyPrefix" placeholder="uploads/2024/" />
-                    <div class="form-text mb-3">Add a prefix to all uploaded files (e.g., <code>folder/subfolder/</code>).</div>
-                    <label class="form-label fw-medium">Metadata <span class="text-muted fw-normal">(JSON)</span></label>
-                    <textarea class="form-control font-monospace" name="metadata" rows="3" placeholder='{"project":"demo"}'></textarea>
-                    <div class="form-text">Store custom key/value pairs alongside each object.</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="col-12">
-              <div class="upload-progress-stack" data-upload-progress></div>
-            </div>
-            <div class="col-12 d-none" id="uploadQueueContainer">
-              <div class="border rounded p-2" style="max-height: 150px; overflow-y: auto;">
-                <div class="d-flex align-items-center justify-content-between mb-2">
-                  <span class="small fw-medium text-muted">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v13.5a.5.5 0 0 1-.777.416L8 13.101l-5.223 2.815A.5.5 0 0 1 2 15.5V2zm2-1a1 1 0 0 0-1 1v12.566l4.723-2.482a.5.5 0 0 1 .554 0L13 14.566V2a1 1 0 0 0-1-1H4z"/>
-                    </svg>
-                    Queued files
-                  </span>
-                  <div class="d-flex align-items-center gap-2">
-                    <span class="badge bg-secondary-subtle text-secondary" id="uploadQueueCount">0</span>
-                    <button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" id="clearUploadQueueBtn" title="Clear queue">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-                <ul class="list-unstyled mb-0 small" id="uploadQueueList"></ul>
-              </div>
-            </div>
-            <div class="col-12 d-none" id="bulkUploadProgress">
-              <div class="alert alert-info small mb-0">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                  <span id="bulkUploadStatus">Uploading files...</span>
-                  <span id="bulkUploadCounter">0/0</span>
-                </div>
-                <div class="progress" style="height: 8px;">
-                  <div class="progress-bar progress-bar-striped progress-bar-animated" id="bulkUploadProgressBar" role="progressbar" style="width: 0%;"></div>
-                </div>
-                <div id="bulkUploadCurrentFile" class="mt-2 text-muted small"></div>
-              </div>
-            </div>
-            <div class="col-12 d-none" id="bulkUploadResults">
-              <div class="alert alert-success small mb-2" id="bulkUploadSuccessAlert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                </svg>
-                <span id="bulkUploadSuccessCount">0</span> file(s) uploaded successfully
-              </div>
-              <div class="alert alert-danger small mb-0 d-none" id="bulkUploadErrorAlert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
-                  <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
-                </svg>
-                <span id="bulkUploadErrorCount">0</span> file(s) failed to upload
-                <ul class="mb-0 mt-1" id="bulkUploadErrorList"></ul>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="modal-footer border-0">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="uploadCancelBtn">Cancel</button>
-          <button class="btn btn-primary" type="submit" id="uploadSubmitBtn">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
-              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-              <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
-            </svg>
-            <span id="uploadBtnText">Upload</span>
-          </button>
-        </div>
-      </form>
+<dialog class="ui-dialog" id="uploadModal" aria-labelledby="uploadTitle">
+  <form
+    method="post"
+    action="{{ url_for(endpoint="ui.upload_object", bucket_name=bucket_name) }}"
+    enctype="multipart/form-data"
+    data-upload-form
+    data-multipart-init-url="{{ url_for(endpoint="ui.initiate_multipart_upload", bucket_name=bucket_name) }}"
+    data-multipart-part-template="{{ url_for(endpoint="ui.upload_multipart_part", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
+    data-multipart-complete-template="{{ url_for(endpoint="ui.complete_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
+    data-multipart-abort-template="{{ url_for(endpoint="ui.abort_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="uploadTitle">Upload objects</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-body">
+      <p class="ui-muted">Upload files to <code id="uploadDestination"></code>. Files of 8&nbsp;MB or more are sent as multipart uploads.</p>
+      <input class="ob-upload-input" type="file" name="object" id="uploadFileInput" multiple tabindex="-1" aria-hidden="true" />
+      <div class="ob-dropzone" data-dropzone role="button" tabindex="0" aria-label="Choose files to upload">
+        <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
+        <strong>Drop files here or click to browse</strong>
+        <span class="ui-hint" data-dropzone-label>No files selected</span>
+      </div>
+      <button class="ui-btn ui-btn-ghost ui-btn-sm ob-upload-advanced" type="button" data-ui-collapse="#uploadAdvancedOptions">Advanced options</button>
+      <div id="uploadAdvancedOptions" hidden>
+        <div class="ui-field" id="singleFileOptions">
+          <label class="ui-label" for="uploadObjectKey">Object key</label>
+          <input class="ui-input ui-mono" type="text" name="object_key" id="uploadObjectKey" placeholder="folder/document.pdf" />
+          <div class="ui-hint">Leave blank to keep the original filename. Applies to a single file only.</div>
+        </div>
+        <div class="ui-field">
+          <label class="ui-label" for="uploadKeyPrefix">Key prefix</label>
+          <input class="ui-input ui-mono" type="text" name="key_prefix" id="uploadKeyPrefix" placeholder="uploads/2024/" />
+          <div class="ui-hint">Added in front of every uploaded file name, for example <code>folder/subfolder/</code>.</div>
+        </div>
+        <div class="ui-field">
+          <label class="ui-label" for="uploadMetadata">Metadata (JSON)</label>
+          <textarea class="ui-input ui-mono" name="metadata" id="uploadMetadata" rows="3" placeholder='{"project":"demo"}'></textarea>
+          <div class="ui-hint">Custom key/value pairs stored with each object.</div>
+        </div>
+      </div>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button class="ui-btn ui-btn-primary" type="submit" id="uploadSubmitBtn">
+        <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
+        <span id="uploadBtnText">Upload</span>
+      </button>
+    </div>
+  </form>
+</dialog>
 
-<div id="floatingUploadProgress" class="floating-upload-progress d-none">
-  <div class="floating-upload-content">
-    <div class="d-flex align-items-center justify-content-between mb-2">
-      <div class="d-flex align-items-center">
-        <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
-        <span class="fw-semibold" id="floatingUploadTitle">Uploading files...</span>
-      </div>
-      <div class="btn-group btn-group-sm">
-        <button type="button" class="btn btn-outline-danger" id="floatingUploadCancel" title="Cancel upload">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-            <path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z"/>
-          </svg>
-        </button>
-        <button type="button" class="btn btn-outline-secondary" id="floatingUploadExpand" title="Show upload modal">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-            <path fill-rule="evenodd" d="M5.828 10.172a.5.5 0 0 0-.707 0l-4.096 4.096V11.5a.5.5 0 0 0-1 0v3.975a.5.5 0 0 0 .5.5H4.5a.5.5 0 0 0 0-1H1.732l4.096-4.096a.5.5 0 0 0 0-.707zm4.344 0a.5.5 0 0 1 .707 0l4.096 4.096V11.5a.5.5 0 1 1 1 0v3.975a.5.5 0 0 1-.5.5H11.5a.5.5 0 0 1 0-1h2.768l-4.096-4.096a.5.5 0 0 1 0-.707zm0-4.344a.5.5 0 0 0 .707 0l4.096-4.096V4.5a.5.5 0 1 0 1 0V.525a.5.5 0 0 0-.5-.5H11.5a.5.5 0 0 0 0 1h2.768l-4.096 4.096a.5.5 0 0 0 0 .707zm-4.344 0a.5.5 0 0 1-.707 0L1.025 1.732V4.5a.5.5 0 0 1-1 0V.525a.5.5 0 0 1 .5-.5H4.5a.5.5 0 0 1 0 1H1.732l4.096 4.096a.5.5 0 0 1 0 .707z"/>
-          </svg>
-        </button>
-      </div>
+<section class="ob-upload-tray" id="uploadTray" aria-label="Uploads" hidden>
+  <div class="ob-upload-head">
+    <div class="ob-upload-heading">
+      <strong id="uploadTrayTitle" aria-live="polite">Uploading</strong>
+      <span class="ui-hint" id="uploadTraySummary"></span>
     </div>
-    <div class="progress mb-1" style="height: 6px;">
-      <div class="progress-bar bg-primary" id="floatingUploadProgressBar" role="progressbar" style="width: 0%;"></div>
-    </div>
-    <div class="text-muted small" id="floatingUploadStatus">Preparing...</div>
+    <button type="button" class="icon-btn" id="uploadTrayToggle" aria-expanded="true" aria-label="Hide uploads"><svg class="ic ob-upload-caret" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+    <button type="button" class="icon-btn" id="uploadTrayClose" aria-label="Cancel uploads"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
-</div>
+  <div class="ui-bar ob-upload-total"><i id="uploadTrayBar"></i></div>
+  <div class="ob-upload-list" id="uploadTrayList"></div>
+</section>
 
 {% if can_delete_bucket %}
 <div class="modal fade" id="deleteBucketModal" tabindex="-1" aria-hidden="true">
@@ -2234,26 +2135,17 @@
 </div>
 {% endif %}
 
-<div class="modal fade" id="messageModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold" id="messageModalTitle">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16" id="messageModalIcon">
-            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
-          </svg>
-          Notice
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body" id="messageModalBody"></div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
-        <button type="button" class="btn btn-primary d-none" id="messageModalAction"></button>
-      </div>
-    </div>
+<dialog class="ui-dialog" id="messageModal" aria-labelledby="messageModalTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="messageModalTitle">Notice</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
-</div>
+  <div class="ui-dialog-body ob-message-body" id="messageModalBody"></div>
+  <div class="ui-dialog-foot">
+    <button type="button" class="ui-btn" data-ui-close>Close</button>
+    <button type="button" class="ui-btn ui-btn-primary" id="messageModalAction" hidden></button>
+  </div>
+</dialog>
 
 <dialog class="ui-dialog" id="bulkDeleteModal" aria-labelledby="bulkDeleteTitle">
   <div class="ui-dialog-head">
@@ -2655,46 +2547,35 @@
   </div>
 </div>
 
-<div class="modal fade" id="copyMoveModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold" id="copyMoveModalTitle">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16" id="copyMoveModalIcon">
-            <path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/>
-          </svg>
-          <span id="copyMoveActionLabel">Copy</span> Object
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+<dialog class="ui-dialog" id="copyMoveModal" aria-labelledby="copyMoveModalTitle">
+  <form id="copyMoveForm">
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="copyMoveModalTitle"><span id="copyMoveActionLabel">Copy</span> object</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="ui-dialog-body">
+      <div class="ui-field">
+        <span class="ui-label">Source</span>
+        <code id="copyMoveSource" class="ob-keybox"></code>
       </div>
-      <div class="modal-body">
-        <div class="mb-3">
-          <label class="form-label fw-medium">Source</label>
-          <div class="p-2 bg-body-tertiary rounded font-monospace small" id="copyMoveSource"></div>
-        </div>
-        <div class="row g-3">
-          <div class="col-12">
-            <label class="form-label fw-medium">Destination Bucket</label>
-            <select class="form-select" id="copyMoveDestBucket">
-              <option value="">Loading buckets...</option>
-            </select>
-          </div>
-          <div class="col-12">
-            <label class="form-label fw-medium">Destination Key</label>
-            <input type="text" class="form-control font-monospace" id="copyMoveDestKey" placeholder="path/to/object.txt" required />
-            <div class="form-text">The full path for the object in the destination bucket.</div>
-          </div>
-        </div>
+      <div class="ui-field">
+        <label class="ui-label" for="copyMoveDestBucket">Destination bucket</label>
+        <select class="ui-select" id="copyMoveDestBucket">
+          <option value="">Loading buckets...</option>
+        </select>
       </div>
-      <div class="modal-footer border-0 pt-0">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" id="copyMoveConfirm">
-          <span id="copyMoveConfirmLabel">Copy</span>
-        </button>
+      <div class="ui-field">
+        <label class="ui-label" for="copyMoveDestKey">Destination key</label>
+        <input type="text" class="ui-input ui-mono" id="copyMoveDestKey" placeholder="path/to/object.txt" required />
+        <div class="ui-hint">The full path for the object in the destination bucket.</div>
       </div>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button type="submit" class="ui-btn ui-btn-primary" id="copyMoveConfirm"><span id="copyMoveConfirmLabel">Copy</span></button>
+    </div>
+  </form>
+</dialog>
 
 <div class="context-menu d-none" id="objectContextMenu">
   <button class="context-menu-item" data-ctx-action="download">
@@ -2727,35 +2608,26 @@
   </button>
 </div>
 
-<div class="modal fade" id="keyboardShortcutsModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered modal-sm">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-1" viewBox="0 0 16 16">
-            <path d="M14 5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h12zM2 4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H2z"/>
-            <path d="M13 10.25a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm0-2a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-5 0A.25.25 0 0 1 8.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 8 8.75v-.5zm2 0a.25.25 0 0 1 .25-.25h1.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-1.5a.25.25 0 0 1-.25-.25v-.5zm1 2a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-5-2A.25.25 0 0 1 6.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 6 8.75v-.5zm-2 0A.25.25 0 0 1 4.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 4 8.75v-.5zm-2 0A.25.25 0 0 1 2.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 2 8.75v-.5zm11-2a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-2 0a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-2 0A.25.25 0 0 1 9.25 6h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 9 6.75v-.5zm-2 0A.25.25 0 0 1 7.25 6h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 7 6.75v-.5zm-2 0A.25.25 0 0 1 5.25 6h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 5 6.75v-.5zm-3 0A.25.25 0 0 1 2.25 6h1.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-1.5A.25.25 0 0 1 2 6.75v-.5zm0 4a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm2 0a.25.25 0 0 1 .25-.25h5.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-5.5a.25.25 0 0 1-.25-.25v-.5z"/>
-          </svg>
-          Keyboard Shortcuts
-        </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body pt-2">
-        <div class="kbd-shortcuts-list">
-          <div class="shortcut-row"><span class="text-muted">Search objects</span><kbd>/</kbd></div>
-          <div class="shortcut-row"><span class="text-muted">Select all</span><span><kbd>Ctrl</kbd> + <kbd>A</kbd></span></div>
-          <div class="shortcut-row"><span class="text-muted">Delete selected</span><kbd>Del</kbd></div>
-          <div class="shortcut-row"><span class="text-muted">Clear search</span><kbd>Esc</kbd></div>
-          <div class="shortcut-row"><span class="text-muted">Show shortcuts</span><kbd>?</kbd></div>
-        </div>
-      </div>
-    </div>
+<dialog class="ui-dialog ob-shortcuts" id="keyboardShortcutsModal" aria-labelledby="keyboardShortcutsTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="keyboardShortcutsTitle">Keyboard shortcuts</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
-</div>
+  <div class="ui-dialog-body">
+    <dl class="ob-shortcut-list">
+      <div><dt>Search objects</dt><dd><kbd>/</kbd></dd></div>
+      <div><dt>Select all</dt><dd><kbd>Ctrl</kbd> + <kbd>A</kbd></dd></div>
+      <div><dt>Delete selected</dt><dd><kbd>Del</kbd></dd></div>
+      <div><dt>Clear search</dt><dd><kbd>Esc</kbd></dd></div>
+      <div><dt>Show shortcuts</dt><dd><kbd>?</kbd></dd></div>
+    </dl>
+  </div>
+</dialog>
 {% endblock %}
 
 {% block extra_scripts %}
 <script src="{{ url_for(endpoint="static", filename="js/bucket-detail-utils.js") }}"></script>
+<script src="{{ url_for(endpoint="static", filename="js/bucket-detail-upload.js") }}"></script>
 <script src="{{ url_for(endpoint="static", filename="js/bucket-detail-main.js") }}"></script>
 <script>
 window.BucketDetailConfig = {
