@@ -12,9 +12,14 @@
         return Math.floor(diff / 86400) + "d ago";
     }
     function pctColor(p) {
-        if (p >= 80) return "bg-danger";
-        if (p >= 60) return "bg-warning";
-        return "bg-success";
+        if (p >= 80) return "is-bad";
+        if (p >= 60) return "is-warn";
+        return "is-ok";
+    }
+    function toneBar(bar, pct) {
+        var track = bar.parentElement;
+        track.classList.remove("is-ok", "is-warn", "is-bad");
+        track.classList.add(pctColor(pct));
     }
     function applyBytesFormat(root) {
         (root || document).querySelectorAll("[data-bytes]").forEach(function (el) {
@@ -29,8 +34,7 @@
             var used = Math.max(0, total - avail);
             var pct = total > 0 ? (used / total) * 100 : 0;
             bar.style.width = pct.toFixed(1) + "%";
-            bar.classList.remove("bg-success", "bg-warning", "bg-danger", "bg-primary");
-            bar.classList.add(pctColor(pct));
+            toneBar(bar, pct);
             var card = bar.closest(".site-card");
             if (card) {
                 var usedEl = card.querySelector(".site-disk-used");
@@ -51,8 +55,8 @@
             (root || document).querySelectorAll(sel[0]).forEach(function (bar) {
                 var label = bar.closest(".site-card").querySelector(sel[1]);
                 var pct = parseFloat(label ? label.textContent : "0") || 0;
-                bar.classList.remove("bg-success", "bg-warning", "bg-danger");
-                bar.classList.add(pctColor(pct));
+                bar.style.width = Math.min(100, Math.max(0, pct)) + "%";
+                toneBar(bar, pct);
             });
         });
     }
@@ -71,7 +75,7 @@
 
         function toggle(sel, show) {
             var el = card.querySelector(sel);
-            if (el) el.classList.toggle("d-none", !show);
+            if (el) el.hidden = !show;
         }
         toggle(".site-status-online", online);
         toggle(".site-status-offline", !online);
@@ -129,13 +133,13 @@
                 if (isFinite(lastSyncTs) && lastSyncTs > 0) {
                     syncLabel.innerHTML = '<span data-last-sync-at="' + lastSyncTs + '">last sync <span class="last-sync-rel">' + fmtRel(lastSyncTs) + '</span></span>';
                 } else {
-                    syncLabel.innerHTML = '<span class="text-muted">no sync yet</span>';
+                    syncLabel.innerHTML = '<span class="ui-muted">no sync yet</span>';
                 }
             }
             var errBadge = card.querySelector(".site-sync-errors");
             var errCount = sync.errors || 0;
             if (errBadge) {
-                errBadge.classList.toggle("d-none", errCount === 0);
+                errBadge.hidden = errCount === 0;
                 var c = errBadge.querySelector(".site-sync-errors-count");
                 if (c) c.textContent = errCount;
             }
@@ -159,7 +163,7 @@
         };
         var setShown = function (sel, shown) {
             var el = card.querySelector(sel);
-            if (el) el.classList.toggle("d-none", !shown);
+            if (el) el.hidden = !shown;
         };
         setText(".peer-error-title", info.title || "Peer unreachable");
         setText(".peer-error-summary", info.summary || site.error || "The peer could not be reached.");
@@ -180,7 +184,7 @@
         setShown(".peer-error-details", !!detail);
         if (detail) setText(".peer-error-detail-text", detail);
 
-        var icon = card.querySelector(".peer-error-icon");
+        var icon = card.querySelector(".peer-error");
         if (icon) {
             icon.classList.remove("tone-secondary", "tone-warning", "tone-danger");
             icon.classList.add(ERROR_TONES[info.kind] || "tone-danger");
@@ -191,11 +195,8 @@
         var badge = document.getElementById("cluster-online-badge");
         if (!badge) return;
         badge.textContent = online + " / " + total + " online";
-        badge.classList.remove(
-            "bg-success", "text-success", "bg-warning", "text-warning", "bg-danger", "text-danger"
-        );
-        var tone = online === total ? "success" : (online === 0 ? "danger" : "warning");
-        badge.classList.add("bg-" + tone, "text-" + tone);
+        badge.classList.remove("ui-badge-ok", "ui-badge-warn", "ui-badge-bad");
+        badge.classList.add("ui-badge-" + (online === total ? "ok" : (online === 0 ? "bad" : "warn")));
     }
 
     var pageReloading = false;
@@ -204,9 +205,7 @@
 
     function poll(force) {
         var url = "/ui/cluster/data" + (force ? "?force=1" : "");
-        var icon = document.getElementById("cluster-refresh-icon");
         var btn = document.getElementById("cluster-refresh-btn");
-        if (force && icon) icon.classList.add("spin");
         if (force && btn) btn.disabled = true;
         return fetch(url, { credentials: "same-origin", cache: "no-store" })
             .then(function (r) {
@@ -250,7 +249,6 @@
             })
             .catch(function () { pollFailures++; })
             .finally(function () {
-                if (icon) icon.classList.remove("spin");
                 if (btn) btn.disabled = false;
             });
     }
