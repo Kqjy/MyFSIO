@@ -12,6 +12,34 @@
     return isFinite(parsed) ? parsed : 0;
   }
 
+  function sample(value) {
+    if (value === null || value === undefined || value === '') return null;
+    var parsed = Number(value);
+    return isFinite(parsed) ? parsed : null;
+  }
+
+  function present(value) {
+    return value !== null;
+  }
+
+  function stepDecimals(step) {
+    if (!(step > 0) || step >= 1) return 0;
+    return Math.min(8, Math.ceil(-Math.log(step) / Math.LN10 - 1e-9));
+  }
+
+  function tickText(value, step) {
+    var decimals = stepDecimals(step);
+    return num(value).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  }
+
+  function valueText(value) {
+    var parsed = num(value);
+    var size = Math.abs(parsed);
+    if (size === 0) return '0';
+    var decimals = size >= 100 ? 1 : size >= 1 ? 2 : Math.min(12, 2 - Math.floor(Math.log(size) / Math.LN10 + 1e-9));
+    return parsed.toLocaleString(undefined, { maximumFractionDigits: decimals });
+  }
+
   function fixed(value) {
     return (Math.round(value * 100) / 100).toString();
   }
@@ -45,10 +73,14 @@
       ticks.push(Math.abs(tick) < step * 1e-9 ? 0 : parseFloat(tick.toPrecision(12)));
     }
     var format = function(value) {
-      if (typeof ticksOptions.callback === 'function') return String(ticksOptions.callback(value));
-      return (Math.round(value * 1000) / 1000).toLocaleString();
+      if (typeof ticksOptions.callback === 'function') return String(ticksOptions.callback(value, step));
+      return tickText(value, step);
     };
-    return { min: low, max: high, ticks: ticks, format: format };
+    var formatValue = function(value) {
+      if (typeof options.valueFormat === 'function') return String(options.valueFormat(value));
+      return valueText(value);
+    };
+    return { min: low, max: high, step: step, ticks: ticks, format: format, formatValue: formatValue };
   }
 
   function colorAt(color, index) {
@@ -187,7 +219,7 @@
     var series = datasets.map(function(dataset, index) {
       var kind = dataset.type || self.type;
       var axisId = horizontal ? 'x' : (dataset.yAxisID || 'y');
-      return { dataset: dataset, index: index, kind: kind, axisId: axisId, values: (dataset.data || []).map(num), base: [], top: [] };
+      return { dataset: dataset, index: index, kind: kind, axisId: axisId, values: (dataset.data || []).map(sample), base: [], top: [] };
     });
     var axisIds = [];
     series.forEach(function(entry) { if (axisIds.indexOf(entry.axisId) === -1) axisIds.push(entry.axisId); });
@@ -203,6 +235,10 @@
         entry.values.forEach(function(value, i) {
           var base = stacked ? (totals[i] || 0) : 0;
           entry.base[i] = base;
+          if (!present(value)) {
+            entry.top[i] = null;
+            return;
+          }
           entry.top[i] = base + value;
           totals[i] = entry.top[i];
           extent.push(entry.top[i]);
@@ -318,6 +354,7 @@
       var axis = axes[entry.axisId];
       var radius = Math.min(num(entry.dataset.borderRadius), barSize / 2);
       entry.values.forEach(function(value, i) {
+        if (!present(value)) return;
         var from = valueToPixel(axis, entry.base[i]);
         var to = valueToPixel(axis, entry.top[i]);
         var length = Math.abs(to - from);
@@ -338,26 +375,48 @@
       points[entry.index] = [];
       if (entry.kind !== 'line' || horizontal || !entry.values.length) return;
       var axis = axes[entry.axisId];
-      var topLine = entry.values.map(function(_, i) { return [position(i), valueToPixel(axis, entry.top[i])]; });
+      var topLine = entry.values.map(function(value, i) {
+        return present(value) ? [position(i), valueToPixel(axis, entry.top[i])] : null;
+      });
       points[entry.index] = topLine;
       var path = function(list) {
         return list.map(function(point) { return fixed(point[0]) + ',' + fixed(point[1]); }).join('L');
       };
       var color = esc(entry.dataset.borderColor || '#008ef7');
-      if (entry.dataset.fill) {
-        var floor = entry.values.map(function(_, i) {
-          return [position(i), valueToPixel(axis, entry.stacked ? entry.base[i] : Math.max(axis.scale.min, Math.min(0, axis.scale.max)))];
-        }).reverse();
-        out.push('<path d="M' + path(topLine) + 'L' + path(floor) + 'Z" fill="' + esc(entry.dataset.backgroundColor || color) + '" stroke="none"/>');
-      }
-      if (topLine.length === 1) {
-        out.push('<circle cx="' + fixed(topLine[0][0]) + '" cy="' + fixed(topLine[0][1]) + '" r="2.5" fill="' + color + '"/>');
-      } else {
-        out.push('<path d="M' + path(topLine) + '" fill="none" stroke="' + color + '" stroke-width="' + num(entry.dataset.borderWidth || 1.5) + '" stroke-linejoin="round" stroke-linecap="round"/>');
-      }
+      var floorValue = Math.max(axis.scale.min, Math.min(0, axis.scale.max));
+      var runs = [];
+      var run = null;
+      topLine.forEach(function(point, i) {
+        if (!point) {
+          run = null;
+          return;
+        }
+        if (!run) {
+          run = [];
+          runs.push(run);
+        }
+        run.push(i);
+      });
+      var drawn = 0;
+      runs.forEach(function(indexes) {
+        var line = indexes.map(function(i) { return topLine[i]; });
+        drawn += line.length;
+        if (entry.dataset.fill) {
+          var floor = indexes.map(function(i) {
+            return [position(i), valueToPixel(axis, entry.stacked ? entry.base[i] : floorValue)];
+          }).reverse();
+          out.push('<path d="M' + path(line) + 'L' + path(floor) + 'Z" fill="' + esc(entry.dataset.backgroundColor || color) + '" stroke="none"/>');
+        }
+        if (line.length === 1) {
+          out.push('<circle cx="' + fixed(line[0][0]) + '" cy="' + fixed(line[0][1]) + '" r="2.5" fill="' + color + '"/>');
+        } else {
+          out.push('<path d="M' + path(line) + '" fill="none" stroke="' + color + '" stroke-width="' + num(entry.dataset.borderWidth || 1.5) + '" stroke-linejoin="round" stroke-linecap="round"/>');
+        }
+      });
       var pointRadius = num(entry.dataset.pointRadius);
-      if (pointRadius > 0 && topLine.length <= 80) {
+      if (pointRadius > 0 && drawn <= 80) {
         topLine.forEach(function(point) {
+          if (!point) return;
           out.push('<circle cx="' + fixed(point[0]) + '" cy="' + fixed(point[1]) + '" r="' + pointRadius + '" fill="' + color + '"/>');
         });
       }
@@ -386,13 +445,15 @@
     var layout = this.layout;
     var callbacks = (this.pluginOptions('tooltip').callbacks) || {};
     var labels = this.data.labels || [];
-    var items = layout.series.filter(function(entry) { return index < entry.values.length; }).map(function(entry) {
+    var covering = layout.series.filter(function(entry) { return index < entry.values.length; });
+    var items = covering.filter(function(entry) { return present(entry.values[index]); }).map(function(entry) {
       return {
         dataIndex: index, datasetIndex: entry.index, dataset: entry.dataset, label: labels[index],
         parsed: { x: entry.values[index], y: entry.values[index] }, entry: entry
       };
     });
-    var title = typeof callbacks.title === 'function' ? callbacks.title(items) : labels[index];
+    var titleItems = items.length ? items : [{ dataIndex: index, label: labels[index] }];
+    var title = typeof callbacks.title === 'function' ? callbacks.title(titleItems) : labels[index];
     var rows = [];
     items.forEach(function(item) {
       var color = item.dataset.borderColor || colorAt(item.dataset.backgroundColor, index);
@@ -401,13 +462,14 @@
         text = callbacks.label(item);
       } else {
         var axis = layout.axes[item.entry.axisId];
-        text = (item.dataset.label ? item.dataset.label + ': ' : '') + axis.scale.format(item.entry.values[index]);
+        text = (item.dataset.label ? item.dataset.label + ': ' : '') + axis.scale.formatValue(item.entry.values[index]);
       }
       (Array.isArray(text) ? text : [text]).forEach(function(line, lineIndex) {
         rows.push('<div class="svg-chart-tip-row">' + (lineIndex === 0 ? '<i style="background:' + esc(color) + '"></i>' : '<i></i>') + esc(line) + '</div>');
       });
     });
-    if (!rows.length) return '';
+    if (!covering.length) return '';
+    if (!rows.length) rows.push('<div class="svg-chart-tip-row"><i></i>No data recorded</div>');
     return (title === undefined || title === null || title === '' ? '' : '<div class="svg-chart-tip-title">' + esc(title) + '</div>') + rows.join('');
   };
 
@@ -462,5 +524,7 @@
     this.tipEl.style.top = (offsetY + topPx) + 'px';
   };
 
+  SvgChart.tickText = tickText;
+  SvgChart.valueText = valueText;
   window.SvgChart = SvgChart;
 })();

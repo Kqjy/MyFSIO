@@ -90,7 +90,7 @@ function bootstrapOperationsSection() {
 
   var formatBytes = window.MyFSIO.formatBytes;
 
-  function trendChartOpts(color, yCallback) {
+  function trendChartOpts(color, yCallback, valueFormat) {
     return {
       type: 'line',
       data: { labels: [], datasets: [{
@@ -105,7 +105,7 @@ function bootstrapOperationsSection() {
         },
         scales: {
           x: { display: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
-          y: { display: true, beginAtZero: true, ticks: { callback: yCallback, font: { size: 10 } } }
+          y: { display: true, beginAtZero: true, valueFormat: valueFormat, ticks: { callback: yCallback, font: { size: 10 } } }
         }
       }
     };
@@ -164,7 +164,7 @@ function bootstrapOperationsSection() {
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 10 } } } },
-          scales: { y: { beginAtZero: true, ticks: { callback: function(v) { return v + 'ms'; } } } }
+          scales: { y: { beginAtZero: true, valueFormat: function(v) { return SvgChart.valueText(v) + ' ms'; }, ticks: { callback: function(v, step) { return SvgChart.tickText(v, step) + 'ms'; } } } }
         }
       });
     }
@@ -175,13 +175,15 @@ function bootstrapOperationsSection() {
     var teCtx = document.getElementById('opTrendErrorRate');
     var ecCtx = document.getElementById('opTrendErrorCodes');
 
-    if (trCtx) trendReqRate = new SvgChart(trCtx, trendChartOpts('#3b82f6', function(v) { return v.toFixed(1); }));
+    if (trCtx) trendReqRate = new SvgChart(trCtx, trendChartOpts('#3b82f6', SvgChart.tickText, function(v) { return SvgChart.valueText(v) + ' req/s'; }));
     if (ttCtx) {
-      trendThroughput = new SvgChart(ttCtx, trendChartOpts('#10b981', function(v) { return formatBytes(v) + '/s'; }));
+      trendThroughput = new SvgChart(ttCtx, trendChartOpts('#10b981', function(v) { return formatBytes(v) + '/s'; }, function(v) {
+        return (v > 0 && v < 1 ? SvgChart.valueText(v) + ' B' : formatBytes(v)) + '/s';
+      }));
       trendThroughput.options.scales.y.ticks.precision = 0;
     }
-    if (tlCtx) trendLatency = new SvgChart(tlCtx, trendChartOpts('#8b5cf6', function(v) { return v.toFixed(Number.isInteger(v) ? 0 : 1) + 'ms'; }));
-    if (teCtx) trendErrorRate = new SvgChart(teCtx, trendChartOpts('#ef4444', function(v) { return v.toFixed(1) + '%'; }));
+    if (tlCtx) trendLatency = new SvgChart(tlCtx, trendChartOpts('#8b5cf6', function(v, step) { return SvgChart.tickText(v, step) + 'ms'; }, function(v) { return SvgChart.valueText(v) + ' ms'; }));
+    if (teCtx) trendErrorRate = new SvgChart(teCtx, trendChartOpts('#ef4444', function(v, step) { return SvgChart.tickText(v, step) + '%'; }, function(v) { return SvgChart.valueText(v) + '%'; }));
     if (ecCtx) {
       trendErrorCodes = new SvgChart(ecCtx, {
         type: 'bar',
