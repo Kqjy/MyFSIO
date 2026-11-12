@@ -42,7 +42,7 @@
     var ticks = [];
     var first = Math.ceil(low / step - 1e-9) * step;
     for (var tick = first; tick <= high + step * 1e-6 && ticks.length < 50; tick += step) {
-      ticks.push(Math.abs(tick) < step * 1e-9 ? 0 : tick);
+      ticks.push(Math.abs(tick) < step * 1e-9 ? 0 : parseFloat(tick.toPrecision(12)));
     }
     var format = function(value) {
       if (typeof ticksOptions.callback === 'function') return String(ticksOptions.callback(value));
