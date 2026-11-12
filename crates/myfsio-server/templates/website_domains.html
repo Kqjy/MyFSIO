@@ -3,323 +3,191 @@
 {% block title %}Website domains{% endblock %}
 
 {% block content %}
-<div class="page-header d-flex justify-content-between align-items-center mb-4">
+<div class="ui-pagehead">
   <div>
-    <p class="text-uppercase text-muted small mb-1">Storage</p>
-    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
-      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-        <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
-        <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
-      </svg>
-      Website domains
-    </h1>
-    <p class="text-muted mb-0 mt-1">Map custom domains to buckets for static website hosting.</p>
+    <h1>Website domains</h1>
+    <div class="ui-pagehead-sub">Map custom domains to buckets for static website hosting.</div>
   </div>
+  {% if mappings %}
+  <div class="ui-pagehead-actions">
+    <button type="button" class="ui-btn" id="btnCheckAllDns" data-ui-tip="Resolve every mapped domain and compare it against this server" data-ui-tip-side="bottom">Check DNS</button>
+  </div>
+  {% endif %}
 </div>
 
 {% if not website_hosting_enabled %}
-<div class="alert alert-warning d-flex align-items-start" role="alert">
-  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-    <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-  </svg>
-  <div>
-    <strong>Website hosting is disabled.</strong> Domain mappings cannot be created or served.
-    Set <code>WEBSITE_HOSTING_ENABLED=true</code> and restart the server to enable this feature.
-  </div>
+<div class="ad-note ad-note-warn ad-banner" role="alert">
+  <strong>Website hosting is disabled.</strong> Domain mappings cannot be created or served.
+  Set <code>WEBSITE_HOSTING_ENABLED=true</code> and restart the server to enable this feature.
 </div>
 {% endif %}
 
-<div class="row g-4">
-  <div class="col-lg-8 col-md-7">
-    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-        <div class="d-flex justify-content-between align-items-center mb-1">
-          <h5 class="fw-semibold d-flex align-items-center gap-2 mb-0">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-              <path fill-rule="evenodd" d="M5 11.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm-3 1a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/>
-            </svg>
-            Active Mappings
-          </h5>
-          {% if mappings %}
-          <button type="button" class="btn btn-outline-secondary btn-sm" id="btnCheckAllDns" title="Resolve every mapped domain and compare it against this server">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-              <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z"/>
-            </svg>
-            Check DNS
-          </button>
+<div class="ad-split ad-split-end">
+  <section class="ui-card" aria-labelledby="mappingsTitle">
+    <h2 class="ad-sr" id="mappingsTitle">Active mappings</h2>
+    {% if mappings %}
+    {% if mappings|length > 3 %}
+    <div class="ui-toolbar">
+      <div class="ad-filter">
+        <input type="search" class="ui-input" id="domainSearch" placeholder="Filter by domain or bucket" aria-label="Filter mappings" autocomplete="off">
+      </div>
+    </div>
+    {% endif %}
+    <div class="ui-table-wrap">
+      <table class="ui-table" id="domainTable">
+        <thead>
+          <tr>
+            <th scope="col">Domain</th>
+            <th scope="col" class="ui-hide-m">Bucket</th>
+            <th scope="col">DNS</th>
+            <th scope="col"><span class="ad-sr">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in mappings %}
+          <tr data-domain="{{ m.domain }}" data-bucket="{{ m.bucket }}">
+            <td>
+              <div class="ui-name"><span class="ui-fileicon is-accent"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg></span><span class="ui-mono ad-wrap">{{ m.domain }}</span></div>
+              <div class="ui-muted ad-sub ui-show-m">{{ m.bucket }}</div>
+              <div class="ad-sub dns-status-text" hidden></div>
+            </td>
+            <td class="ui-hide-m"><span class="ui-badge ui-badge-accent">{{ m.bucket }}</span></td>
+            <td>
+              <button type="button" class="ui-badge ad-badge-btn dns-check-btn" data-domain="{{ m.domain }}" data-ui-tip="DNS not checked yet. Click to check.">Not checked</button>
+            </td>
+            <td>
+              <div class="ad-row-actions">
+                <button type="button" class="ui-btn ui-btn-sm" data-domain-action="edit">Edit</button>
+                <button type="button" class="ui-btn ui-btn-sm ui-btn-danger" data-domain-action="delete">Delete</button>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="ui-empty" id="noSearchResults" hidden>
+      <p>No mappings match your filter.</p>
+    </div>
+    {% else %}
+    <div class="ui-empty">
+      <svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>
+      <h2>No domain mappings yet</h2>
+      <p>Add a domain mapping to serve a bucket as a static website.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  <div class="ad-stack">
+    <section class="ui-card ad-card-pad" aria-labelledby="addMappingTitle">
+      <h2 class="ad-card-title" id="addMappingTitle">Add domain mapping</h2>
+      {% if not website_hosting_enabled %}
+      <p class="ui-hint">Set <code>WEBSITE_HOSTING_ENABLED=true</code> to add domain mappings.</p>
+      {% else %}
+      <form method="POST" action="{{ url_for(endpoint="ui.create_website_domain") }}" id="createDomainForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
+        <div class="ui-field">
+          <label class="ui-label" for="domain">Domain</label>
+          <input type="text" class="ui-input" id="domain" name="domain" required
+                 placeholder="www.example.com"
+                 pattern="^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
+                 title="Enter a valid hostname (e.g. www.example.com). Do not include http:// or trailing slashes."
+                 aria-describedby="domainHint"
+                 {% if not buckets %}disabled{% endif %}>
+          <div class="ui-hint" id="domainHint">Hostname only, without <code>http://</code> or a trailing slash.</div>
+        </div>
+        <div id="domainPreview" class="ad-note ad-field-note" hidden>
+          Will be served at <code id="domainPreviewUrl"></code>
+        </div>
+        <div class="ui-field">
+          <label class="ui-label" for="bucket">Bucket</label>
+          {% if buckets %}
+          <select class="ui-select ad-select-full" id="bucket" name="bucket" required aria-describedby="bucketHint">
+            <option value="" selected disabled>Select a bucket</option>
+            {% for b in buckets %}
+            <option value="{{ b }}">{{ b }}</option>
+            {% endfor %}
+          </select>
+          <div class="ui-hint" id="bucketHint">Only buckets with website hosting enabled are listed.</div>
+          {% else %}
+          <div class="ad-note ad-note-warn">
+            {% if has_any_buckets %}
+            No bucket has website hosting enabled yet. Turn it on from a bucket's <strong>Properties</strong> tab, then map a domain here.
+            {% else %}
+            There are no buckets yet. Create one, enable website hosting on its <strong>Properties</strong> tab, then map a domain here.
+            {% endif %}
+          </div>
           {% endif %}
         </div>
-        <p class="text-muted small mb-0">Domains currently serving website content</p>
-        {% if mappings|length > 3 %}
-        <div class="mt-3">
-          <div class="search-input-wrapper">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="search-icon" viewBox="0 0 16 16">
-              <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
-            </svg>
-            <input type="text" class="form-control" id="domainSearch" placeholder="Filter by domain or bucket..." autocomplete="off" />
-          </div>
-        </div>
-        {% endif %}
-      </div>
-      <div class="card-body px-3 px-md-4 pb-4">
-        {% if mappings %}
-        <div class="table-responsive">
-          <table class="table table-fluid table-hover align-middle mb-0" id="domainTable">
-            <thead class="table-light">
-              <tr>
-                <th scope="col">Domain</th>
-                <th scope="col" class="d-none d-sm-table-cell">Bucket</th>
-                <th scope="col" class="text-end">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for m in mappings %}
-              <tr data-domain="{{ m.domain }}" data-bucket="{{ m.bucket }}">
-                <td>
-                  <div class="d-flex align-items-start gap-2">
-                    <button type="button" class="btn btn-link p-0 border-0 lh-1 mt-1 flex-shrink-0 dns-check-btn"
-                            data-domain="{{ m.domain }}"
-                            title="DNS not checked yet — click to check">
-                      <span class="dns-status-icon text-muted">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-                          <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                          <path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/>
-                        </svg>
-                      </span>
-                    </button>
-                    <div class="text-break" style="min-width: 0; max-width: 24rem;">
-                      <code class="fw-medium">{{ m.domain }}</code>
-                      <div class="text-muted small">http://{{ m.domain }}</div>
-                      <div class="d-sm-none mt-1">
-                        <span class="badge bg-primary bg-opacity-10 text-primary">{{ m.bucket }}</span>
-                      </div>
-                      <div class="small mt-1 d-none dns-status-text" style="overflow-wrap: anywhere;"></div>
-                    </div>
-                  </div>
-                </td>
-                <td class="d-none d-sm-table-cell"><span class="badge bg-primary bg-opacity-10 text-primary">{{ m.bucket }}</span></td>
-                <td class="text-end">
-                  <div class="btn-group btn-group-sm" role="group">
-                    <button type="button" class="btn btn-outline-secondary"
-                            data-bs-toggle="modal"
-                            data-bs-target="#editDomainModal"
-                            data-domain="{{ m.domain }}"
-                            data-bucket="{{ m.bucket }}"
-                            title="Edit mapping">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
-                      </svg>
-                    </button>
-                    <button type="button" class="btn btn-outline-danger"
-                            data-bs-toggle="modal"
-                            data-bs-target="#deleteDomainModal"
-                            data-domain="{{ m.domain }}"
-                            data-bucket="{{ m.bucket }}"
-                            title="Delete mapping">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                      </svg>
-                    </button>
-                  </div>
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        <div id="noSearchResults" class="text-center py-4 d-none">
-          <p class="text-muted mb-0">No mappings match your search.</p>
-        </div>
-        {% else %}
-        <div class="empty-state text-center py-5">
-          <div class="empty-state-icon mx-auto mb-3">
-            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-              <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
-              <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
-            </svg>
-          </div>
-          <h5 class="fw-semibold mb-2">No domain mappings yet</h5>
-          <p class="text-muted mb-0">Add your first domain mapping to serve a bucket as a static website.</p>
-        </div>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-  <div class="col-lg-4 col-md-5">
-    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-        <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
-          </svg>
-          Add Domain Mapping
-        </h5>
-        <p class="text-muted small mb-0">Point a custom domain to a bucket</p>
-      </div>
-      <div class="card-body px-4 pb-4">
-        {% if not website_hosting_enabled %}
-        <div class="text-center py-4 text-muted">
-          <p class="mb-1">Website hosting is disabled.</p>
-          <p class="small mb-0">Set <code>WEBSITE_HOSTING_ENABLED=true</code> to add domain mappings.</p>
-        </div>
-        {% else %}
-        <form method="POST" action="{{ url_for(endpoint="ui.create_website_domain") }}" id="createDomainForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
-          <div class="mb-3">
-            <label for="domain" class="form-label fw-medium">Domain</label>
-            <input type="text" class="form-control" id="domain" name="domain" required
-                   placeholder="www.example.com"
-                   pattern="^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
-                   title="Enter a valid hostname (e.g. www.example.com). Do not include http:// or trailing slashes."
-                   {% if not buckets %}disabled{% endif %}>
-            <div class="form-text">Hostname only &mdash; no <code>http://</code> prefix or trailing slash.</div>
-          </div>
-          <div id="domainPreview" class="alert alert-light border small py-2 px-3 mb-3 d-none">
-            <span class="text-muted">Will be accessible at:</span>
-            <code id="domainPreviewUrl" class="ms-1"></code>
-          </div>
-          <div class="mb-3">
-            <label for="bucket" class="form-label fw-medium">Bucket</label>
-            {% if buckets %}
-            <select class="form-select" id="bucket" name="bucket" required>
-              <option value="" selected disabled>Select a bucket</option>
-              {% for b in buckets %}
-              <option value="{{ b }}">{{ b }}</option>
-              {% endfor %}
-            </select>
-            <div class="form-text">Only buckets with website hosting enabled are listed.</div>
-            {% else %}
-            <div class="alert alert-warning small py-2 px-3 mb-0">
-              {% if has_any_buckets %}
-              No bucket has website hosting enabled yet. Turn it on from a bucket's <strong>Properties</strong> tab, then map a domain here.
-              {% else %}
-              There are no buckets yet. Create one, enable website hosting on its <strong>Properties</strong> tab, then map a domain here.
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-          <div class="d-grid">
-            <button type="submit" class="btn btn-primary" id="addMappingBtn" {% if not buckets %}disabled{% endif %}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
-              </svg>
-              Add Mapping
-            </button>
-          </div>
-        </form>
-        {% endif %}
-      </div>
-    </div>
-
-    <div class="card shadow-sm border-0 mt-4" style="border-radius: 1rem;">
-      <div class="card-body px-4 py-3">
-        <h6 class="fw-semibold mb-2 d-flex align-items-center gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
-          </svg>
-          How it works
-        </h6>
-        <ol class="small text-muted mb-0 ps-3">
-          <li class="mb-1">Enable website hosting on a bucket (Properties tab)</li>
-          <li class="mb-1">Create a domain mapping here</li>
-          <li class="mb-1">Point your DNS (A/CNAME) to this server</li>
-          <li>Use <strong>Check DNS</strong> to confirm the domain resolves here (port {{ website_port }})</li>
-        </ol>
-      </div>
-    </div>
-  </div>
-</div>
-
-<div class="modal fade" id="editDomainModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
-          </svg>
-          Edit Domain Mapping
-        </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <form method="POST" id="editDomainForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
-        <div class="modal-body">
-          <div class="mb-3">
-            <label class="form-label fw-medium">Domain</label>
-            <input type="text" class="form-control bg-light" id="editDomainName" disabled>
-          </div>
-          <div class="mb-3">
-            <label for="editBucket" class="form-label fw-medium">Bucket</label>
-            {% if buckets %}
-            <select class="form-select" id="editBucket" name="bucket" required>
-              {% for b in buckets %}
-              <option value="{{ b }}">{{ b }}</option>
-              {% endfor %}
-            </select>
-            <div class="form-text">Only buckets with website hosting enabled are listed.</div>
-            {% else %}
-            <div class="alert alert-warning small py-2 px-3 mb-0">
-              No bucket has website hosting enabled. Turn it on from a bucket's <strong>Properties</strong> tab before reassigning this domain.
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-primary" {% if not buckets %}disabled{% endif %}>
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-              <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
-            </svg>
-            Save
-          </button>
-        </div>
+        <button type="submit" class="ui-btn ui-btn-primary ad-btn-block" id="addMappingBtn" {% if not buckets %}disabled{% endif %}>Add mapping</button>
       </form>
-    </div>
+      {% endif %}
+    </section>
+
+    <section class="ui-card ad-card-pad" aria-labelledby="howItWorksTitle">
+      <h2 class="ad-card-title" id="howItWorksTitle">How it works</h2>
+      <ol class="ad-steps">
+        <li>Enable website hosting on a bucket (Properties tab).</li>
+        <li>Create a domain mapping here.</li>
+        <li>Point your DNS (A/CNAME) to this server.</li>
+        <li>Use <strong>Check DNS</strong> to confirm the domain resolves here (port {{ website_port }}).</li>
+      </ol>
+    </section>
   </div>
 </div>
 
-<div class="modal fade" id="deleteDomainModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <form method="POST" id="deleteDomainForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
-        <div class="modal-header border-0 pb-0">
-          <h5 class="modal-title fw-semibold">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
-              <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-            </svg>
-            Delete Domain Mapping
-          </h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <p>Are you sure you want to delete the mapping for <strong><code id="deleteDomainName"></code></strong>?</p>
-          <p class="text-muted small mb-0">Mapped to bucket: <code id="deleteBucketName"></code></p>
-          <div class="alert alert-warning d-flex align-items-start small mt-3 mb-0" role="alert">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-0" viewBox="0 0 16 16">
-              <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-            </svg>
-            <div>This domain will stop serving website content immediately.</div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-danger">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-              <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-            </svg>
-            Delete
-          </button>
-        </div>
-      </form>
+<dialog class="ui-dialog" id="editDomainDialog" aria-labelledby="editDomainTitle">
+  <form method="POST" id="editDomainForm" class="ad-dialog-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="editDomainTitle">Edit domain mapping</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-body">
+      <div class="ui-field">
+        <label class="ui-label" for="editDomainName">Domain</label>
+        <input type="text" class="ui-input ui-mono" id="editDomainName" disabled>
+      </div>
+      <div class="ui-field">
+        <label class="ui-label" for="editBucket">Bucket</label>
+        {% if buckets %}
+        <select class="ui-select ad-select-full" id="editBucket" name="bucket" required>
+          {% for b in buckets %}
+          <option value="{{ b }}">{{ b }}</option>
+          {% endfor %}
+        </select>
+        <div class="ui-hint">Only buckets with website hosting enabled are listed.</div>
+        {% else %}
+        <div class="ad-note ad-note-warn">
+          No bucket has website hosting enabled. Turn it on from a bucket's <strong>Properties</strong> tab before reassigning this domain.
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button type="submit" class="ui-btn ui-btn-primary" {% if not buckets %}disabled{% endif %}>Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="ui-dialog" id="deleteDomainDialog" aria-labelledby="deleteDomainTitle">
+  <form method="POST" id="deleteDomainForm" class="ad-dialog-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="deleteDomainTitle">Delete domain mapping</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="ui-dialog-body">
+      <p class="ad-lead">Delete the mapping for <strong class="ui-mono" id="deleteDomainName"></strong>, which points to bucket <strong id="deleteBucketName"></strong>?</p>
+      <div class="ad-note ad-note-warn">This domain will stop serving website content immediately.</div>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button type="submit" class="ui-btn ui-btn-danger-fill">Delete</button>
+    </div>
+  </form>
+</dialog>
 <div id="websiteDomainsConfig" hidden data-update-url="{{ url_for(endpoint="ui.update_website_domain", domain="__DOMAIN__") }}" data-delete-url="{{ url_for(endpoint="ui.delete_website_domain", domain="__DOMAIN__") }}" data-dns-check-url="{{ url_for(endpoint="ui.website_domain_dns_check", domain="__DOMAIN__") }}"></div>
 {% endblock %}
 
