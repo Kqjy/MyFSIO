@@ -1305,6 +1305,1231 @@
     messageModalAction.hidden = true;
   });
 
+  const normalizePolicyTemplate = (rawTemplate) => {
+    if (!rawTemplate) {
+      return '';
+    }
+    try {
+      let parsed = JSON.parse(rawTemplate);
+      if (typeof parsed === 'string') {
+        parsed = JSON.parse(parsed);
+      }
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return rawTemplate;
+    }
+  };
+
+  let publicPolicyTemplate = normalizePolicyTemplate(policyTextarea?.dataset.publicTemplate || '');
+  let customPolicyDraft = policyTextarea?.value || '';
+  const policyReadonlyHint = document.getElementById('policyReadonlyHint');
+  const presetButtons = Array.from(document.querySelectorAll('.preset-btn[data-preset]'));
+
+  const setActivePolicyPreset = (preset) => {
+    if (policyPreset) {
+      policyPreset.value = preset;
+    }
+    presetButtons.forEach(button => {
+      button.classList.toggle('active', button.dataset.preset === preset);
+    });
+  };
+
+  const setPolicyTextareaState = (readonly) => {
+    if (!policyTextarea) return;
+    if (readonly) {
+      policyTextarea.setAttribute('readonly', 'readonly');
+      policyTextarea.classList.add('bg-body-secondary');
+      policyTextarea.classList.add('policy-editor-disabled');
+      policyTextarea.setAttribute('aria-disabled', 'true');
+    } else {
+      policyTextarea.removeAttribute('readonly');
+      policyTextarea.classList.remove('bg-body-secondary');
+      policyTextarea.classList.remove('policy-editor-disabled');
+      policyTextarea.removeAttribute('aria-disabled');
+    }
+  };
+
+  const applyPolicyPreset = (preset) => {
+    if (!policyTextarea || !policyMode) return;
+    const isPresetMode = preset === 'private' || preset === 'public';
+    if (policyReadonlyHint) {
+      policyReadonlyHint.classList.toggle('d-none', !isPresetMode);
+    }
+    switch (preset) {
+      case 'private':
+        setPolicyTextareaState(true);
+        policyTextarea.value = '';
+        policyMode.value = 'delete';
+        break;
+      case 'public':
+        setPolicyTextareaState(true);
+        policyTextarea.value = publicPolicyTemplate || '';
+        policyMode.value = 'upsert';
+        break;
+      default:
+        setPolicyTextareaState(false);
+        policyTextarea.value = customPolicyDraft;
+        policyMode.value = 'upsert';
+        break;
+    }
+  };
+
+  policyTextarea?.addEventListener('input', () => {
+    if (policyPreset?.value === 'custom') {
+      customPolicyDraft = policyTextarea.value;
+    }
+  });
+
+  presetButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      setActivePolicyPreset(btn.dataset.preset);
+      applyPolicyPreset(btn.dataset.preset);
+    });
+  });
+
+  if (policyPreset) {
+    setActivePolicyPreset(policyPreset.value || policyPreset.dataset.default || 'custom');
+    applyPolicyPreset(policyPreset.value || policyPreset.dataset.default || 'custom');
+  }
+
+  policyForm?.addEventListener('submit', () => {
+    if (!policyMode || !policyPreset || !policyTextarea) {
+      return;
+    }
+    if (policyPreset.value === 'private') {
+      policyMode.value = 'delete';
+      policyTextarea.value = '';
+    } else if (policyPreset.value === 'public') {
+      policyMode.value = 'upsert';
+      policyTextarea.value = publicPolicyTemplate || policyTextarea.value;
+    } else {
+      policyMode.value = 'upsert';
+    }
+  });
+
+  const bulkActionsWrapper = document.getElementById('bulk-actions-wrapper');
+  const bulkSelectionCount = document.getElementById('bulk-selection-count');
+  const bulkDownloadButton = document.querySelector('[data-bulk-download-trigger]');
+  const updateBulkDownloadState = () => {
+    if (!bulkDownloadButton) return;
+    bulkDownloadButton.disabled = selectedRows.size === 0;
+  };
+  const updateBulkDeleteState = () => {
+    const selectedCount = selectedRows.size;
+    if (bulkDeleteButton) {
+      const shouldShow = Boolean(bulkDeleteEndpoint) && (selectedCount > 0 || bulkDeleting);
+      bulkDeleteButton.disabled = !bulkDeleteEndpoint || selectedCount === 0 || bulkDeleting;
+      if (bulkDeleteLabel) {
+        bulkDeleteLabel.textContent = selectedCount ? `Delete (${selectedCount})` : 'Delete';
+      }
+      if (bulkActionsWrapper) {
+        bulkActionsWrapper.classList.toggle('d-none', !shouldShow);
+      }
+      if (bulkSelectionCount) {
+        let selectedBytes = 0;
+        selectedRows.forEach((entry) => {
+          const size = Number(entry?.dataset ? entry.dataset.size : entry?.size);
+          if (Number.isFinite(size)) selectedBytes += size;
+        });
+        bulkSelectionCount.textContent = `${selectedCount} selected` + (selectedBytes > 0 ? ` · ${formatBytes(selectedBytes)}` : '');
+      }
+    }
+    if (bulkDeleteConfirm) {
+      bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
+    }
+    if (selectAllCheckbox) {
+      const filesInView = visibleItems.filter(item => item.type === 'file');
+      const foldersInView = visibleItems.filter(item => item.type === 'folder');
+      const total = filesInView.length + foldersInView.length;
+      const fileSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
+      const folderSelectedCount = foldersInView.filter(item => selectedRows.has(item.path)).length;
+      const visibleSelectedCount = fileSelectedCount + folderSelectedCount;
+      selectAllCheckbox.disabled = total === 0;
+      selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
+      selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
+    }
+    updateBulkDownloadState();
+  };
+
+  function toggleRowSelection(row, shouldSelect) {
+    if (!row || !row.dataset.key) return;
+    if (shouldSelect) {
+      selectedRows.set(row.dataset.key, row);
+    } else {
+      selectedRows.delete(row.dataset.key);
+    }
+    updateBulkDeleteState();
+  }
+
+  const renderBulkDeletePreview = () => {
+    if (!bulkDeleteList) return;
+    const keys = Array.from(selectedRows.keys());
+    bulkDeleteList.innerHTML = '';
+    if (bulkDeleteCount) {
+      const folderCount = keys.filter(k => k.endsWith('/')).length;
+      const objectCount = keys.length - folderCount;
+      const parts = [];
+      if (folderCount) parts.push(`${folderCount} folder${folderCount !== 1 ? 's' : ''}`);
+      if (objectCount) parts.push(`${objectCount} object${objectCount !== 1 ? 's' : ''}`);
+      bulkDeleteCount.textContent = `${parts.join(' and ')} selected`;
+    }
+    if (!keys.length) {
+      const empty = document.createElement('li');
+      empty.className = 'ui-muted';
+      empty.textContent = 'No objects selected.';
+      bulkDeleteList.appendChild(empty);
+      if (bulkDeleteStatus) {
+        bulkDeleteStatus.textContent = '';
+      }
+      return;
+    }
+    const preview = keys.slice(0, 6);
+    preview.forEach((key) => {
+      const item = document.createElement('li');
+      item.className = 'ui-mono';
+      item.textContent = key;
+      bulkDeleteList.appendChild(item);
+    });
+    if (bulkDeleteStatus) {
+      bulkDeleteStatus.textContent = keys.length > preview.length ? `+${keys.length - preview.length} more not shown` : '';
+    }
+  };
+
+  const openBulkDeleteModal = () => {
+    if (!bulkDeleteModal) {
+      return;
+    }
+    if (selectedRows.size === 0) {
+      showMessage({ title: 'Select objects', body: 'Choose at least one object to delete.', variant: 'warning' });
+      return;
+    }
+    renderBulkDeletePreview();
+    if (bulkDeletePurge) {
+      bulkDeletePurge.checked = false;
+    }
+    if (bulkDeleteConfirm) {
+      bulkDeleteConfirm.disabled = bulkDeleting;
+      bulkDeleteConfirm.textContent = bulkDeleting ? 'Deleting…' : 'Delete objects';
+    }
+    bulkDeleteModal.show();
+  };
+
+  const performBulkDelete = async () => {
+    if (!bulkDeleteEndpoint || selectedRows.size === 0 || !bulkDeleteConfirm) {
+      return;
+    }
+    bulkDeleting = true;
+    bulkDeleteConfirm.disabled = true;
+    bulkDeleteConfirm.textContent = 'Deleting…';
+    updateBulkDeleteState();
+    const payload = {
+      keys: Array.from(selectedRows.keys()),
+    };
+    if (versioningEnabled && bulkDeletePurge?.checked) {
+      payload.purge_versions = true;
+    }
+    try {
+      const response = await fetch(bulkDeleteEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify(payload),
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok || data.error) {
+        throw new Error(data.error || data.message || 'Unable to delete selected objects');
+      }
+      bulkDeleteModal?.hide();
+      const deletedCount = Array.isArray(data.deleted) ? data.deleted.length : selectedRows.size;
+      const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
+      const messageParts = [];
+      if (deletedCount) {
+        messageParts.push(`${deletedCount} deleted`);
+      }
+      if (errorCount) {
+        messageParts.push(`${errorCount} failed`);
+      }
+      const summary = messageParts.length ? messageParts.join(', ') : 'Bulk delete finished';
+      showMessage({ title: 'Bulk delete complete', body: data.message || summary, variant: errorCount ? 'warning' : 'success' });
+      selectedRows.clear();
+      previewEmpty.classList.remove('d-none');
+      previewPanel.classList.add('d-none');
+      activeRow = null;
+      loadObjects(false);
+      refreshBucketUsage();
+    } catch (error) {
+      bulkDeleteModal?.hide();
+      showMessage({ title: 'Delete failed', body: (error && error.message) || 'Unable to delete selected objects', variant: 'danger' });
+    } finally {
+      bulkDeleting = false;
+      if (bulkDeleteConfirm) {
+        bulkDeleteConfirm.disabled = false;
+        bulkDeleteConfirm.textContent = 'Delete objects';
+      }
+      updateBulkDeleteState();
+    }
+  };
+
+  const updateGeneratePresignState = () => {
+    if (!generatePresignButton) return;
+    if (isGeneratingPresign) {
+      generatePresignButton.disabled = true;
+      generatePresignButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Generating…';
+      return;
+    }
+    generatePresignButton.textContent = 'Generate link';
+    generatePresignButton.disabled = !activeRow;
+  };
+
+  const syncPresignExpiryPreset = () => {
+    const custom = presignExpiryPreset?.value === 'custom';
+    presignCustomExpiry?.classList.toggle('d-none', !custom);
+    presignTtl?.classList.remove('is-invalid');
+    presignClampNote?.classList.add('d-none');
+  };
+
+  const selectedPresignExpiry = () => {
+    if (presignExpiryPreset?.value !== 'custom') {
+      return Number(presignExpiryPreset?.value || 900);
+    }
+    const raw = presignTtl?.value.trim() || '';
+    const value = Number(raw);
+    const valid = raw !== ''
+      && Number.isSafeInteger(value)
+      && presignTtl?.checkValidity();
+    presignTtl?.classList.toggle('is-invalid', !valid);
+    if (!valid) {
+      presignTtl?.focus();
+      return null;
+    }
+    return value;
+  };
+
+  const requestPresignedUrl = async () => {
+    if (!activeRow) {
+      showMessage({ title: 'Select an object', body: 'Choose an object before generating a presigned URL.', variant: 'warning' });
+      return;
+    }
+    const endpoint = activeRow.dataset.presignEndpoint;
+    if (!endpoint) {
+      showMessage({ title: 'Unavailable', body: 'Presign endpoint unavailable for this object.', variant: 'danger' });
+      return;
+    }
+    if (isGeneratingPresign) {
+      return;
+    }
+    const expiresIn = selectedPresignExpiry();
+    if (expiresIn === null) {
+      return;
+    }
+    isGeneratingPresign = true;
+    updateGeneratePresignState();
+    presignLink.value = '';
+    presignClampNote?.classList.add('d-none');
+    try {
+      const payload = {
+        method: presignMethod?.value || 'GET',
+        expires_in: expiresIn,
+      };
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        if (response.status === 400 && data.error && data.error.toLowerCase().includes('expiry')) {
+          if (presignTtlFeedback) presignTtlFeedback.textContent = data.error;
+          presignTtl?.classList.add('is-invalid');
+          presignCustomExpiry?.classList.remove('d-none');
+          return;
+        }
+        throw new Error(data.error || 'Unable to generate presigned URL');
+      }
+      presignLink.value = data.url;
+      if (data.clamped && presignClampNote) {
+        const effective = Number(data.effective_expires_in ?? data.expires_in);
+        const maximum = Number(presignTtl?.max || 0);
+        const bound = effective === maximum ? 'maximum' : 'minimum';
+        presignClampNote.textContent = `Expiry clamped to ${effective} seconds (server ${bound})`;
+        presignClampNote.classList.remove('d-none');
+      }
+    } catch (error) {
+      presignModal?.hide();
+      showMessage({ title: 'Presign failed', body: (error && error.message) || 'Unable to generate presigned URL', variant: 'danger' });
+    } finally {
+      isGeneratingPresign = false;
+      if (presignLink?.value && generatePresignButton) {
+        generatePresignButton.disabled = false;
+        generatePresignButton.textContent = 'Link ready';
+        window.setTimeout(updateGeneratePresignState, 1200);
+      } else {
+        updateGeneratePresignState();
+      }
+    }
+  };
+
+  const INTERNAL_METADATA_KEYS = new Set([
+    '__etag__',
+    '__size__',
+    '__content_type__',
+    '__last_modified__',
+    '__storage_class__',
+  ]);
+
+  const isInternalKey = (key) => INTERNAL_METADATA_KEYS.has(key.toLowerCase());
+
+  const renderMetadata = (metadata) => {
+    if (!previewMetadata || !previewMetadataList) return;
+    previewMetadataList.innerHTML = '';
+    if (!metadata) {
+      previewMetadata.classList.add('d-none');
+      return;
+    }
+    const userMetadata = Object.entries(metadata).filter(([key]) => !isInternalKey(key));
+    if (userMetadata.length === 0) {
+      previewMetadata.classList.add('d-none');
+      return;
+    }
+    previewMetadata.classList.remove('d-none');
+    userMetadata.forEach(([key, value]) => {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'metadata-entry';
+      const label = document.createElement('div');
+      label.className = 'metadata-key small';
+      label.textContent = key;
+      const val = document.createElement('div');
+      val.className = 'metadata-value text-break';
+      val.textContent = value;
+      wrapper.appendChild(label);
+      wrapper.appendChild(val);
+      previewMetadataList.appendChild(wrapper);
+    });
+  };
+
+  const describeVersionReason = (reason) => {
+    switch (reason) {
+      case 'delete':
+        return 'delete marker';
+      case 'restore-overwrite':
+        return 'restore overwrite';
+      default:
+        return reason || 'update';
+    }
+  };
+
+  const versionTimestamp = (entry) => {
+    if (!entry) return '';
+    if (entry.archived_at_display) return entry.archived_at_display;
+    const raw = entry.archived_at || entry.last_modified;
+    return raw || entry.version_id;
+  };
+
+  const confirmVersionRestore = (row, version, label = null, onConfirm) => {
+    if (!version) return;
+    const timestamp = versionTimestamp(version);
+    const sizeLabel = formatBytes(Number(version.size) || 0);
+    const reasonLabel = describeVersionReason(version.reason);
+    const targetLabel = label || row?.dataset.key || 'this object';
+    const metadata = version.metadata && typeof version.metadata === 'object' ? Object.entries(version.metadata) : [];
+    const metadataHtml = metadata.length
+      ? `<div class="mt-3"><div class="fw-semibold text-uppercase small">Metadata</div><hr class="my-2"><div class="metadata-stack small">${metadata
+        .map(
+          ([key, value]) =>
+            `<div class="metadata-entry"><div class="metadata-key small">${escapeHtml(key)}</div><div class="metadata-value text-break">${escapeHtml(value)}</div></div>`
+        )
+        .join('')}</div></div>`
+      : '';
+    const summaryHtml = `
+      <div class="small">
+        <div><strong>Target:</strong> ${escapeHtml(targetLabel)}</div>
+        <div><strong>Version ID:</strong> ${escapeHtml(version.version_id)}</div>
+        <div><strong>Timestamp:</strong> ${escapeHtml(timestamp)}</div>
+        <div><strong>Size:</strong> ${escapeHtml(sizeLabel)}</div>
+        <div><strong>Reason:</strong> ${escapeHtml(reasonLabel)}</div>
+      </div>
+      ${metadataHtml}
+    `;
+    const fallbackText = `Restore ${targetLabel} from ${timestamp}? Size ${sizeLabel}. Reason: ${reasonLabel}.`;
+    showMessage({
+      title: 'Restore archived version?',
+      body: fallbackText,
+      bodyHtml: summaryHtml,
+      variant: 'warning',
+      actionText: 'Restore version',
+      onAction: () => {
+        if (typeof onConfirm === 'function') {
+          onConfirm();
+        } else {
+          restoreVersion(row, version);
+        }
+      },
+    });
+  };
+
+  const updateArchivedCount = (count) => {
+    const label = count === 1 ? 'item' : 'items';
+    if (archivedCountBadge) {
+      archivedCountBadge.textContent = `${count} ${label}`;
+      archivedCountBadge.classList.remove('d-none');
+    }
+    if (archivedObjectsChip) {
+      archivedObjectsChip.textContent = `${count.toLocaleString()} archived`;
+      archivedObjectsChip.dataset.state = 'loaded';
+      archivedObjectsChip.classList.remove('d-none');
+    }
+  };
+
+  const renderArchivedLoadError = (message) => {
+    if (archivedBody) {
+      archivedBody.innerHTML = '';
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 4;
+      cell.className = 'text-center text-danger py-3';
+      const text = document.createElement('div');
+      text.textContent = message;
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'btn btn-outline-danger btn-sm mt-2';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => loadArchivedObjects(true));
+      cell.appendChild(text);
+      cell.appendChild(retry);
+      row.appendChild(cell);
+      archivedBody.appendChild(row);
+    }
+    if (archivedCountBadge) archivedCountBadge.classList.add('d-none');
+    if (archivedObjectsChip) {
+      archivedObjectsChip.textContent = 'Archived count unavailable · Retry';
+      archivedObjectsChip.dataset.state = 'error';
+      archivedObjectsChip.classList.remove('d-none');
+    }
+  };
+
+  function renderArchivedRows(items) {
+    if (!archivedBody) return;
+    archivedBody.innerHTML = '';
+    if (!items || items.length === 0) {
+      archivedBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No archived-only objects.</td></tr>';
+      updateArchivedCount(0);
+      return;
+    }
+    updateArchivedCount(items.length);
+    items.forEach((item) => {
+      const row = document.createElement('tr');
+
+      const keyCell = document.createElement('td');
+      const keyLabel = document.createElement('div');
+      keyLabel.className = 'fw-semibold text-break';
+      keyLabel.textContent = item.key;
+      const badgeWrap = document.createElement('div');
+      badgeWrap.className = 'mt-1';
+      const badge = document.createElement('span');
+      badge.className = 'badge text-bg-warning';
+      badge.textContent = 'Archived';
+      badgeWrap.appendChild(badge);
+      keyCell.appendChild(keyLabel);
+      keyCell.appendChild(badgeWrap);
+
+      const latestCell = document.createElement('td');
+      if (item.latest) {
+        const ts = versionTimestamp(item.latest);
+        const sizeLabel = formatBytes(Number(item.latest.size) || 0);
+        latestCell.innerHTML = `<div class="small">${escapeHtml(ts)}</div><div class="text-muted small">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
+      } else {
+        latestCell.innerHTML = '<span class="text-muted small">Unknown</span>';
+      }
+
+      const countCell = document.createElement('td');
+      countCell.className = 'text-end text-muted';
+      countCell.textContent = item.versions;
+
+      const actionsCell = document.createElement('td');
+      actionsCell.className = 'text-end';
+      const btnGroup = document.createElement('div');
+      btnGroup.className = 'btn-group btn-group-sm';
+
+      const restoreButton = document.createElement('button');
+      restoreButton.type = 'button';
+      restoreButton.className = 'btn btn-outline-primary';
+      restoreButton.textContent = 'Restore';
+      restoreButton.disabled = !item.latest || !item.restore_url;
+      restoreButton.addEventListener('click', () => confirmVersionRestore(null, item.latest, item.key, () => restoreArchivedObject(item)));
+
+      const purgeButton = document.createElement('button');
+      purgeButton.type = 'button';
+      purgeButton.className = 'btn btn-outline-danger';
+      purgeButton.textContent = 'Delete versions';
+      purgeButton.addEventListener('click', () => confirmArchivedPurge(item));
+
+      btnGroup.appendChild(restoreButton);
+      btnGroup.appendChild(purgeButton);
+      actionsCell.appendChild(btnGroup);
+
+      row.appendChild(keyCell);
+      row.appendChild(latestCell);
+      row.appendChild(countCell);
+      row.appendChild(actionsCell);
+      archivedBody.appendChild(row);
+    });
+  }
+
+  async function restoreArchivedObject(item) {
+    if (!item?.restore_url) return;
+    try {
+      const response = await fetch(item.restore_url, { method: 'POST' });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to restore archived object');
+      }
+      showMessage({ title: 'Restore scheduled', body: data.message || 'Object restored from archive.', variant: 'success' });
+      await loadArchivedObjects(true);
+      loadObjects(false);
+      refreshBucketUsage();
+    } catch (error) {
+      showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore archived object', variant: 'danger' });
+    }
+  }
+
+  async function purgeArchivedObject(item) {
+    if (!item?.purge_url) return;
+    try {
+      const response = await fetch(item.purge_url, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to delete archived versions');
+      }
+      showMessage({ title: 'Archived versions removed', body: data.message || 'All archived data for this key has been deleted.', variant: 'success' });
+      await loadArchivedObjects(true);
+      refreshBucketUsage();
+    } catch (error) {
+      showMessage({ title: 'Delete failed', body: (error && error.message) || 'Unable to delete archived versions', variant: 'danger' });
+    }
+  }
+
+  function confirmArchivedPurge(item) {
+    const label = item?.key || 'this object';
+    const count = item?.versions || 0;
+    const countLabel = count === 1 ? 'version' : 'versions';
+    showMessage({
+      title: 'Delete archived versions?',
+      body: `Permanently remove ${count} archived ${countLabel} for ${label}? This cannot be undone.`,
+      variant: 'danger',
+      actionText: 'Delete versions',
+      onAction: () => purgeArchivedObject(item),
+    });
+  }
+
+  async function loadArchivedObjects(force = false) {
+    if (!archivedEndpoint) return;
+    if (archivedLoadPromise) return archivedLoadPromise;
+    if (!force && archivedItemsCache) {
+      renderArchivedRows(archivedItemsCache);
+      return;
+    }
+    archivedBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr>';
+    archivedLoadPromise = (async () => {
+      try {
+        const response = await fetch(archivedEndpoint);
+        let data = {};
+        try {
+          data = await response.json();
+        } catch {
+          data = {};
+        }
+        if (!response.ok) {
+          throw new Error(data.error || 'Unable to load archived objects');
+        }
+        archivedItemsCache = Array.isArray(data.objects) ? data.objects : [];
+        renderArchivedRows(archivedItemsCache);
+      } catch (error) {
+        renderArchivedLoadError((error && error.message) || 'Unable to load archived objects');
+      }
+    })();
+    try {
+      await archivedLoadPromise;
+    } finally {
+      archivedLoadPromise = null;
+    }
+  }
+
+  if (archivedRefreshButton) {
+    archivedRefreshButton.addEventListener('click', () => loadArchivedObjects(true));
+  }
+
+  const propertiesTab = document.getElementById('properties-tab');
+  if (propertiesTab) {
+    propertiesTab.addEventListener('shown.bs.tab', () => {
+      if (archivedCard && archivedEndpoint) {
+        loadArchivedObjects();
+      }
+      if (propertiesTab.dataset.scrollToArchived === 'true') {
+        propertiesTab.dataset.scrollToArchived = 'false';
+        archivedCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  }
+
+  archivedObjectsChip?.addEventListener('click', () => {
+    if (archivedObjectsChip.dataset.state === 'error') {
+      loadArchivedObjects(true);
+      return;
+    }
+    if (!propertiesTab) return;
+    propertiesTab.dataset.scrollToArchived = 'true';
+    bootstrap.Tab.getOrCreateInstance(propertiesTab).show();
+    if (propertiesTab.classList.contains('active')) {
+      propertiesTab.dataset.scrollToArchived = 'false';
+      archivedCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
+
+  const archivedLoadTrigger = document.getElementById('pagination-controls');
+  if (versioningEnabled && archivedLoadTrigger && archivedEndpoint) {
+    const archivedObserver = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      archivedObserver.disconnect();
+      loadArchivedObjects();
+    });
+    archivedObserver.observe(archivedLoadTrigger);
+  }
+
+  async function restoreVersion(row, version) {
+    if (!row || !version?.version_id) return;
+    const template = row.dataset.restoreTemplate;
+    if (!template) return;
+    const url = template.replace('VERSION_ID_PLACEHOLDER', version.version_id);
+    try {
+      const response = await fetch(url, { method: 'POST' });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to restore version');
+      }
+      const endpoint = row.dataset.versionsEndpoint;
+      if (endpoint) {
+        versionsCache.delete(endpoint);
+      }
+      await loadObjectVersions(row, { force: true });
+      showMessage({ title: 'Version restored', body: data.message || 'The selected version has been restored.', variant: 'success' });
+      loadObjects(false);
+      refreshBucketUsage();
+    } catch (error) {
+      showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore version', variant: 'danger' });
+    }
+  }
+
+  function renderVersionEntries(entries, row) {
+    if (!versionList) return;
+    if (!entries || entries.length === 0) {
+      versionList.innerHTML = '<p class="text-muted small mb-0">No previous versions yet.</p>';
+      return;
+    }
+    versionList.innerHTML = '';
+    entries.forEach((entry, index) => {
+      const versionNumber = index + 1;
+      const item = document.createElement('div');
+      item.className = 'd-flex align-items-center justify-content-between py-2 border-bottom';
+      const textStack = document.createElement('div');
+      textStack.className = 'me-3';
+      const heading = document.createElement('div');
+      heading.className = 'd-flex align-items-center';
+      const badge = document.createElement('span');
+      badge.className = 'badge text-bg-secondary me-2';
+      badge.textContent = `#${versionNumber}`;
+      const title = document.createElement('div');
+      title.className = 'fw-semibold small';
+      const timestamp = versionTimestamp(entry);
+      title.textContent = timestamp;
+      heading.appendChild(badge);
+      heading.appendChild(title);
+      const meta = document.createElement('div');
+      meta.className = 'text-muted small';
+      const reason = describeVersionReason(entry.reason);
+      const sizeLabel = formatBytes(Number(entry.size) || 0);
+      meta.textContent = `${sizeLabel} · ${reason}`;
+      textStack.appendChild(heading);
+      textStack.appendChild(meta);
+      const restoreButton = document.createElement('button');
+      restoreButton.type = 'button';
+      restoreButton.className = 'btn btn-outline-primary btn-sm';
+      restoreButton.textContent = 'Restore';
+      restoreButton.addEventListener('click', () => confirmVersionRestore(row, entry));
+      item.appendChild(textStack);
+      item.appendChild(restoreButton);
+      versionList.appendChild(item);
+    });
+  }
+
+  async function loadObjectVersions(row, { force = false } = {}) {
+    if (!versionPanel || !versionList || !versioningEnabled) {
+      versionPanel?.classList.add('d-none');
+      return;
+    }
+    if (!row) {
+      versionPanel.classList.add('d-none');
+      return;
+    }
+    const endpoint = row.dataset.versionsEndpoint;
+    if (!endpoint) {
+      versionPanel.classList.add('d-none');
+      return;
+    }
+    versionPanel.classList.remove('d-none');
+    if (!force && versionsCache.has(endpoint)) {
+      renderVersionEntries(versionsCache.get(endpoint), row);
+      return;
+    }
+    versionList.innerHTML = '<div class="text-muted small">Loading versions…</div>';
+    try {
+      const response = await fetch(endpoint);
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to load versions');
+      }
+      const entries = Array.isArray(data.versions) ? data.versions : [];
+      versionsCache.set(endpoint, entries);
+      renderVersionEntries(entries, row);
+    } catch (error) {
+      versionList.innerHTML = `<p class="text-danger small mb-0">${(error && error.message) || 'Unable to load versions'}</p>`;
+    }
+  }
+
+  renderMetadata(null);
+  const deleteModalEl = document.getElementById('deleteObjectModal');
+  const deleteModal = dialogHandle(deleteModalEl);
+  const deleteObjectForm = document.getElementById('deleteObjectForm');
+  const deleteObjectKey = document.getElementById('deleteObjectKey');
+
+  if (deleteObjectForm) {
+    deleteObjectForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const submitBtn = deleteObjectForm.querySelector('[type="submit"]');
+      const originalHtml = submitBtn ? submitBtn.innerHTML : '';
+      try {
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Deleting...';
+        }
+        const formData = new FormData(deleteObjectForm);
+        const csrfToken = formData.get('csrf_token') || (window.getCsrfToken ? window.getCsrfToken() : '');
+        const formAction = deleteObjectForm.getAttribute('action');
+        const response = await fetch(formAction, {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': csrfToken,
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: formData
+        });
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          throw new Error('Server returned an unexpected response. Please try again.');
+        }
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || 'Unable to delete object');
+        }
+        if (deleteModal) deleteModal.hide();
+        showMessage({ title: 'Object deleted', body: data.message || 'The object has been deleted.', variant: 'success' });
+        previewEmpty.classList.remove('d-none');
+        previewPanel.classList.add('d-none');
+        activeRow = null;
+        loadObjects(false);
+        refreshBucketUsage();
+      } catch (err) {
+        if (deleteModal) deleteModal.hide();
+        showMessage({ title: 'Delete failed', body: err.message || 'Unable to delete object', variant: 'danger' });
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalHtml;
+        }
+      }
+    });
+  }
+
+  const resetPreviewMedia = () => {
+    setAudioStage(false);
+    [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
+      if (!el) return;
+      el.classList.add('d-none');
+      if (el.tagName === 'IMG') {
+        el.removeAttribute('src');
+        el.onload = null;
+      }
+      if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') {
+        el.pause();
+        el.removeAttribute('src');
+      }
+      if (el.tagName === 'IFRAME') {
+        el.setAttribute('src', 'about:blank');
+      }
+    });
+    if (previewText) {
+      previewText.classList.add('d-none');
+      previewText.textContent = '';
+    }
+    previewPlaceholder.innerHTML = previewPlaceholderDefault;
+    previewPlaceholder.classList.remove('d-none');
+  };
+
+  const renderPreviewUnavailable = () => {
+    if (!previewPlaceholder) return;
+    setAudioStage(false);
+    previewIframe?.classList.add('d-none');
+    previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="fw-semibold mb-1">Preview unavailable</div><div class="small text-muted">Download to view</div></div>';
+    previewPlaceholder.classList.remove('d-none');
+  };
+
+  let previewFailed = false;
+
+  const handlePreviewError = () => {
+    previewFailed = true;
+    if (downloadButton) {
+      downloadButton.classList.add('disabled');
+      downloadButton.removeAttribute('href');
+    }
+    if (presignButton) presignButton.disabled = true;
+    if (generatePresignButton) generatePresignButton.disabled = true;
+    if (previewDetailsMeta) previewDetailsMeta.classList.add('d-none');
+    if (previewMetadata) previewMetadata.classList.add('d-none');
+    const tagsPanel = document.getElementById('preview-tags');
+    if (tagsPanel) tagsPanel.classList.add('d-none');
+    const versionPanel = document.getElementById('version-panel');
+    if (versionPanel) versionPanel.classList.add('d-none');
+    if (previewErrorAlert) {
+      previewErrorAlert.textContent = 'Unable to load object \u2014 it may have been deleted, or the server returned an error.';
+      previewErrorAlert.classList.remove('d-none');
+    }
+  };
+
+  const clearPreviewError = () => {
+    previewFailed = false;
+    if (previewErrorAlert) previewErrorAlert.classList.add('d-none');
+    if (previewDetailsMeta) previewDetailsMeta.classList.remove('d-none');
+  };
+
+  async function fetchMetadata(metadataUrl) {
+    if (!metadataUrl) return null;
+    try {
+      const resp = await fetch(metadataUrl);
+      if (resp.ok) {
+        const data = await resp.json();
+        return data.metadata || {};
+      }
+    } catch (e) {
+      console.warn('Failed to load metadata', e);
+    }
+    return null;
+  }
+
+  async function selectRow(row) {
+    document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('is-selected'));
+    row.classList.add('is-selected');
+    previewEmpty.classList.add('d-none');
+    previewPanel.classList.remove('d-none');
+    activeRow = row;
+    renderMetadata(null);
+    clearPreviewError();
+
+    previewKey.textContent = row.dataset.key;
+    previewSize.textContent = formatBytes(Number(row.dataset.size));
+    previewModified.textContent = row.dataset.lastModifiedDisplay || row.dataset.lastModifiedIso || row.dataset.lastModified;
+    previewEtag.textContent = row.dataset.etag;
+    const previewS3Uri = document.getElementById('preview-s3-uri');
+    if (previewS3Uri) previewS3Uri.textContent = `s3://${objectsContainer?.dataset.bucket || ''}/${row.dataset.key}`;
+    downloadButton.href = row.dataset.downloadUrl;
+    downloadButton.classList.remove('disabled');
+    if (presignButton) {
+      presignButton.dataset.endpoint = row.dataset.presignEndpoint;
+      presignButton.disabled = false;
+    }
+    if (generatePresignButton) {
+      generatePresignButton.disabled = false;
+    }
+    updateGeneratePresignState();
+    if (versioningEnabled) {
+      loadObjectVersions(row);
+    }
+
+    resetPreviewMedia();
+    const previewUrl = row.dataset.previewUrl;
+    const lower = row.dataset.key.toLowerCase();
+    if (previewUrl && lower.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp)$/)) {
+      previewPlaceholder.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary" role="status"></div><div class="small mt-2">Loading preview\u2026</div>';
+      const currentRow = row;
+      fetch(previewUrl)
+        .then((r) => {
+          if (activeRow !== currentRow) return;
+          if (!r.ok) {
+            previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+            handlePreviewError();
+            return;
+          }
+          return r.blob();
+        })
+        .then((blob) => {
+          if (!blob || activeRow !== currentRow) return;
+          const url = URL.createObjectURL(blob);
+          previewImage.onload = () => {
+            if (activeRow !== currentRow) { URL.revokeObjectURL(url); return; }
+            previewImage.classList.remove('d-none');
+            previewPlaceholder.classList.add('d-none');
+          };
+          previewImage.onerror = () => {
+            if (activeRow !== currentRow) { URL.revokeObjectURL(url); return; }
+            URL.revokeObjectURL(url);
+            previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          };
+          previewImage.src = url;
+        })
+        .catch(() => {
+          if (activeRow !== currentRow) return;
+          previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          handlePreviewError();
+        });
+    } else if (previewUrl && lower.match(/\.(mp4|webm|ogv|mov|avi|mkv)$/)) {
+      const currentRow = row;
+      previewVideo.onerror = () => {
+        if (activeRow !== currentRow) return;
+        previewVideo.classList.add('d-none');
+        previewPlaceholder.classList.remove('d-none');
+        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+        handlePreviewError();
+      };
+      previewVideo.src = previewUrl;
+      previewVideo.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    } else if (previewUrl && lower.match(/\.(mp3|wav|flac|ogg|aac|m4a|wma)$/)) {
+      const currentRow = row;
+      previewAudio.onerror = () => {
+        if (activeRow !== currentRow) return;
+        setAudioStage(false);
+        previewAudio.classList.add('d-none');
+        previewPlaceholder.classList.remove('d-none');
+        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+        handlePreviewError();
+      };
+      previewAudio.src = previewUrl;
+      previewAudio.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+      setAudioStage(true);
+    } else if (previewUrl && lower.match(/\.(pdf)$/)) {
+      const currentRow = row;
+      previewIframe.onerror = () => {
+        if (activeRow !== currentRow) return;
+        renderPreviewUnavailable();
+      };
+      previewPlaceholder.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary" role="status"></div><div class="small mt-2">Loading preview\u2026</div>';
+      fetch(previewUrl, { headers: { 'Range': 'bytes=0-4', 'Accept': 'application/pdf' } })
+        .then(async response => {
+          if (activeRow !== currentRow) return false;
+          if (!response.ok) {
+            if (response.status === 415) {
+              renderPreviewUnavailable();
+              return false;
+            }
+            throw new Error('Unable to validate PDF preview');
+          }
+          if (response.body) await response.body.cancel();
+          return true;
+        })
+        .then(valid => {
+          if (!valid || activeRow !== currentRow) return;
+          previewIframe.src = previewUrl;
+          previewIframe.classList.remove('d-none');
+          previewPlaceholder.classList.add('d-none');
+        })
+        .catch(() => {
+          if (activeRow !== currentRow) return;
+          renderPreviewUnavailable();
+        });
+    } else if (previewUrl && previewText && lower.match(/\.(txt|log|json|md|csv|xml|html|htm|js|ts|py|java|c|cpp|h|css|scss|yaml|yml|toml|ini|cfg|conf|sh|bat|rs|go|rb|php|sql|r|swift|kt|scala|pl|lua|zig|ex|exs|hs|erl|ps1|psm1|psd1|fish|zsh|env|properties|gradle|makefile|dockerfile|vagrantfile|gitignore|gitattributes|editorconfig|eslintrc|prettierrc)$/)) {
+      previewText.textContent = 'Loading\u2026';
+      previewText.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+      const currentRow = row;
+      fetch(previewUrl)
+        .then((r) => {
+          if (!r.ok) throw new Error(r.statusText);
+          const len = parseInt(r.headers.get('Content-Length') || '0', 10);
+          if (len > 512 * 1024) {
+            return r.text().then((t) => t.slice(0, 512 * 1024) + '\n\n--- Truncated (file too large for preview) ---');
+          }
+          return r.text();
+        })
+        .then((text) => {
+          if (activeRow !== currentRow) return;
+          previewText.textContent = text;
+        })
+        .catch(() => {
+          if (activeRow !== currentRow) return;
+          previewText.classList.add('d-none');
+          previewPlaceholder.classList.remove('d-none');
+          previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          handlePreviewError();
+        });
+    }
+
+    const metadataUrl = row.dataset.metadataUrl;
+    if (metadataUrl) {
+      const metadata = await fetchMetadata(metadataUrl);
+      if (activeRow === row && !previewFailed) {
+        renderMetadata(metadata);
+      }
+    }
+  }
+
+  updateBulkDeleteState();
+
+  bulkDeleteButton?.addEventListener('click', () => openBulkDeleteModal());
+  bulkDeleteConfirm?.addEventListener('click', () => performBulkDelete());
+
+  const filterWarning = document.getElementById('filter-warning');
+  const filterWarningText = document.getElementById('filter-warning-text');
+  const folderViewStatus = document.getElementById('folder-view-status');
+
+  let searchDebounceTimer = null;
+  let searchAbortController = null;
+  let searchResults = null;
+  let searchNextToken = null;
+  let searchLoading = false;
+  const SEARCH_PAGE_SIZE = 500;
+
+  const updateFilterWarning = () => {
+    if (!filterWarning) return;
+    filterWarning.classList.add('d-none');
+  };
+
+  const performServerSearch = async (term, append = false) => {
+    if (!append && searchAbortController) searchAbortController.abort();
+    if (append && (searchLoading || !searchNextToken)) return;
+    if (!append) {
+      searchAbortController = new AbortController();
+    }
+    searchLoading = true;
+    if (append && loadMoreSpinner) loadMoreSpinner.classList.remove('d-none');
+
+    let succeeded = false;
+    try {
+      const params = new URLSearchParams({ q: term, limit: String(SEARCH_PAGE_SIZE) });
+      if (currentPrefix) params.set('prefix', currentPrefix);
+      if (append && searchNextToken) params.set('start_after', searchNextToken);
+      const searchUrl = objectsStreamUrl.replace('/stream', '/search');
+      const response = await fetch(`${searchUrl}?${params}`, {
+        signal: searchAbortController?.signal
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const newResults = (data.results || []).map(obj => processStreamObject(obj));
+      if (append && Array.isArray(searchResults)) {
+        searchResults = searchResults.concat(newResults);
+      } else {
+        searchResults = newResults;
+      }
+      searchNextToken = data.truncated ? (data.next_token || null) : null;
+      memoizedVisibleItems = null;
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+      refreshVirtualList();
+      if (loadMoreStatus) {
+        const countText = searchResults.length.toLocaleString();
+        const more = searchNextToken ? '+' : '';
+        const noun = searchResults.length === 1 ? 'result' : 'results';
+        loadMoreStatus.textContent = searchNextToken
+          ? `${countText}${more} ${noun} (scroll to load more)`
+          : `${countText} ${noun}`;
+      }
+      succeeded = true;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      if (loadMoreStatus) {
+        loadMoreStatus.textContent = 'Search failed (scroll to retry)';
+      }
+    } finally {
+      searchLoading = false;
+      if (loadMoreSpinner) loadMoreSpinner.classList.add('d-none');
+    }
+
+    if (succeeded && searchNextToken && !searchLoading && isSentinelVisible()) {
+      performServerSearch(currentFilterTerm, true);
+    }
+  };
+
+  document.getElementById('object-search')?.addEventListener('input', (event) => {
+    const newTerm = event.target.value.toLowerCase();
+    const wasFiltering = currentFilterTerm.length > 0;
+    const isFiltering = newTerm.length > 0;
+    currentFilterTerm = newTerm;
+
+    clearTimeout(searchDebounceTimer);
+
+    if (isFiltering) {
+      searchDebounceTimer = setTimeout(() => performServerSearch(newTerm), 300);
+      return;
+    }
+
+    if (!isFiltering && wasFiltering) {
+      if (searchAbortController) searchAbortController.abort();
+      searchResults = null;
+      searchNextToken = null;
+      memoizedVisibleItems = null;
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+      if (loadMoreStatus) {
+        loadMoreStatus.textContent = buildBottomStatusText(streamingComplete);
+      }
+    }
+
+    updateFilterWarning();
+    refreshVirtualList();
+  });
+
+  document.querySelectorAll('[data-sort-field]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const field = el.dataset.sortField;
+      const dir = el.dataset.sortDir || 'asc';
+      currentSortField = field;
+      currentSortDir = dir;
+      document.querySelectorAll('[data-sort-field]').forEach(s => s.classList.remove('active'));
+      el.classList.add('active');
+      var label = document.getElementById('sort-dropdown-label');
+      if (label) label.textContent = el.textContent.trim();
+      refreshVirtualList();
+    });
+  });
+
   document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
 
