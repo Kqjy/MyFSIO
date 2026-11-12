@@ -538,7 +538,7 @@
   const updateFolderViewStatus = () => {
     const folderViewStatusEl = document.getElementById('folder-view-status');
     if (!folderViewStatusEl) return;
-    folderViewStatusEl.classList.add('d-none');
+    folderViewStatusEl.classList.add('is-hidden');
   };
 
   const processStreamObject = (obj) => {
@@ -766,7 +766,7 @@
     }
 
     if (append && loadMoreSpinner) {
-      loadMoreSpinner.classList.remove('d-none');
+      loadMoreSpinner.classList.remove('is-hidden');
     }
 
     try {
@@ -829,7 +829,7 @@
     } finally {
       isLoadingObjects = false;
       if (loadMoreSpinner) {
-        loadMoreSpinner.classList.add('d-none');
+        loadMoreSpinner.classList.add('is-hidden');
       }
     }
   };
@@ -1034,8 +1034,8 @@
 
   const closeObjectDrawer = () => {
     document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('is-selected'));
-    if (previewPanel) previewPanel.classList.add('d-none');
-    if (previewEmpty) previewEmpty.classList.remove('d-none');
+    if (previewPanel) previewPanel.classList.add('is-hidden');
+    if (previewEmpty) previewEmpty.classList.remove('is-hidden');
     activeRow = null;
   };
 
@@ -1054,7 +1054,7 @@
   });
 
   document.getElementById('filter-warning-dismiss')?.addEventListener('click', () => {
-    document.getElementById('filter-warning')?.classList.add('d-none');
+    document.getElementById('filter-warning')?.classList.add('is-hidden');
   });
 
   const hasFolders = () => streamFolders.length > 0 || allObjects.some(obj => obj.key.includes('/'));
@@ -1187,8 +1187,8 @@
       updateBulkDeleteState();
     }
 
-    if (previewPanel) previewPanel.classList.add('d-none');
-    if (previewEmpty) previewEmpty.classList.remove('d-none');
+    if (previewPanel) previewPanel.classList.add('is-hidden');
+    if (previewEmpty) previewEmpty.classList.remove('is-hidden');
     activeRow = null;
 
     isLoadingObjects = false;
@@ -1353,7 +1353,7 @@
     if (!policyTextarea || !policyMode) return;
     const isPresetMode = preset === 'private' || preset === 'public';
     if (policyReadonlyHint) {
-      policyReadonlyHint.classList.toggle('d-none', !isPresetMode);
+      policyReadonlyHint.classList.toggle('is-hidden', !isPresetMode);
     }
     switch (preset) {
       case 'private':
@@ -1423,7 +1423,7 @@
         bulkDeleteLabel.textContent = selectedCount ? `Delete (${selectedCount})` : 'Delete';
       }
       if (bulkActionsWrapper) {
-        bulkActionsWrapper.classList.toggle('d-none', !shouldShow);
+        bulkActionsWrapper.classList.toggle('is-hidden', !shouldShow);
       }
       if (bulkSelectionCount) {
         let selectedBytes = 0;
@@ -1559,8 +1559,8 @@
       const summary = messageParts.length ? messageParts.join(', ') : 'Bulk delete finished';
       showMessage({ title: 'Bulk delete complete', body: data.message || summary, variant: errorCount ? 'warning' : 'success' });
       selectedRows.clear();
-      previewEmpty.classList.remove('d-none');
-      previewPanel.classList.add('d-none');
+      previewEmpty.classList.remove('is-hidden');
+      previewPanel.classList.add('is-hidden');
       activeRow = null;
       loadObjects(false);
       refreshBucketUsage();
@@ -1581,7 +1581,7 @@
     if (!generatePresignButton) return;
     if (isGeneratingPresign) {
       generatePresignButton.disabled = true;
-      generatePresignButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Generating…';
+      generatePresignButton.innerHTML = '<span class="ui-spinner" role="status" aria-hidden="true"></span> Generating…';
       return;
     }
     generatePresignButton.textContent = 'Generate link';
@@ -1590,9 +1590,9 @@
 
   const syncPresignExpiryPreset = () => {
     const custom = presignExpiryPreset?.value === 'custom';
-    presignCustomExpiry?.classList.toggle('d-none', !custom);
+    presignCustomExpiry?.classList.toggle('is-hidden', !custom);
     presignTtl?.classList.remove('is-invalid');
-    presignClampNote?.classList.add('d-none');
+    presignClampNote?.classList.add('is-hidden');
   };
 
   const selectedPresignExpiry = () => {
@@ -1632,7 +1632,7 @@
     isGeneratingPresign = true;
     updateGeneratePresignState();
     presignLink.value = '';
-    presignClampNote?.classList.add('d-none');
+    presignClampNote?.classList.add('is-hidden');
     try {
       const payload = {
         method: presignMethod?.value || 'GET',
@@ -1648,7 +1648,7 @@
         if (response.status === 400 && data.error && data.error.toLowerCase().includes('expiry')) {
           if (presignTtlFeedback) presignTtlFeedback.textContent = data.error;
           presignTtl?.classList.add('is-invalid');
-          presignCustomExpiry?.classList.remove('d-none');
+          presignCustomExpiry?.classList.remove('is-hidden');
           return;
         }
         throw new Error(data.error || 'Unable to generate presigned URL');
@@ -1659,7 +1659,7 @@
         const maximum = Number(presignTtl?.max || 0);
         const bound = effective === maximum ? 'maximum' : 'minimum';
         presignClampNote.textContent = `Expiry clamped to ${effective} seconds (server ${bound})`;
-        presignClampNote.classList.remove('d-none');
+        presignClampNote.classList.remove('is-hidden');
       }
     } catch (error) {
       presignModal?.hide();
@@ -1690,15 +1690,15 @@
     if (!previewMetadata || !previewMetadataList) return;
     previewMetadataList.innerHTML = '';
     if (!metadata) {
-      previewMetadata.classList.add('d-none');
+      previewMetadata.classList.add('is-hidden');
       return;
     }
     const userMetadata = Object.entries(metadata).filter(([key]) => !isInternalKey(key));
     if (userMetadata.length === 0) {
-      previewMetadata.classList.add('d-none');
+      previewMetadata.classList.add('is-hidden');
       return;
     }
-    previewMetadata.classList.remove('d-none');
+    previewMetadata.classList.remove('is-hidden');
     userMetadata.forEach(([key, value]) => {
       const wrapper = document.createElement('div');
       wrapper.className = 'metadata-entry';
@@ -1778,12 +1778,12 @@
     const label = count === 1 ? 'item' : 'items';
     if (archivedCountBadge) {
       archivedCountBadge.textContent = `${count} ${label}`;
-      archivedCountBadge.classList.remove('d-none');
+      archivedCountBadge.classList.remove('is-hidden');
     }
     if (archivedObjectsChip) {
       archivedObjectsChip.textContent = `${count.toLocaleString()} archived`;
       archivedObjectsChip.dataset.state = 'loaded';
-      archivedObjectsChip.classList.remove('d-none');
+      archivedObjectsChip.classList.remove('is-hidden');
     }
   };
 
@@ -1806,11 +1806,11 @@
       row.appendChild(cell);
       archivedBody.appendChild(row);
     }
-    if (archivedCountBadge) archivedCountBadge.classList.add('d-none');
+    if (archivedCountBadge) archivedCountBadge.classList.add('is-hidden');
     if (archivedObjectsChip) {
       archivedObjectsChip.textContent = 'Archived count unavailable · Retry';
       archivedObjectsChip.dataset.state = 'error';
-      archivedObjectsChip.classList.remove('d-none');
+      archivedObjectsChip.classList.remove('is-hidden');
     }
   };
 
@@ -2088,19 +2088,19 @@
 
   async function loadObjectVersions(row, { force = false } = {}) {
     if (!versionPanel || !versionList || !versioningEnabled) {
-      versionPanel?.classList.add('d-none');
+      versionPanel?.classList.add('is-hidden');
       return;
     }
     if (!row) {
-      versionPanel.classList.add('d-none');
+      versionPanel.classList.add('is-hidden');
       return;
     }
     const endpoint = row.dataset.versionsEndpoint;
     if (!endpoint) {
-      versionPanel.classList.add('d-none');
+      versionPanel.classList.add('is-hidden');
       return;
     }
-    versionPanel.classList.remove('d-none');
+    versionPanel.classList.remove('is-hidden');
     if (!force && versionsCache.has(endpoint)) {
       renderVersionEntries(versionsCache.get(endpoint), row);
       return;
@@ -2163,8 +2163,8 @@
         }
         if (deleteModal) deleteModal.hide();
         showMessage({ title: 'Object deleted', body: data.message || 'The object has been deleted.', variant: 'success' });
-        previewEmpty.classList.remove('d-none');
-        previewPanel.classList.add('d-none');
+        previewEmpty.classList.remove('is-hidden');
+        previewPanel.classList.add('is-hidden');
         activeRow = null;
         loadObjects(false);
         refreshBucketUsage();
@@ -2184,7 +2184,7 @@
     setAudioStage(false);
     [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
       if (!el) return;
-      el.classList.add('d-none');
+      el.classList.add('is-hidden');
       if (el.tagName === 'IMG') {
         el.removeAttribute('src');
         el.onload = null;
@@ -2198,19 +2198,19 @@
       }
     });
     if (previewText) {
-      previewText.classList.add('d-none');
+      previewText.classList.add('is-hidden');
       previewText.textContent = '';
     }
     previewPlaceholder.innerHTML = previewPlaceholderDefault;
-    previewPlaceholder.classList.remove('d-none');
+    previewPlaceholder.classList.remove('is-hidden');
   };
 
   const renderPreviewUnavailable = () => {
     if (!previewPlaceholder) return;
     setAudioStage(false);
-    previewIframe?.classList.add('d-none');
+    previewIframe?.classList.add('is-hidden');
     previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="fw-semibold mb-1">Preview unavailable</div><div class="small text-muted">Download to view</div></div>';
-    previewPlaceholder.classList.remove('d-none');
+    previewPlaceholder.classList.remove('is-hidden');
   };
 
   let previewFailed = false;
@@ -2223,22 +2223,22 @@
     }
     if (presignButton) presignButton.disabled = true;
     if (generatePresignButton) generatePresignButton.disabled = true;
-    if (previewDetailsMeta) previewDetailsMeta.classList.add('d-none');
-    if (previewMetadata) previewMetadata.classList.add('d-none');
+    if (previewDetailsMeta) previewDetailsMeta.classList.add('is-hidden');
+    if (previewMetadata) previewMetadata.classList.add('is-hidden');
     const tagsPanel = document.getElementById('preview-tags');
-    if (tagsPanel) tagsPanel.classList.add('d-none');
+    if (tagsPanel) tagsPanel.classList.add('is-hidden');
     const versionPanel = document.getElementById('version-panel');
-    if (versionPanel) versionPanel.classList.add('d-none');
+    if (versionPanel) versionPanel.classList.add('is-hidden');
     if (previewErrorAlert) {
       previewErrorAlert.textContent = 'Unable to load object \u2014 it may have been deleted, or the server returned an error.';
-      previewErrorAlert.classList.remove('d-none');
+      previewErrorAlert.classList.remove('is-hidden');
     }
   };
 
   const clearPreviewError = () => {
     previewFailed = false;
-    if (previewErrorAlert) previewErrorAlert.classList.add('d-none');
-    if (previewDetailsMeta) previewDetailsMeta.classList.remove('d-none');
+    if (previewErrorAlert) previewErrorAlert.classList.add('is-hidden');
+    if (previewDetailsMeta) previewDetailsMeta.classList.remove('is-hidden');
   };
 
   async function fetchMetadata(metadataUrl) {
@@ -2258,8 +2258,8 @@
   async function selectRow(row) {
     document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('is-selected'));
     row.classList.add('is-selected');
-    previewEmpty.classList.add('d-none');
-    previewPanel.classList.remove('d-none');
+    previewEmpty.classList.add('is-hidden');
+    previewPanel.classList.remove('is-hidden');
     activeRow = row;
     renderMetadata(null);
     clearPreviewError();
@@ -2288,7 +2288,7 @@
     const previewUrl = row.dataset.previewUrl;
     const lower = row.dataset.key.toLowerCase();
     if (previewUrl && lower.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp)$/)) {
-      previewPlaceholder.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary" role="status"></div><div class="small mt-2">Loading preview\u2026</div>';
+      previewPlaceholder.innerHTML = '<div class="ui-spinner" role="status"></div><div class="ui-hint">Loading preview\u2026</div>';
       const currentRow = row;
       fetch(previewUrl)
         .then((r) => {
@@ -2305,8 +2305,8 @@
           const url = URL.createObjectURL(blob);
           previewImage.onload = () => {
             if (activeRow !== currentRow) { URL.revokeObjectURL(url); return; }
-            previewImage.classList.remove('d-none');
-            previewPlaceholder.classList.add('d-none');
+            previewImage.classList.remove('is-hidden');
+            previewPlaceholder.classList.add('is-hidden');
           };
           previewImage.onerror = () => {
             if (activeRow !== currentRow) { URL.revokeObjectURL(url); return; }
@@ -2324,27 +2324,27 @@
       const currentRow = row;
       previewVideo.onerror = () => {
         if (activeRow !== currentRow) return;
-        previewVideo.classList.add('d-none');
-        previewPlaceholder.classList.remove('d-none');
+        previewVideo.classList.add('is-hidden');
+        previewPlaceholder.classList.remove('is-hidden');
         previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
         handlePreviewError();
       };
       previewVideo.src = previewUrl;
-      previewVideo.classList.remove('d-none');
-      previewPlaceholder.classList.add('d-none');
+      previewVideo.classList.remove('is-hidden');
+      previewPlaceholder.classList.add('is-hidden');
     } else if (previewUrl && lower.match(/\.(mp3|wav|flac|ogg|aac|m4a|wma)$/)) {
       const currentRow = row;
       previewAudio.onerror = () => {
         if (activeRow !== currentRow) return;
         setAudioStage(false);
-        previewAudio.classList.add('d-none');
-        previewPlaceholder.classList.remove('d-none');
+        previewAudio.classList.add('is-hidden');
+        previewPlaceholder.classList.remove('is-hidden');
         previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
         handlePreviewError();
       };
       previewAudio.src = previewUrl;
-      previewAudio.classList.remove('d-none');
-      previewPlaceholder.classList.add('d-none');
+      previewAudio.classList.remove('is-hidden');
+      previewPlaceholder.classList.add('is-hidden');
       setAudioStage(true);
     } else if (previewUrl && lower.match(/\.(pdf)$/)) {
       const currentRow = row;
@@ -2352,7 +2352,7 @@
         if (activeRow !== currentRow) return;
         renderPreviewUnavailable();
       };
-      previewPlaceholder.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary" role="status"></div><div class="small mt-2">Loading preview\u2026</div>';
+      previewPlaceholder.innerHTML = '<div class="ui-spinner" role="status"></div><div class="ui-hint">Loading preview\u2026</div>';
       fetch(previewUrl, { headers: { 'Range': 'bytes=0-4', 'Accept': 'application/pdf' } })
         .then(async response => {
           if (activeRow !== currentRow) return false;
@@ -2369,8 +2369,8 @@
         .then(valid => {
           if (!valid || activeRow !== currentRow) return;
           previewIframe.src = previewUrl;
-          previewIframe.classList.remove('d-none');
-          previewPlaceholder.classList.add('d-none');
+          previewIframe.classList.remove('is-hidden');
+          previewPlaceholder.classList.add('is-hidden');
         })
         .catch(() => {
           if (activeRow !== currentRow) return;
@@ -2378,8 +2378,8 @@
         });
     } else if (previewUrl && previewText && lower.match(/\.(txt|log|json|md|csv|xml|html|htm|js|ts|py|java|c|cpp|h|css|scss|yaml|yml|toml|ini|cfg|conf|sh|bat|rs|go|rb|php|sql|r|swift|kt|scala|pl|lua|zig|ex|exs|hs|erl|ps1|psm1|psd1|fish|zsh|env|properties|gradle|makefile|dockerfile|vagrantfile|gitignore|gitattributes|editorconfig|eslintrc|prettierrc)$/)) {
       previewText.textContent = 'Loading\u2026';
-      previewText.classList.remove('d-none');
-      previewPlaceholder.classList.add('d-none');
+      previewText.classList.remove('is-hidden');
+      previewPlaceholder.classList.add('is-hidden');
       const currentRow = row;
       fetch(previewUrl)
         .then((r) => {
@@ -2396,8 +2396,8 @@
         })
         .catch(() => {
           if (activeRow !== currentRow) return;
-          previewText.classList.add('d-none');
-          previewPlaceholder.classList.remove('d-none');
+          previewText.classList.add('is-hidden');
+          previewPlaceholder.classList.remove('is-hidden');
           previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
           handlePreviewError();
         });
@@ -2430,7 +2430,7 @@
 
   const updateFilterWarning = () => {
     if (!filterWarning) return;
-    filterWarning.classList.add('d-none');
+    filterWarning.classList.add('is-hidden');
   };
 
   const performServerSearch = async (term, append = false) => {
@@ -2440,7 +2440,7 @@
       searchAbortController = new AbortController();
     }
     searchLoading = true;
-    if (append && loadMoreSpinner) loadMoreSpinner.classList.remove('d-none');
+    if (append && loadMoreSpinner) loadMoreSpinner.classList.remove('is-hidden');
 
     let succeeded = false;
     try {
@@ -2479,7 +2479,7 @@
       }
     } finally {
       searchLoading = false;
-      if (loadMoreSpinner) loadMoreSpinner.classList.add('d-none');
+      if (loadMoreSpinner) loadMoreSpinner.classList.add('is-hidden');
     }
 
     if (succeeded && searchNextToken && !searchLoading && isSentinelVisible()) {
@@ -2587,7 +2587,7 @@
   let ctxTargetRow = null;
 
   const hideContextMenu = () => {
-    if (ctxMenu) ctxMenu.classList.add('d-none');
+    if (ctxMenu) ctxMenu.classList.add('is-hidden');
     ctxTargetRow = null;
   };
 
@@ -2603,7 +2603,7 @@
       const y = Math.min(e.clientY, window.innerHeight - 200);
       ctxMenu.style.left = x + 'px';
       ctxMenu.style.top = y + 'px';
-      ctxMenu.classList.remove('d-none');
+      ctxMenu.classList.remove('is-hidden');
     });
 
     ctxMenu.querySelectorAll('[data-ctx-action]').forEach(btn => {
@@ -2663,7 +2663,7 @@
   presignExpiryPreset?.addEventListener('change', syncPresignExpiryPreset);
   presignTtl?.addEventListener('input', () => {
     presignTtl.classList.remove('is-invalid');
-    presignClampNote?.classList.add('d-none');
+    presignClampNote?.classList.add('is-hidden');
   });
   syncPresignExpiryPreset();
 
@@ -2789,7 +2789,7 @@
 
     bulkDownloadButton.disabled = true;
     const originalHtml = bulkDownloadButton.innerHTML;
-    bulkDownloadButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Downloading...';
+    bulkDownloadButton.innerHTML = '<span class="ui-spinner" role="status" aria-hidden="true"></span> Downloading...';
 
     try {
       const response = await fetch(bulkDownloadEndpoint, {
@@ -2988,12 +2988,12 @@
 
         if (data.endpoint_healthy === false) {
           if (endpointWarning) {
-            endpointWarning.classList.remove('d-none');
+            endpointWarning.classList.remove('is-hidden');
             if (endpointErrorEl && data.endpoint_error) {
               endpointErrorEl.textContent = data.endpoint_error + '. Replication is paused until the endpoint is available.';
             }
           }
-          if (statusAlert) statusAlert.classList.add('d-none');
+          if (statusAlert) statusAlert.classList.add('is-hidden');
 
           if (statusBadge) {
             statusBadge.className = 'badge bg-warning-subtle text-warning px-3 py-2';
@@ -3004,10 +3004,10 @@
               <span>Paused (Endpoint Unavailable)</span>`;
           }
 
-          if (pauseForm) pauseForm.classList.add('d-none');
+          if (pauseForm) pauseForm.classList.add('is-hidden');
         } else {
-          if (endpointWarning) endpointWarning.classList.add('d-none');
-          if (statusAlert) statusAlert.classList.remove('d-none');
+          if (endpointWarning) endpointWarning.classList.add('is-hidden');
+          if (statusAlert) statusAlert.classList.remove('is-hidden');
 
           if (statusBadge) {
             statusBadge.className = 'badge bg-success-subtle text-success px-3 py-2';
@@ -3018,7 +3018,7 @@
               <span>Enabled</span>`;
           }
 
-          if (pauseForm) pauseForm.classList.remove('d-none');
+          if (pauseForm) pauseForm.classList.remove('is-hidden');
         }
 
         if (syncedEl) syncedEl.textContent = data.objects_synced;
@@ -3373,22 +3373,22 @@
     if (!policyTextarea || !policyValidationStatus) return;
     const value = policyTextarea.value.trim();
     if (!value) {
-      policyValidationStatus.classList.add('d-none');
-      policyErrorDetail?.classList.add('d-none');
+      policyValidationStatus.classList.add('is-hidden');
+      policyErrorDetail?.classList.add('is-hidden');
       return;
     }
-    policyValidationStatus.classList.remove('d-none');
+    policyValidationStatus.classList.remove('is-hidden');
     try {
       JSON.parse(value);
-      policyValidBadge?.classList.remove('d-none');
-      policyInvalidBadge?.classList.add('d-none');
-      policyErrorDetail?.classList.add('d-none');
+      policyValidBadge?.classList.remove('is-hidden');
+      policyInvalidBadge?.classList.add('is-hidden');
+      policyErrorDetail?.classList.add('is-hidden');
     } catch (err) {
-      policyValidBadge?.classList.add('d-none');
-      policyInvalidBadge?.classList.remove('d-none');
+      policyValidBadge?.classList.add('is-hidden');
+      policyInvalidBadge?.classList.remove('is-hidden');
       if (policyErrorDetail) {
         policyErrorDetail.textContent = err.message;
-        policyErrorDetail.classList.remove('d-none');
+        policyErrorDetail.classList.remove('is-hidden');
       }
     }
   };
@@ -3701,11 +3701,11 @@
           aclGrantsList.innerHTML = grants.map(g => `<div class="list-group-item d-flex justify-content-between align-items-center"><code class="small">${escapeHtml(g.grantee)}</code><span class="badge bg-secondary">${escapeHtml(g.permission)}</span></div>`).join('');
         }
       }
-      if (aclLoading) aclLoading.classList.add('d-none');
-      if (aclContent) aclContent.classList.remove('d-none');
+      if (aclLoading) aclLoading.classList.add('is-hidden');
+      if (aclContent) aclContent.classList.remove('is-hidden');
     } catch (err) {
-      if (aclLoading) aclLoading.classList.add('d-none');
-      if (aclContent) aclContent.classList.remove('d-none');
+      if (aclLoading) aclLoading.classList.add('is-hidden');
+      if (aclContent) aclContent.classList.remove('is-hidden');
       if (aclGrantsList) aclGrantsList.innerHTML = `<div class="list-group-item text-danger text-center py-2">${escapeHtml(err.message)}</div>`;
     }
   };
@@ -3753,15 +3753,15 @@
   const loadObjectTags = async (row) => {
     if (!row || !previewTagsPanel) return;
     if (previewFailed) {
-      previewTagsPanel.classList.add('d-none');
+      previewTagsPanel.classList.add('is-hidden');
       return;
     }
     const tagsUrl = row.dataset.tagsUrl;
     if (!tagsUrl) {
-      previewTagsPanel.classList.add('d-none');
+      previewTagsPanel.classList.add('is-hidden');
       return;
     }
-    previewTagsPanel.classList.remove('d-none');
+    previewTagsPanel.classList.remove('is-hidden');
     try {
       const resp = await fetch(tagsUrl);
       const data = await resp.json();
@@ -3778,9 +3778,9 @@
     previewTagsCount.textContent = currentObjectTags.length;
     if (currentObjectTags.length === 0) {
       previewTagsList.innerHTML = '';
-      previewTagsEmpty.classList.remove('d-none');
+      previewTagsEmpty.classList.remove('is-hidden');
     } else {
-      previewTagsEmpty.classList.add('d-none');
+      previewTagsEmpty.classList.add('is-hidden');
       previewTagsList.innerHTML = currentObjectTags.map(t => `<span class="tag-pill"><span class="tag-pill-key">${escapeHtml(t.Key)}</span><span class="tag-pill-value">${escapeHtml(t.Value)}</span></span>`).join('');
     }
   };
@@ -3816,9 +3816,9 @@
   editTagsButton?.addEventListener('click', () => {
     savedObjectTags = currentObjectTags.map(t => ({ Key: t.Key, Value: t.Value }));
     isEditingTags = true;
-    previewTagsList.classList.add('d-none');
-    previewTagsEmpty.classList.add('d-none');
-    previewTagsEditor?.classList.remove('d-none');
+    previewTagsList.classList.add('is-hidden');
+    previewTagsEmpty.classList.add('is-hidden');
+    previewTagsEditor?.classList.remove('is-hidden');
     const card = previewTagsEditor?.querySelector('.tag-editor-card');
     if (card) {
       card.style.opacity = '0';
@@ -3831,8 +3831,8 @@
   cancelTagsButton?.addEventListener('click', () => {
     isEditingTags = false;
     currentObjectTags = savedObjectTags.map(t => ({ Key: t.Key, Value: t.Value }));
-    previewTagsEditor?.classList.add('d-none');
-    previewTagsList.classList.remove('d-none');
+    previewTagsEditor?.classList.add('is-hidden');
+    previewTagsList.classList.remove('is-hidden');
     renderObjectTags();
   });
 
@@ -3867,8 +3867,8 @@
       if (!resp.ok) throw new Error(data.error || 'Failed to save tags');
       currentObjectTags = newTags;
       isEditingTags = false;
-      previewTagsEditor?.classList.add('d-none');
-      previewTagsList.classList.remove('d-none');
+      previewTagsEditor?.classList.add('is-hidden');
+      previewTagsList.classList.remove('is-hidden');
       renderObjectTags();
       showMessage({ title: 'Tags saved', body: 'Object tags updated successfully.', variant: 'success' });
     } catch (err) {
@@ -3929,8 +3929,8 @@
       showMessage({ title: `Object ${copyMoveAction === 'move' ? 'moved' : 'copied'}`, body: `Successfully ${copyMoveAction === 'move' ? 'moved' : 'copied'} to ${destBucket}/${destKey}`, variant: 'success' });
       window.UI.dialog.close(copyMoveModalEl);
       if (copyMoveAction === 'move') {
-        previewEmpty.classList.remove('d-none');
-        previewPanel.classList.add('d-none');
+        previewEmpty.classList.remove('is-hidden');
+        previewPanel.classList.add('is-hidden');
         activeRow = null;
       }
       const currentBucket = objectsContainer?.dataset.bucket;
@@ -4136,7 +4136,7 @@
           '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
           '</svg><span class="fw-semibold">Archived Objects</span></div>' +
           '<div class="d-flex align-items-center gap-2">' +
-          '<span class="badge text-bg-secondary d-none" data-archived-count></span>' +
+          '<span class="badge text-bg-secondary is-hidden" data-archived-count></span>' +
           '<button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>' +
           '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
           '<path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>' +
@@ -4170,7 +4170,7 @@
           archivedObjectsChip = document.createElement('button');
           archivedObjectsChip.type = 'button';
           archivedObjectsChip.id = 'archived-objects-chip';
-          archivedObjectsChip.className = 'btn btn-link btn-sm py-0 px-1 text-decoration-none d-none';
+          archivedObjectsChip.className = 'btn btn-link btn-sm py-0 px-1 text-decoration-none is-hidden';
           document.getElementById('pagination-controls')?.appendChild(archivedObjectsChip);
           archivedObjectsChip.addEventListener('click', function() {
             if (archivedObjectsChip.dataset.state === 'error') {
@@ -4197,11 +4197,11 @@
 
     var bulkPurgeWrap = document.getElementById('bulkDeletePurgeWrap');
     if (bulkPurgeWrap) {
-      bulkPurgeWrap.classList.toggle('d-none', !enabled);
+      bulkPurgeWrap.classList.toggle('is-hidden', !enabled);
     }
     var singleDeleteVerWrap = document.getElementById('deleteObjectVersioningWrap');
     if (singleDeleteVerWrap) {
-      singleDeleteVerWrap.classList.toggle('d-none', !enabled);
+      singleDeleteVerWrap.classList.toggle('is-hidden', !enabled);
     }
 
     if (!enabled) {

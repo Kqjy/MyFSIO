@@ -1688,7 +1688,7 @@ body {
 	font-size: 13px;
 }
 
-.d-none + .ob-panel-empty {
+.is-hidden + .ob-panel-empty {
 	display: block;
 }
 
@@ -1708,11 +1708,11 @@ body {
 		max-height: none;
 	}
 
-	.ob-drawer:has(#preview-panel.d-none) {
+	.ob-drawer:has(#preview-panel.is-hidden) {
 		display: none;
 	}
 
-	.ob-drawer:has(#preview-panel:not(.d-none)) {
+	.ob-drawer:has(#preview-panel:not(.is-hidden)) {
 		position: fixed;
 		left: 0;
 		right: 0;
@@ -2449,4 +2449,24 @@ textarea.ui-input {
 #integrityHistoryContainer .table-responsive {
 	margin: 0;
 	width: 100%;
+}
+.is-hidden {
+	display: none !important;
+}
+
+.ui-spinner {
+	display: inline-block;
+	width: 1em;
+	height: 1em;
+	vertical-align: -0.125em;
+	border: 2px solid currentColor;
+	border-right-color: transparent;
+	border-radius: 50%;
+	animation: ui-spin 0.75s linear infinite;
+}
+
+@keyframes ui-spin {
+	to {
+		transform: rotate(360deg);
+	}
 }
