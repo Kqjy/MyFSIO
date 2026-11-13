@@ -17699,3 +17699,145 @@ async fn test_large_read_chunks_serve_plain_and_segmented_objects() {
         }
     }
 }
+
+async fn ui_object_versions(
+    ui_app: &axum::Router,
+    bucket: &str,
+    key: &str,
+    session_id: &str,
+) -> Vec<serde_json::Value> {
+    let resp = ui_app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}/objects/{}/versions", bucket, key),
+            session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    body["versions"].as_array().cloned().unwrap()
+}
+
+#[tokio::test]
+async fn test_ui_restore_archives_replaced_object_without_delete_marker() {
+    let (s3_app, state, _tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/ui-restore", Body::empty()))
+        .await
+        .unwrap();
+    enable_versioning(&s3_app, "ui-restore").await;
+    for body in ["first---", "second-version-body"] {
+        let resp = s3_app
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/ui-restore/test.txt",
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let ui_app = myfsio_server::create_ui_router(state.clone());
+
+    let before = ui_object_versions(&ui_app, "ui-restore", "test.txt", &session_id).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0]["size"], 8);
+    let first_version = before[0]["version_id"].as_str().unwrap().to_string();
+
+    let resp = ui_app
+        .clone()
+        .oneshot(ui_request(
+            Method::POST,
+            &format!(
+                "/ui/buckets/ui-restore/objects/test.txt/restore/{}",
+                first_version
+            ),
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/ui-restore/test.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"first---");
+
+    let after = ui_object_versions(&ui_app, "ui-restore", "test.txt", &session_id).await;
+    let summary: Vec<(u64, String)> = after
+        .iter()
+        .map(|entry| {
+            (
+                entry["size"].as_u64().unwrap(),
+                entry["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![(19, "overwrite".to_string()), (8, "overwrite".to_string())]
+    );
+
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/ui-restore/test.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let after_delete = ui_object_versions(&ui_app, "ui-restore", "test.txt", &session_id).await;
+    assert_eq!(after_delete.len(), 3);
+    assert!(after_delete
+        .iter()
+        .all(|entry| entry["reason"] != "delete-marker" && entry["size"].as_u64().unwrap() > 0));
+
+    let deleted_version = after_delete[0]["version_id"].as_str().unwrap().to_string();
+    let resp = ui_app
+        .clone()
+        .oneshot(ui_request(
+            Method::POST,
+            &format!(
+                "/ui/buckets/ui-restore/objects/test.txt/restore/{}",
+                deleted_version
+            ),
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/ui-restore/test.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"first---");
+}

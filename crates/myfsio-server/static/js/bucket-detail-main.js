@@ -1847,7 +1847,7 @@
   const describeVersionReason = (reason) => {
     switch (reason) {
       case 'delete':
-        return 'delete marker';
+        return 'deleted';
       case 'restore-overwrite':
         return 'restore overwrite';
       default:

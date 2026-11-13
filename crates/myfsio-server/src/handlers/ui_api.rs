@@ -515,6 +515,8 @@ struct VersionManifest {
     metadata: HashMap<String, String>,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    is_delete_marker: bool,
 }
 
 fn manifest_timestamp(value: &VersionManifest) -> DateTime<Utc> {
@@ -580,6 +582,9 @@ fn read_version_manifests_for_object(
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .to_string();
+        }
+        if manifest.is_delete_marker {
+            continue;
         }
         if manifest.key.is_empty() {
             manifest.key = key.to_string();
@@ -3777,24 +3782,30 @@ async fn restore_object_version_json(
         Ok(value) => value,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
     };
-    let version_dir = match version_dir_for_object(state, bucket, key) {
-        Ok(path) => path,
-        Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
+    let (version_meta, stream) = match state
+        .storage
+        .get_object_version(bucket, key, version_id)
+        .await
+    {
+        Ok(found) => found,
+        Err(err) => return storage_json_error(err),
     };
-    let data_path = version_dir.join(format!("{}.bin", version_id));
-    let meta_path = version_dir.join(format!("{}.json", version_id));
-    if !data_path.exists() || !meta_path.exists() {
-        return json_error(StatusCode::NOT_FOUND, "Version not found");
-    }
-
-    let manifest_text = match std::fs::read_to_string(&meta_path) {
-        Ok(text) => text,
-        Err(err) => return json_error(StatusCode::BAD_REQUEST, err.to_string()),
+    let mut metadata = match state
+        .storage
+        .get_object_version_metadata(bucket, key, version_id)
+        .await
+    {
+        Ok(metadata) => metadata,
+        Err(err) => return storage_json_error(err),
     };
-    let manifest: VersionManifest = match serde_json::from_str(&manifest_text) {
-        Ok(manifest) => manifest,
-        Err(err) => return json_error(StatusCode::BAD_REQUEST, err.to_string()),
-    };
+    metadata.remove(myfsio_storage::segments::META_KEY_SEGMENTS);
+    metadata.remove(myfsio_storage::fs_backend::META_KEY_PART_SIZES);
+    let tags = state
+        .storage
+        .get_object_version_tags(bucket, key, version_id)
+        .await
+        .ok()
+        .filter(|tags| !tags.is_empty());
 
     let live_exists = state.storage.head_object(bucket, key).await.is_ok();
     let versioning_enabled = state
@@ -3802,27 +3813,19 @@ async fn restore_object_version_json(
         .is_versioning_enabled(bucket)
         .await
         .unwrap_or(false);
-    if live_exists {
-        if let Err(err) = state.storage.delete_object(bucket, key).await {
-            return storage_json_error(err);
-        }
-    }
-
-    let destination = match object_live_path(state, bucket, key) {
-        Ok(path) => path,
-        Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
-    };
-    if let Some(parent) = destination.parent() {
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-        }
-    }
-    if let Err(err) = tokio::fs::copy(&data_path, &destination).await {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-    }
     if let Err(err) = state
         .storage
-        .put_object_metadata(bucket, key, &manifest.metadata)
+        .put_object_with_commit(
+            bucket,
+            key,
+            stream,
+            Some(metadata),
+            myfsio_storage::traits::PutCommitOptions {
+                etag_override: version_meta.etag.clone().filter(|etag| !etag.is_empty()),
+                tags,
+                ..Default::default()
+            },
+        )
         .await
     {
         return storage_json_error(err);
@@ -4339,7 +4342,7 @@ pub async fn archived_objects(
                 Ok(manifest) => manifest,
                 Err(_) => continue,
             };
-            if manifest.key.is_empty() {
+            if manifest.key.is_empty() || manifest.is_delete_marker {
                 continue;
             }
             grouped
