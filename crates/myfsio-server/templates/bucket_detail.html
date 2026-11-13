@@ -545,7 +545,7 @@
                   <div class="ui-stat-value" data-usage-versions-value>{{ version_count }}</div>
                 </div>
                 <div class="bs-usage-item" data-usage-bytes data-total-bytes="{{ total_bytes }}" data-max-bytes="{% if has_max_bytes %}{{ max_bytes }}{% endif %}">
-                  <div class="ui-stat-label">Stored, incl. versions</div>
+                  <div class="ui-stat-label">Total stored (incl. versions)</div>
                   <div class="ui-stat-value" data-usage-bytes-value>{{ total_bytes | filesizeformat }}</div>
                   <div data-usage-bytes-limit>
                   {% if has_max_bytes %}
