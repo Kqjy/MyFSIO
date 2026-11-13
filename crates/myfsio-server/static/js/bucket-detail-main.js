@@ -1252,12 +1252,6 @@
       window.alert(body || title);
       return;
     }
-    document.querySelectorAll('.modal.show').forEach(modal => {
-      const instance = bootstrap.Modal.getInstance(modal);
-      if (instance && modal.id !== 'messageModal') {
-        instance.hide();
-      }
-    });
     messageModalTitle.textContent = title;
     if (bodyHtml) {
       messageModalBody.innerHTML = bodyHtml;
@@ -1324,12 +1318,10 @@
     if (!policyTextarea) return;
     if (readonly) {
       policyTextarea.setAttribute('readonly', 'readonly');
-      policyTextarea.classList.add('bg-body-secondary');
       policyTextarea.classList.add('policy-editor-disabled');
       policyTextarea.setAttribute('aria-disabled', 'true');
     } else {
       policyTextarea.removeAttribute('readonly');
-      policyTextarea.classList.remove('bg-body-secondary');
       policyTextarea.classList.remove('policy-editor-disabled');
       policyTextarea.removeAttribute('aria-disabled');
     }
@@ -1958,7 +1950,7 @@
 
   const propertiesTab = document.getElementById('properties-tab');
   if (propertiesTab) {
-    propertiesTab.addEventListener('shown.bs.tab', () => {
+    propertiesTab.addEventListener('ui:tab', () => {
       if (versioningEnabled && archivedCard && archivedEndpoint) {
         loadArchivedObjects();
       }
@@ -1976,8 +1968,9 @@
     }
     if (!propertiesTab) return;
     propertiesTab.dataset.scrollToArchived = 'true';
-    bootstrap.Tab.getOrCreateInstance(propertiesTab).show();
-    if (propertiesTab.classList.contains('active')) {
+    if (propertiesTab.getAttribute('aria-selected') !== 'true') {
+      propertiesTab.click();
+    } else {
       propertiesTab.dataset.scrollToArchived = 'false';
       archivedCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -3113,7 +3106,7 @@
     const failuresShownCount = document.getElementById('failures-shown-count');
     const clearFailuresModal = document.getElementById('clearFailuresModal');
     const confirmClearFailuresBtn = document.getElementById('confirmClearFailuresBtn');
-    const clearFailuresModalInstance = clearFailuresModal ? new bootstrap.Modal(clearFailuresModal) : null;
+    const clearFailuresModalInstance = dialogHandle(clearFailuresModal);
 
     let failuresExpanded = false;
     let currentFailures = [];
@@ -3282,7 +3275,7 @@
       const btn = confirmClearFailuresBtn;
       const originalHtml = btn.innerHTML;
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Clearing...';
+      btn.innerHTML = '<span class="ui-spinner" role="status"></span> Clearing...';
       const endpoint = failuresCard.dataset.clearEndpoint;
       try {
         const resp = await fetch(endpoint, { method: 'DELETE' });
@@ -3423,7 +3416,7 @@
   const lifecycleUrl = lifecycleCard?.dataset.lifecycleUrl;
   const lifecycleRulesBody = document.getElementById('lifecycle-rules-body');
   const addLifecycleRuleModalEl = document.getElementById('addLifecycleRuleModal');
-  const addLifecycleRuleModal = addLifecycleRuleModalEl ? new bootstrap.Modal(addLifecycleRuleModalEl) : null;
+  const addLifecycleRuleModal = dialogHandle(addLifecycleRuleModalEl);
   let lifecycleRules = [];
 
   const loadLifecycleRules = async () => {
@@ -3552,7 +3545,7 @@
   const corsUrl = corsCard?.dataset.corsUrl;
   const corsRulesBody = document.getElementById('cors-rules-body');
   const addCorsRuleModalEl = document.getElementById('addCorsRuleModal');
-  const addCorsRuleModal = addCorsRuleModalEl ? new bootstrap.Modal(addCorsRuleModalEl) : null;
+  const addCorsRuleModal = dialogHandle(addCorsRuleModalEl);
   let corsRules = [];
 
   const loadCorsRules = async () => {
@@ -3702,9 +3695,9 @@
       if (aclGrantsList) {
         const grants = data.grants || [];
         if (grants.length === 0) {
-          aclGrantsList.innerHTML = '<div class="list-group-item text-muted text-center py-2">No grants</div>';
+          aclGrantsList.innerHTML = '<div class="ui-muted">No grants</div>';
         } else {
-          aclGrantsList.innerHTML = grants.map(g => `<div class="list-group-item d-flex justify-content-between align-items-center"><code class="small">${escapeHtml(g.grantee)}</code><span class="badge bg-secondary">${escapeHtml(g.permission)}</span></div>`).join('');
+          aclGrantsList.innerHTML = grants.map(g => `<div class="bs-grant"><code class="ui-mono">${escapeHtml(g.grantee)}</code><span class="ui-badge">${escapeHtml(g.permission)}</span></div>`).join('');
         }
       }
       if (aclLoading) aclLoading.classList.add('is-hidden');
@@ -3712,7 +3705,7 @@
     } catch (err) {
       if (aclLoading) aclLoading.classList.add('is-hidden');
       if (aclContent) aclContent.classList.remove('is-hidden');
-      if (aclGrantsList) aclGrantsList.innerHTML = `<div class="list-group-item text-danger text-center py-2">${escapeHtml(err.message)}</div>`;
+      if (aclGrantsList) aclGrantsList.innerHTML = `<div class="ui-error">${escapeHtml(err.message)}</div>`;
     }
   };
 
@@ -4046,11 +4039,13 @@
         window.pollingManager.stop('lifecycle');
       }
     };
-    if (lifecyclePane && lifecyclePane.classList.contains('show') && lifecyclePane.classList.contains('active')) {
+    if (lifecyclePane && !lifecyclePane.hidden) {
       startLifecyclePolling();
     }
-    lifecycleTab?.addEventListener('shown.bs.tab', startLifecyclePolling);
-    lifecycleTab?.addEventListener('hidden.bs.tab', stopLifecyclePolling);
+    lifecycleTab?.closest('[data-ui-tabs]')?.addEventListener('ui:tab', (event) => {
+      if (event.target === lifecycleTab) startLifecyclePolling();
+      else stopLifecyclePolling();
+    });
   }
 
   if (corsCard) loadCorsRules();
@@ -4174,24 +4169,18 @@
   }
 
   function updatePolicyCard(hasPolicy, preset) {
-    var policyCard = document.querySelector('#permissions-pane .card');
+    var policyCard = document.getElementById('bucket-policy-card');
     if (!policyCard) return;
-    var alertContainer = policyCard.querySelector('.alert');
-    if (alertContainer) {
-      if (hasPolicy) {
-        alertContainer.className = 'alert alert-info d-flex align-items-start mb-4';
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>' +
-          '</svg><div><strong>Policy attached</strong>' +
-          '<p class="mb-0 small">A bucket policy is attached to this bucket. Access is granted via both IAM and bucket policy rules.</p></div>';
-      } else {
-        alertContainer.className = 'alert alert-secondary d-flex align-items-start mb-4';
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
-          '<path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>' +
-          '</svg><div><strong>IAM only</strong>' +
-          '<p class="mb-0 small">No bucket policy is attached. Access is controlled by IAM policies only.</p></div>';
-      }
+    var badge = policyCard.querySelector('[data-setting-badge]');
+    if (badge) {
+      badge.textContent = hasPolicy ? 'Policy attached' : 'IAM only';
+      badge.classList.toggle('ui-badge-accent', hasPolicy);
+    }
+    var text = policyCard.querySelector('[data-setting-text]');
+    if (text) {
+      text.textContent = hasPolicy
+        ? 'A bucket policy is attached to this bucket. Access is granted via both IAM and bucket policy rules.'
+        : 'No bucket policy is attached. Access is controlled by IAM policies only.';
     }
     document.querySelectorAll('.preset-btn').forEach(function (btn) {
       btn.classList.remove('active');
@@ -4201,7 +4190,7 @@
     if (presetInputEl) presetInputEl.value = preset;
     var deletePolicyBtn = document.getElementById('deletePolicyBtn');
     if (deletePolicyBtn) {
-      deletePolicyBtn.style.display = hasPolicy ? '' : 'none';
+      deletePolicyBtn.classList.toggle('is-hidden', !hasPolicy);
     }
   }
 
@@ -4261,8 +4250,7 @@
       window.UICore.submitFormAjax(deletePolicyForm, {
         successMessage: 'Bucket policy deleted',
         onSuccess: function (data) {
-          var modal = bootstrap.Modal.getInstance(document.getElementById('deletePolicyModal'));
-          if (modal) modal.hide();
+          window.UI.dialog.close(document.getElementById('deletePolicyModal'));
           updatePolicyCard(false, 'private');
           var policyTextarea = document.getElementById('policyDocument');
           if (policyTextarea) policyTextarea.value = '';
@@ -4381,8 +4369,7 @@
         window.UICore.submitFormAjax(form, {
           successMessage: msg,
           onSuccess: function (data) {
-            var modal = bootstrap.Modal.getInstance(document.getElementById('disableReplicationModal'));
-            if (modal) modal.hide();
+            window.UI.dialog.close(document.getElementById('disableReplicationModal'));
             reloadReplicationPane();
           }
         });

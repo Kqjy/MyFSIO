@@ -2749,3 +2749,77 @@ textarea.ui-input {
 		transform: rotate(360deg);
 	}
 }
+
+.bd-tabs {
+	margin-bottom: 0;
+}
+
+.bs-segment {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.bs-segment .ui-btn.active {
+	border-color: var(--c-accent);
+	color: var(--c-accent);
+	background: var(--c-accent-weak);
+}
+
+.bs-editor-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px;
+}
+
+.bs-editor-head .ui-label {
+	margin: 0 auto 0 0;
+}
+
+.bs-editor {
+	font-size: 13px;
+	line-height: 1.5;
+	tab-size: 2;
+	resize: vertical;
+}
+
+.bs-editor.policy-editor-disabled {
+	background: var(--c-hover);
+	color: var(--c-muted);
+}
+
+.bs-grants {
+	display: grid;
+	gap: 6px;
+}
+
+.bs-grant {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 6px 0;
+	border-bottom: 1px solid var(--c-line);
+}
+
+.bs-checks {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 18px;
+	border: 0;
+	padding: 0;
+	min-width: 0;
+}
+
+.bs-checks legend {
+	padding: 0;
+}
+
+.bs-panel-body > .ui-hint + form {
+	margin-top: 14px;
+}
+
+.ui-dialog-body .bs-field-row + .ui-field {
+	margin-top: 12px;
+}

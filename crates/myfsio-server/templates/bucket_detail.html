@@ -16,48 +16,24 @@
     </div>
   </div>
 
-  <ul class="nav nav-tabs border-bottom-0" id="bucketTabs" role="tablist">
-    <li class="nav-item" role="presentation">
-      <button class="nav-link {% if active_tab == "objects" %}active{% else %}{% endif %}" id="objects-tab" data-bs-toggle="tab" data-bs-target="#objects-pane" type="button" role="tab" aria-controls="objects-pane" aria-selected="{% if active_tab == "objects" %}true{% else %}false{% endif %}">
-        Objects
-      </button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link {% if active_tab == "properties" %}active{% else %}{% endif %}" id="properties-tab" data-bs-toggle="tab" data-bs-target="#properties-pane" type="button" role="tab" aria-controls="properties-pane" aria-selected="{% if active_tab == "properties" %}true{% else %}false{% endif %}">
-        Properties
-      </button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link {% if active_tab == "permissions" %}active{% else %}{% endif %}" id="permissions-tab" data-bs-toggle="tab" data-bs-target="#permissions-pane" type="button" role="tab" aria-controls="permissions-pane" aria-selected="{% if active_tab == "permissions" %}true{% else %}false{% endif %}">
-        Permissions
-      </button>
-    </li>
+  <div class="ui-tabs bd-tabs" id="bucketTabs" data-ui-tabs aria-label="Bucket sections">
+    <button class="ui-tab" type="button" role="tab" id="objects-tab" aria-controls="objects-pane" aria-selected="{% if active_tab == "objects" %}true{% else %}false{% endif %}">Objects</button>
+    <button class="ui-tab" type="button" role="tab" id="properties-tab" aria-controls="properties-pane" aria-selected="{% if active_tab == "properties" %}true{% else %}false{% endif %}">Properties</button>
+    <button class="ui-tab" type="button" role="tab" id="permissions-tab" aria-controls="permissions-pane" aria-selected="{% if active_tab == "permissions" %}true{% else %}false{% endif %}">Permissions</button>
     {% if can_manage_replication %}
-    <li class="nav-item" role="presentation">
-      <button class="nav-link {% if active_tab == "replication" %}active{% else %}{% endif %}" id="replication-tab" data-bs-toggle="tab" data-bs-target="#replication-pane" type="button" role="tab" aria-controls="replication-pane" aria-selected="{% if active_tab == "replication" %}true{% else %}false{% endif %}">
-        Replication
-      </button>
-    </li>
+    <button class="ui-tab" type="button" role="tab" id="replication-tab" aria-controls="replication-pane" aria-selected="{% if active_tab == "replication" %}true{% else %}false{% endif %}">Replication</button>
     {% endif %}
     {% if can_manage_lifecycle %}
-    <li class="nav-item" role="presentation">
-      <button class="nav-link {% if active_tab == "lifecycle" %}active{% else %}{% endif %}" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button" role="tab" aria-controls="lifecycle-pane" aria-selected="{% if active_tab == "lifecycle" %}true{% else %}false{% endif %}">
-        Lifecycle
-      </button>
-    </li>
+    <button class="ui-tab" type="button" role="tab" id="lifecycle-tab" aria-controls="lifecycle-pane" aria-selected="{% if active_tab == "lifecycle" %}true{% else %}false{% endif %}">Lifecycle</button>
     {% endif %}
     {% if can_manage_cors %}
-    <li class="nav-item" role="presentation">
-      <button class="nav-link {% if active_tab == "cors" %}active{% else %}{% endif %}" id="cors-tab" data-bs-toggle="tab" data-bs-target="#cors-pane" type="button" role="tab" aria-controls="cors-pane" aria-selected="{% if active_tab == "cors" %}true{% else %}false{% endif %}">
-        CORS
-      </button>
-    </li>
+    <button class="ui-tab" type="button" role="tab" id="cors-tab" aria-controls="cors-pane" aria-selected="{% if active_tab == "cors" %}true{% else %}false{% endif %}">CORS</button>
     {% endif %}
-  </ul>
+  </div>
 
-  <div class="tab-content" id="bucketTabsContent">
+  <div class="bd-panes" id="bucketTabsContent">
     
-    <div class="tab-pane fade {% if active_tab == "objects" %}show active{% else %}{% endif %}" id="objects-pane" role="tabpanel" aria-labelledby="objects-tab" tabindex="0">
+    <div class="bd-pane" id="objects-pane" aria-labelledby="objects-tab"{% if active_tab != "objects" %} hidden{% endif %}>
 <div class="ob-split" id="objectBrowser">
   <div class="ui-card ob-list">
     <div class="ui-toolbar">
@@ -261,250 +237,91 @@
 </div>
 </div>
 
-    <div class="tab-pane fade {% if active_tab == "permissions" %}show active{% else %}{% endif %}" id="permissions-pane" role="tabpanel" aria-labelledby="permissions-tab" tabindex="0">
-      <div class="row g-4">
-        <div class="col-lg-8">
-          <div class="card shadow-sm" id="bucket-policy-card">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-              </svg>
-              <span class="fw-semibold">Bucket Policy</span>
+    <div class="bd-pane" id="permissions-pane" aria-labelledby="permissions-tab"{% if active_tab != "permissions" %} hidden{% endif %}>
+      <div class="bs-panels">
+        <section class="ui-card bs-panel" id="bucket-policy-card" aria-labelledby="bucketPolicyTitle">
+          <div class="bs-panel-head">
+            <h2 id="bucketPolicyTitle">Bucket policy</h2>
+            <span class="ui-badge {% if bucket_policy %}ui-badge-accent{% endif %}" data-setting-badge>{% if bucket_policy %}Policy attached{% else %}IAM only{% endif %}</span>
+          </div>
+          <div class="bs-panel-body">
+            <p class="bs-panel-text" data-setting-text>{% if bucket_policy %}A bucket policy is attached to this bucket. Access is granted via both IAM and bucket policy rules.{% else %}No bucket policy is attached. Access is controlled by IAM policies only.{% endif %}</p>
+            <p class="ui-hint">Private attaches no policy, so only IAM users with explicit permissions have access. Public read lets anyone read objects while writes stay authenticated. Custom JSON takes AWS IAM-style statements (Effect, Principal, Action, Resource).</p>
+            {% if can_edit_policy %}
+            <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" id="bucketPolicyForm">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+              <input type="hidden" name="mode" value="upsert" id="policyMode" />
+              <div class="ui-field">
+                <span class="ui-label" id="policyPresetLabel">Preset</span>
+                <div class="bs-segment" role="group" aria-labelledby="policyPresetLabel">
+                  <button type="button" class="ui-btn preset-btn {% if preset_choice == "private" %}active{% endif %}" data-preset="private">Private</button>
+                  <button type="button" class="ui-btn preset-btn {% if preset_choice == "public" %}active{% endif %}" data-preset="public">Public read</button>
+                  <button type="button" class="ui-btn preset-btn {% if preset_choice == "custom" %}active{% endif %}" data-preset="custom">Custom JSON</button>
+                </div>
+                <input type="hidden" id="policyPreset" name="preset" value="{{ preset_choice }}" data-default="{{ preset_choice }}">
+              </div>
+              <div class="ui-field">
+                <div class="bs-editor-head">
+                  <label class="ui-label" for="policyDocument">Policy document (JSON)</label>
+                  <span id="policyValidationStatus" class="is-hidden">
+                    <span class="ui-badge ui-badge-ok" id="policyValidBadge">Valid JSON</span>
+                    <span class="ui-badge ui-badge-bad is-hidden" id="policyInvalidBadge">Invalid JSON</span>
+                  </span>
+                  <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost" id="formatPolicyBtn" title="Format JSON">Format</button>
+                </div>
+                <textarea class="ui-input ui-mono bs-editor" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode }}' spellcheck="false">{% if bucket_policy_text %}{{ bucket_policy_text }}{% else %}{{ default_policy }}{% endif %}</textarea>
+                <div id="policyErrorDetail" class="ui-error is-hidden"></div>
+                <div id="policyReadonlyHint" class="ui-hint is-hidden">This preset is read-only. Select <strong>Custom JSON</strong> to edit the policy manually.</div>
+                <div class="ui-hint">The policy is validated on save.</div>
+              </div>
+              <div class="bs-actions">
+                <button class="ui-btn ui-btn-primary" type="submit">Save policy</button>
+                <button type="button" class="ui-btn ui-btn-danger {% if not bucket_policy %}is-hidden{% endif %}" id="deletePolicyBtn" data-ui-open="#deletePolicyModal">Delete policy</button>
+              </div>
+            </form>
+            {% else %}
+            <p class="bs-locked">You do not have permission to edit this policy.</p>
+            {% endif %}
+          </div>
+        </section>
+
+        <section class="ui-card bs-panel" id="bucket-acl-card" data-acl-url="{{ acl_url }}" aria-labelledby="bucketAclTitle">
+          <div class="bs-panel-head">
+            <h2 id="bucketAclTitle">Access control list (ACL)</h2>
+          </div>
+          <div class="bs-panel-body">
+            <p class="ui-hint">ACLs define who can access the bucket and what they can do. <strong>private</strong> is owner only, <strong>public-read</strong> lets anyone read, <strong>authenticated-read</strong> lets authenticated users read.</p>
+            <div id="acl-loading" class="ui-muted">
+              <span class="ui-spinner" role="status"></span>
+              Loading ACL...
             </div>
-            <div class="card-body">
-              {% if bucket_policy %}
-              <div class="alert alert-info d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
-                </svg>
-                <div>
-                  <strong>Policy attached</strong>
-                  <p class="mb-0 small">A bucket policy is attached to this bucket. Access is granted via both IAM and bucket policy rules.</p>
-                </div>
+            <div id="acl-content" class="is-hidden">
+              <div class="ui-field">
+                <span class="ui-label">Owner</span>
+                <code id="acl-owner" class="ui-mono"></code>
               </div>
-              {% else %}
-              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                </svg>
-                <div>
-                  <strong>IAM only</strong>
-                  <p class="mb-0 small">No bucket policy is attached. Access is controlled by IAM policies only.</p>
-                </div>
+              <div class="ui-field">
+                <span class="ui-label">Current grants</span>
+                <div id="acl-grants-list" class="bs-grants"></div>
               </div>
-              {% endif %}
-
-              {% if can_edit_policy %}
-              <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" id="bucketPolicyForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-                <input type="hidden" name="mode" value="upsert" id="policyMode" />
-                
-                <div class="mb-4">
-                  <label class="form-label fw-semibold d-flex align-items-center">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M8 4a.5.5 0 0 1 .5.5V6a.5.5 0 0 1-1 0V4.5A.5.5 0 0 1 8 4zM3.732 5.732a.5.5 0 0 1 .707 0l.915.914a.5.5 0 1 1-.708.708l-.914-.915a.5.5 0 0 1 0-.707zM2 10a.5.5 0 0 1 .5-.5h1.586a.5.5 0 0 1 0 1H2.5A.5.5 0 0 1 2 10zm9.5 0a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 0 1H12a.5.5 0 0 1-.5-.5zm.754-4.246a.5.5 0 0 0-.708 0l-.914.914a.5.5 0 0 0 .707.708l.915-.914a.5.5 0 0 0 0-.708z"/>
-                      <path fill-rule="evenodd" d="M8 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-1 3a1 1 0 1 1 2 0 1 1 0 0 1-2 0z"/>
-                    </svg>
-                    Quick Presets
-                  </label>
-                  <div class="d-flex flex-wrap gap-2">
-                    <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == "private" %}active{% endif %}" data-preset="private">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-                      </svg>
-                      Private
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == "public" %}active{% endif %}" data-preset="public">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8Zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022ZM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-1.01.377-2.042 1.09-2.904.243-.294.526-.569.846-.816ZM4.92 10A5.493 5.493 0 0 0 4 13H1c0-.26.164-1.03.76-1.724.545-.636 1.492-1.256 3.16-1.275ZM1.5 5.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0Zm3-2a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z"/>
-                      </svg>
-                      Public Read
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == "custom" %}active{% endif %}" data-preset="custom">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M10.478 1.647a.5.5 0 1 0-.956-.294l-4 13a.5.5 0 0 0 .956.294l4-13zM4.854 4.146a.5.5 0 0 1 0 .708L1.707 8l3.147 3.146a.5.5 0 0 1-.708.708l-3.5-3.5a.5.5 0 0 1 0-.708l3.5-3.5a.5.5 0 0 1 .708 0zm6.292 0a.5.5 0 0 0 0 .708L14.293 8l-3.147 3.146a.5.5 0 0 0 .708.708l3.5-3.5a.5.5 0 0 0 0-.708l-3.5-3.5a.5.5 0 0 0-.708 0z"/>
-                      </svg>
-                      Custom JSON
-                    </button>
-                  </div>
-                  <input type="hidden" id="policyPreset" name="preset" value="{{ preset_choice }}" data-default="{{ preset_choice }}">
+              {% if can_manage_acl %}
+              <div class="ui-field">
+                <span class="ui-label">Set canned ACL</span>
+                <div class="bs-actions">
+                  <button type="button" class="ui-btn ui-btn-sm" data-set-acl="private">Private</button>
+                  <button type="button" class="ui-btn ui-btn-sm" data-set-acl="public-read">Public Read</button>
+                  <button type="button" class="ui-btn ui-btn-sm" data-set-acl="public-read-write">Public Read/Write</button>
+                  <button type="button" class="ui-btn ui-btn-sm" data-set-acl="authenticated-read">Authenticated Read</button>
                 </div>
-
-                <div class="mb-3">
-                  <label class="form-label fw-semibold d-flex align-items-center justify-content-between">
-                    <span>
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-                        <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm1.639-3.708 1.33.886 1.854-1.855a.25.25 0 0 1 .289-.047l1.888.974V8.5a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V8s1.54-1.274 1.639-1.208z"/>
-                      </svg>
-                      Policy Document (JSON)
-                    </span>
-                    <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none" id="formatPolicyBtn" title="Format JSON">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M5.854 4.854a.5.5 0 1 0-.708-.708l-3.5 3.5a.5.5 0 0 0 0 .708l3.5 3.5a.5.5 0 0 0 .708-.708L2.707 8l3.147-3.146zm4.292 0a.5.5 0 0 1 .708-.708l3.5 3.5a.5.5 0 0 1 0 .708l-3.5 3.5a.5.5 0 0 1-.708-.708L13.293 8l-3.147-3.146z"/>
-                      </svg>
-                      Format
-                    </button>
-                  </label>
-                  <div class="position-relative">
-                    <textarea class="form-control font-monospace" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode }}' spellcheck="false" style="font-size: 0.85rem; line-height: 1.5; tab-size: 2;">{% if bucket_policy_text %}{{ bucket_policy_text }}{% else %}{{ default_policy }}{% endif %}</textarea>
-                    <div id="policyValidationStatus" class="position-absolute top-0 end-0 m-2 is-hidden">
-                      <span class="badge bg-success-subtle text-success" id="policyValidBadge">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                        </svg>
-                        Valid JSON
-                      </span>
-                      <span class="badge bg-danger-subtle text-danger is-hidden" id="policyInvalidBadge">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
-                        </svg>
-                        Invalid JSON
-                      </span>
-                    </div>
-                  </div>
-                  <div id="policyErrorDetail" class="text-danger small mt-1 is-hidden"></div>
-                  <div id="policyReadonlyHint" class="alert alert-secondary small py-2 px-3 mt-2 mb-0 is-hidden">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-                    </svg>
-                    This preset is read-only. Select <strong>Custom JSON</strong> to edit the policy manually.
-                  </div>
-                  <div class="form-text d-flex align-items-start gap-2 mt-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="flex-shrink-0 mt-1 text-muted" viewBox="0 0 16 16">
-                      <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                      <path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/>
-                    </svg>
-                    <span>Use presets for common scenarios or select <strong>Custom JSON</strong> to write AWS IAM-style policy statements. The policy will be validated on save.</span>
-                  </div>
-                </div>
-
-                <div class="d-flex gap-2 flex-wrap">
-                  <button class="btn btn-primary" type="submit">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M2 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H9.5a1 1 0 0 0-1 1v7.293l2.646-2.647a.5.5 0 0 1 .708.708l-3.5 3.5a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L7.5 9.293V2a2 2 0 0 1 2-2H14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h2.5a.5.5 0 0 1 0 1H2z"/>
-                    </svg>
-                    Save Policy
-                  </button>
-                  <button type="button" class="btn btn-outline-danger" id="deletePolicyBtn" data-bs-toggle="modal" data-bs-target="#deletePolicyModal"{% if not bucket_policy %} style="display: none;"{% endif %}>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                      <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                    </svg>
-                    Delete Policy
-                  </button>
-                </div>
-              </form>
-              {% else %}
-              <div class="text-center py-4">
-                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" class="text-muted mb-3" viewBox="0 0 16 16">
-                  <path d="M9.293 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4.707A1 1 0 0 0 13.707 4L10 .293A1 1 0 0 0 9.293 0zM9.5 3.5v-2l3 3h-2a1 1 0 0 1-1-1zM4.5 9a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1h-7zM4 10.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zm.5 2.5a.5.5 0 0 1 0-1h4a.5.5 0 0 1 0 1h-4z"/>
-                </svg>
-                <p class="text-muted mb-0">You do not have permission to edit this policy.</p>
               </div>
               {% endif %}
             </div>
           </div>
-        </div>
-
-        <div class="col-lg-4">
-          <div class="card bg-body-tertiary border-0">
-            <div class="card-body">
-              <h6 class="card-title d-flex align-items-center mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                </svg>
-                About Bucket Policies
-              </h6>
-              <p class="small text-muted mb-3">
-                Bucket policies are JSON-based access policy documents that specify who can access your bucket and under what conditions.
-              </p>
-              
-              <h6 class="small fw-semibold mb-2">Policy Types</h6>
-              <ul class="small text-muted mb-3 ps-3">
-                <li><strong>Private</strong> — No policy attached; only IAM users with explicit permissions can access.</li>
-                <li><strong>Public Read</strong> — Anyone can read objects, but only authenticated users can write.</li>
-                <li><strong>Custom</strong> — Fine-grained control using AWS IAM policy syntax.</li>
-              </ul>
-
-              <h6 class="small fw-semibold mb-2">Policy Elements</h6>
-              <ul class="small text-muted mb-0 ps-3">
-                <li><strong>Effect</strong> — Allow or Deny</li>
-                <li><strong>Principal</strong> — Who the policy applies to</li>
-                <li><strong>Action</strong> — Which S3 operations</li>
-                <li><strong>Resource</strong> — Bucket/object ARN</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="row g-4 mt-2">
-        <div class="col-lg-8">
-          <div class="card shadow-sm" id="bucket-acl-card" data-acl-url="{{ acl_url }}">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7Zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-5.784 6A2.238 2.238 0 0 1 5 13c0-1.355.68-2.75 1.936-3.72A6.325 6.325 0 0 0 5 9c-4 0-5 3-5 4s1 1 1 1h4.216ZM4.5 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/>
-              </svg>
-              <span class="fw-semibold">Access Control List (ACL)</span>
-            </div>
-            <div class="card-body">
-              <div id="acl-loading" class="text-center py-3">
-                <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-                Loading ACL...
-              </div>
-              <div id="acl-content" class="is-hidden">
-                <div class="mb-3">
-                  <label class="form-label small fw-semibold">Owner</label>
-                  <div class="border rounded p-2 bg-body-secondary">
-                    <code id="acl-owner" class="small"></code>
-                  </div>
-                </div>
-                <div class="mb-3">
-                  <label class="form-label small fw-semibold">Current Grants</label>
-                  <div id="acl-grants-list" class="list-group list-group-flush small"></div>
-                </div>
-                {% if can_manage_acl %}
-                <div class="mb-3">
-                  <label class="form-label small fw-semibold">Set Canned ACL</label>
-                  <div class="d-flex flex-wrap gap-2">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="private">Private</button>
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="public-read">Public Read</button>
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="public-read-write">Public Read/Write</button>
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="authenticated-read">Authenticated Read</button>
-                  </div>
-                </div>
-                {% endif %}
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="col-lg-4">
-          <div class="card bg-body-tertiary border-0">
-            <div class="card-body">
-              <h6 class="card-title d-flex align-items-center mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                </svg>
-                About ACLs
-              </h6>
-              <p class="small text-muted mb-3">Access Control Lists define who can access your bucket and what they can do.</p>
-              <h6 class="small fw-semibold mb-2">Canned ACLs</h6>
-              <ul class="small text-muted mb-0 ps-3">
-                <li><strong>private</strong> — Owner only</li>
-                <li><strong>public-read</strong> — Anyone can read</li>
-                <li><strong>authenticated-read</strong> — Authenticated users can read</li>
-              </ul>
-            </div>
-          </div>
-        </div>
+        </section>
       </div>
     </div>
 
-    <div class="tab-pane fade {% if active_tab == "properties" %}show active{% else %}{% endif %}" id="properties-pane" role="tabpanel" aria-labelledby="properties-tab" tabindex="0">
+    <div class="bd-pane" id="properties-pane" aria-labelledby="properties-tab"{% if active_tab != "properties" %} hidden{% endif %}>
       {% set max_bytes = bucket_quota.max_bytes %}
       {% set max_objects = bucket_quota.max_objects %}
       {% set current_objects = bucket_stats.objects | default(value=0) %}
@@ -796,7 +613,7 @@
     </div>
 
     {% if can_manage_replication %}
-    <div class="tab-pane fade {% if active_tab == "replication" %}show active{% else %}{% endif %}" id="replication-pane" role="tabpanel" aria-labelledby="replication-tab" tabindex="0">
+    <div class="bd-pane" id="replication-pane" aria-labelledby="replication-tab"{% if active_tab != "replication" %} hidden{% endif %}>
       <div class="row g-4">
         <div class="col-lg-8">
           <div class="card shadow-sm">
@@ -1084,7 +901,7 @@
                   </button>
                 </form>
                 {% if is_replication_admin %}
-                <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
+                <button type="button" class="btn btn-outline-danger" data-ui-open="#disableReplicationModal">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                     <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
                     <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
@@ -1160,7 +977,7 @@
                   </button>
                 </form>
                 {% if is_replication_admin %}
-                <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
+                <button type="button" class="btn btn-outline-danger" data-ui-open="#disableReplicationModal">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                     <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
                     <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
@@ -1350,7 +1167,7 @@
     {% endif %}
 
     {% if can_manage_lifecycle %}
-    <div class="tab-pane fade {% if active_tab == "lifecycle" %}show active{% else %}{% endif %}" id="lifecycle-pane" role="tabpanel" aria-labelledby="lifecycle-tab" tabindex="0">
+    <div class="bd-pane" id="lifecycle-pane" aria-labelledby="lifecycle-tab"{% if active_tab != "lifecycle" %} hidden{% endif %}>
       {% if not lifecycle_enabled %}
       <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
@@ -1373,7 +1190,7 @@
                 </svg>
                 <span class="fw-semibold">Lifecycle Rules</span>
               </div>
-              <button class="btn btn-primary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#addLifecycleRuleModal" {% if not lifecycle_enabled %}disabled title="Lifecycle enforcement is not enabled. Enable LIFECYCLE_ENABLED=true to use this feature."{% endif %}>
+              <button class="btn btn-primary btn-sm" type="button" data-ui-open="#addLifecycleRuleModal" {% if not lifecycle_enabled %}disabled title="Lifecycle enforcement is not enabled. Enable LIFECYCLE_ENABLED=true to use this feature."{% endif %}>
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                   <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
                 </svg>
@@ -1511,7 +1328,7 @@
     {% endif %}
 
     {% if can_manage_cors %}
-    <div class="tab-pane fade {% if active_tab == "cors" %}show active{% else %}{% endif %}" id="cors-pane" role="tabpanel" aria-labelledby="cors-tab" tabindex="0">
+    <div class="bd-pane" id="cors-pane" aria-labelledby="cors-tab"{% if active_tab != "cors" %} hidden{% endif %}>
       <div class="row g-4">
         <div class="col-lg-8">
           <div class="card shadow-sm" id="cors-rules-card" data-cors-url="{{ cors_url }}">
@@ -1528,7 +1345,7 @@
                   </svg>
                 </span>
               </div>
-              <button class="btn btn-primary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#addCorsRuleModal">
+              <button class="btn btn-primary btn-sm" type="button" data-ui-open="#addCorsRuleModal">
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                   <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
                 </svg>
@@ -1648,41 +1465,24 @@
   </div>
 </div>
 
-<div class="modal fade" id="deletePolicyModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold text-danger">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2" viewBox="0 0 16 16">
-            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-          </svg>
-          Delete bucket policy
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="alert alert-warning d-flex align-items-start" role="alert">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-          </svg>
-          <div>
-            <strong>Warning:</strong> Removing the bucket policy will revert access control to IAM-only. Users relying on policy-based permissions may lose access.
-          </div>
-        </div>
-        <p class="text-muted small mb-0">Are you sure you want to delete the bucket policy for <strong>{{ bucket_name }}</strong>?</p>
-      </div>
-      <div class="modal-footer border-0 pt-0">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" class="d-inline" id="deletePolicyForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-          <input type="hidden" name="mode" value="delete" />
-          <button type="submit" class="btn btn-danger">Delete Policy</button>
-        </form>
-      </div>
+<dialog class="ui-dialog" id="deletePolicyModal" aria-labelledby="deletePolicyTitle">
+  <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" id="deletePolicyForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <input type="hidden" name="mode" value="delete" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="deletePolicyTitle">Delete bucket policy</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-body">
+      <div class="ob-notice" role="alert">Removing the bucket policy will revert access control to IAM-only. Users relying on policy-based permissions may lose access.</div>
+      <p class="ui-hint">Are you sure you want to delete the bucket policy for <strong>{{ bucket_name }}</strong>?</p>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button type="submit" class="ui-btn ui-btn-danger">Delete policy</button>
+    </div>
+  </form>
+</dialog>
 
 <dialog class="ui-dialog" id="uploadModal" aria-labelledby="uploadTitle">
   <form
@@ -1921,228 +1721,130 @@
   </div>
 </dialog>
 
-<div class="modal fade" id="disableReplicationModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
-            <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
-            <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
-          </svg>
-          Disable Replication
-        </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
-            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
-          </svg>
-          <div>
-            <strong>Are you sure?</strong><br>
-            <span class="small">New uploads will no longer be copied to the target bucket.</span>
-          </div>
-        </div>
-        <p class="text-muted small mb-0">Existing objects in the target bucket will remain unchanged.</p>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}" class="d-inline">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-            <input type="hidden" name="action" value="delete">
-            <button type="submit" class="btn btn-warning">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-              </svg>
-              Disable Replication
-            </button>
-        </form>
-      </div>
+<dialog class="ui-dialog" id="disableReplicationModal" aria-labelledby="disableReplicationTitle">
+  <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <input type="hidden" name="action" value="delete">
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="disableReplicationTitle">Disable replication</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-body">
+      <div class="ob-notice" role="alert">New uploads will no longer be copied to the target bucket.</div>
+      <p class="ui-hint">Existing objects in the target bucket will remain unchanged.</p>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button type="submit" class="ui-btn ui-btn-danger">Disable replication</button>
+    </div>
+  </form>
+</dialog>
 
-<div class="modal fade" id="clearFailuresModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
-            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-          </svg>
-          Clear All Failures
-        </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
-            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
-          </svg>
-          <div>
-            <strong>Are you sure?</strong><br>
-            <span class="small">This will remove all failure records from the list.</span>
-          </div>
-        </div>
-        <p class="text-muted small mb-0">Failed objects will not be retried unless they fail again during replication.</p>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-warning" id="confirmClearFailuresBtn">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-          </svg>
-          Clear All
-        </button>
-      </div>
-    </div>
+<dialog class="ui-dialog" id="clearFailuresModal" aria-labelledby="clearFailuresTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="clearFailuresTitle">Clear all failures</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
-</div>
+  <div class="ui-dialog-body">
+    <div class="ob-notice" role="alert">This will remove all failure records from the list.</div>
+    <p class="ui-hint">Failed objects will not be retried unless they fail again during replication.</p>
+  </div>
+  <div class="ui-dialog-foot">
+    <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+    <button type="button" class="ui-btn ui-btn-danger" id="confirmClearFailuresBtn">Clear all</button>
+  </div>
+</dialog>
 
-<div class="modal fade" id="addLifecycleRuleModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered modal-lg">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
-            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
-          </svg>
-          Add Lifecycle Rule
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+<dialog class="ui-dialog ui-dialog-lg" id="addLifecycleRuleModal" aria-labelledby="addLifecycleRuleTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="addLifecycleRuleTitle">Add lifecycle rule</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="ui-dialog-body">
+    <div class="bs-field-row">
+      <div class="ui-field">
+        <label class="ui-label" for="lifecycleRuleId">Rule ID</label>
+        <input type="text" class="ui-input" id="lifecycleRuleId" placeholder="cleanup-old-files" required />
       </div>
-      <div class="modal-body">
-        <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label fw-medium">Rule ID</label>
-            <input type="text" class="form-control" id="lifecycleRuleId" placeholder="cleanup-old-files" required />
-          </div>
-          <div class="col-md-6">
-            <label class="form-label fw-medium">Status</label>
-            <select class="form-select" id="lifecycleRuleStatus">
-              <option value="Enabled">Enabled</option>
-              <option value="Disabled">Disabled</option>
-            </select>
-          </div>
-          <div class="col-12">
-            <label class="form-label fw-medium">Prefix Filter <span class="text-muted fw-normal">(optional)</span></label>
-            <input type="text" class="form-control font-monospace" id="lifecycleRulePrefix" placeholder="logs/" />
-            <div class="form-text">Only apply this rule to objects with keys starting with this prefix.</div>
-          </div>
-          <div class="col-12">
-            <hr class="my-2">
-            <h6 class="fw-semibold mb-3">Actions</h6>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-medium">Expiration (days)</label>
-            <input type="number" class="form-control" id="lifecycleExpirationDays" min="1" placeholder="30" />
-            <div class="form-text">Delete objects after N days.</div>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-medium">Noncurrent Expiration</label>
-            <input type="number" class="form-control" id="lifecycleNoncurrentDays" min="1" placeholder="90" />
-            <div class="form-text">Delete old versions after N days.</div>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label fw-medium">Abort Incomplete MPU</label>
-            <input type="number" class="form-control" id="lifecycleAbortMpuDays" min="1" placeholder="7" />
-            <div class="form-text">Abort uploads after N days.</div>
-          </div>
-        </div>
+      <div class="ui-field">
+        <label class="ui-label" for="lifecycleRuleStatus">Status</label>
+        <select class="ui-select" id="lifecycleRuleStatus">
+          <option value="Enabled">Enabled</option>
+          <option value="Disabled">Disabled</option>
+        </select>
       </div>
-      <div class="modal-footer border-0 pt-0">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" id="addLifecycleRuleConfirm">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
-          </svg>
-          Add Rule
-        </button>
+    </div>
+    <div class="ui-field">
+      <label class="ui-label" for="lifecycleRulePrefix">Prefix filter (optional)</label>
+      <input type="text" class="ui-input ui-mono" id="lifecycleRulePrefix" placeholder="logs/" />
+      <div class="ui-hint">Only apply this rule to objects with keys starting with this prefix.</div>
+    </div>
+    <div class="bs-field-row">
+      <div class="ui-field">
+        <label class="ui-label" for="lifecycleExpirationDays">Expiration (days)</label>
+        <input type="number" class="ui-input" id="lifecycleExpirationDays" min="1" placeholder="30" />
+        <div class="ui-hint">Delete objects after N days.</div>
+      </div>
+      <div class="ui-field">
+        <label class="ui-label" for="lifecycleNoncurrentDays">Noncurrent expiration</label>
+        <input type="number" class="ui-input" id="lifecycleNoncurrentDays" min="1" placeholder="90" />
+        <div class="ui-hint">Delete old versions after N days.</div>
+      </div>
+      <div class="ui-field">
+        <label class="ui-label" for="lifecycleAbortMpuDays">Abort incomplete MPU</label>
+        <input type="number" class="ui-input" id="lifecycleAbortMpuDays" min="1" placeholder="7" />
+        <div class="ui-hint">Abort uploads after N days.</div>
       </div>
     </div>
   </div>
-</div>
+  <div class="ui-dialog-foot">
+    <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+    <button type="button" class="ui-btn ui-btn-primary" id="addLifecycleRuleConfirm">Add rule</button>
+  </div>
+</dialog>
 
-<div class="modal fade" id="addCorsRuleModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered modal-lg">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
-          </svg>
-          Add CORS Rule
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+<dialog class="ui-dialog ui-dialog-lg" id="addCorsRuleModal" aria-labelledby="addCorsRuleTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="addCorsRuleTitle">Add CORS rule</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="ui-dialog-body">
+    <div class="ui-field">
+      <label class="ui-label" for="corsAllowedOrigins">Allowed origins</label>
+      <textarea class="ui-input ui-mono" id="corsAllowedOrigins" rows="3" placeholder="*&#10;https://example.com&#10;http://localhost:3000"></textarea>
+      <div class="ui-hint">One origin per line. Use <code>*</code> for all origins.</div>
+    </div>
+    <fieldset class="ui-field bs-checks">
+      <legend class="ui-label">Allowed methods</legend>
+      <label class="ui-check" for="corsMethodGet"><input type="checkbox" id="corsMethodGet" value="GET" checked> GET</label>
+      <label class="ui-check" for="corsMethodPut"><input type="checkbox" id="corsMethodPut" value="PUT"> PUT</label>
+      <label class="ui-check" for="corsMethodPost"><input type="checkbox" id="corsMethodPost" value="POST"> POST</label>
+      <label class="ui-check" for="corsMethodDelete"><input type="checkbox" id="corsMethodDelete" value="DELETE"> DELETE</label>
+      <label class="ui-check" for="corsMethodHead"><input type="checkbox" id="corsMethodHead" value="HEAD" checked> HEAD</label>
+    </fieldset>
+    <div class="bs-field-row">
+      <div class="ui-field">
+        <label class="ui-label" for="corsAllowedHeaders">Allowed headers (optional)</label>
+        <textarea class="ui-input ui-mono" id="corsAllowedHeaders" rows="2" placeholder="*&#10;Content-Type"></textarea>
+        <div class="ui-hint">One header per line.</div>
       </div>
-      <div class="modal-body">
-        <div class="row g-3">
-          <div class="col-12">
-            <label class="form-label fw-medium">Allowed Origins</label>
-            <textarea class="form-control font-monospace" id="corsAllowedOrigins" rows="3" placeholder="*&#10;https://example.com&#10;http://localhost:3000"></textarea>
-            <div class="form-text">One origin per line. Use <code>*</code> for all origins.</div>
-          </div>
-          <div class="col-12">
-            <label class="form-label fw-medium">Allowed Methods</label>
-            <div class="d-flex flex-wrap gap-3">
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="corsMethodGet" value="GET" checked>
-                <label class="form-check-label" for="corsMethodGet">GET</label>
-              </div>
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="corsMethodPut" value="PUT">
-                <label class="form-check-label" for="corsMethodPut">PUT</label>
-              </div>
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="corsMethodPost" value="POST">
-                <label class="form-check-label" for="corsMethodPost">POST</label>
-              </div>
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="corsMethodDelete" value="DELETE">
-                <label class="form-check-label" for="corsMethodDelete">DELETE</label>
-              </div>
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="corsMethodHead" value="HEAD" checked>
-                <label class="form-check-label" for="corsMethodHead">HEAD</label>
-              </div>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label fw-medium">Allowed Headers <span class="text-muted fw-normal">(optional)</span></label>
-            <textarea class="form-control font-monospace" id="corsAllowedHeaders" rows="2" placeholder="*&#10;Content-Type"></textarea>
-            <div class="form-text">One header per line.</div>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label fw-medium">Expose Headers <span class="text-muted fw-normal">(optional)</span></label>
-            <textarea class="form-control font-monospace" id="corsExposeHeaders" rows="2" placeholder="ETag&#10;x-amz-meta-*"></textarea>
-            <div class="form-text">One header per line.</div>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label fw-medium">Max Age (seconds) <span class="text-muted fw-normal">(optional)</span></label>
-            <input type="number" class="form-control" id="corsMaxAge" min="0" placeholder="3600" />
-            <div class="form-text">How long browsers cache preflight responses.</div>
-          </div>
-        </div>
-      </div>
-      <div class="modal-footer border-0 pt-0">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" id="addCorsRuleConfirm">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
-          </svg>
-          Add Rule
-        </button>
+      <div class="ui-field">
+        <label class="ui-label" for="corsExposeHeaders">Expose headers (optional)</label>
+        <textarea class="ui-input ui-mono" id="corsExposeHeaders" rows="2" placeholder="ETag&#10;x-amz-meta-*"></textarea>
+        <div class="ui-hint">One header per line.</div>
       </div>
     </div>
+    <div class="ui-field">
+      <label class="ui-label" for="corsMaxAge">Max age in seconds (optional)</label>
+      <input type="number" class="ui-input" id="corsMaxAge" min="0" placeholder="3600" />
+      <div class="ui-hint">How long browsers cache preflight responses.</div>
+    </div>
   </div>
-</div>
+  <div class="ui-dialog-foot">
+    <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+    <button type="button" class="ui-btn ui-btn-primary" id="addCorsRuleConfirm">Add rule</button>
+  </div>
+</dialog>
 
 <dialog class="ui-dialog" id="copyMoveModal" aria-labelledby="copyMoveModalTitle">
   <form id="copyMoveForm">
