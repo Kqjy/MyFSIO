@@ -260,29 +260,21 @@
     }
   };
 
-  const renderObjectsLimit = (totalObjects, maxObjects) => {
-    if (maxObjects && maxObjects > 0) {
-      const pct = Math.min(100, Math.floor(totalObjects / maxObjects * 100));
-      const cls = pct >= 90 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-success';
-      return '<div class="progress mt-2" style="height: 4px;">' +
-        '<div class="progress-bar ' + cls + '" style="width: ' + pct + '%"></div>' +
-        '</div>' +
-        '<div class="small text-muted mt-1">' + pct + '% of ' + maxObjects.toLocaleString() + ' stored-copy limit</div>';
+  const renderUsageLimit = (used, limit, limitLabel, emptyLabel) => {
+    if (limit && limit > 0) {
+      const pct = Math.min(100, Math.floor(used / limit * 100));
+      const tone = pct >= 90 ? 'is-bad' : pct >= 75 ? 'is-warn' : 'is-ok';
+      return '<div class="ui-bar bs-usage-bar ' + tone + '"><i style="width: ' + pct + '%"></i></div>' +
+        '<div class="ui-stat-note">' + pct + '% of ' + limitLabel + '</div>';
     }
-    return '<div class="small text-muted mt-2">No stored-copy limit</div>';
+    return '<div class="ui-stat-note">' + emptyLabel + '</div>';
   };
 
-  const renderBytesLimit = (totalBytes, maxBytes) => {
-    if (maxBytes && maxBytes > 0) {
-      const pct = Math.min(100, Math.floor(totalBytes / maxBytes * 100));
-      const cls = pct >= 90 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-success';
-      return '<div class="progress mt-2" style="height: 4px;">' +
-        '<div class="progress-bar ' + cls + '" style="width: ' + pct + '%"></div>' +
-        '</div>' +
-        '<div class="small text-muted mt-1">' + pct + '% of ' + formatBytes(maxBytes) + ' limit</div>';
-    }
-    return '<div class="small text-muted mt-2">No limit</div>';
-  };
+  const renderObjectsLimit = (totalObjects, maxObjects) =>
+    renderUsageLimit(totalObjects, maxObjects, (maxObjects || 0).toLocaleString() + ' stored-copy limit', 'No stored-copy limit');
+
+  const renderBytesLimit = (totalBytes, maxBytes) =>
+    renderUsageLimit(totalBytes, maxBytes, formatBytes(maxBytes || 0) + ' limit', 'No limit');
 
   const redrawUsageLimits = () => {
     const objectsCard = document.querySelector('[data-usage-objects]');
@@ -1787,12 +1779,12 @@
       const row = document.createElement('tr');
       const cell = document.createElement('td');
       cell.colSpan = 4;
-      cell.className = 'text-center text-danger py-3';
+      cell.className = 'bs-table-empty ui-error';
       const text = document.createElement('div');
       text.textContent = message;
       const retry = document.createElement('button');
       retry.type = 'button';
-      retry.className = 'btn btn-outline-danger btn-sm mt-2';
+      retry.className = 'ui-btn ui-btn-sm ui-btn-danger';
       retry.textContent = 'Retry';
       retry.addEventListener('click', () => loadArchivedObjects(true));
       cell.appendChild(text);
@@ -1812,7 +1804,7 @@
     if (!archivedBody) return;
     archivedBody.innerHTML = '';
     if (!items || items.length === 0) {
-      archivedBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No archived-only objects.</td></tr>';
+      archivedBody.innerHTML = '<tr><td colspan="4" class="bs-table-empty">No archived-only objects.</td></tr>';
       updateArchivedCount(0);
       return;
     }
@@ -1822,45 +1814,37 @@
 
       const keyCell = document.createElement('td');
       const keyLabel = document.createElement('div');
-      keyLabel.className = 'fw-semibold text-break';
+      keyLabel.className = 'ui-name';
       keyLabel.textContent = item.key;
-      const badgeWrap = document.createElement('div');
-      badgeWrap.className = 'mt-1';
-      const badge = document.createElement('span');
-      badge.className = 'badge text-bg-warning';
-      badge.textContent = 'Archived';
-      badgeWrap.appendChild(badge);
       keyCell.appendChild(keyLabel);
-      keyCell.appendChild(badgeWrap);
 
       const latestCell = document.createElement('td');
       if (item.latest) {
         const ts = versionTimestamp(item.latest);
         const sizeLabel = formatBytes(Number(item.latest.size) || 0);
-        latestCell.innerHTML = `<div class="small">${escapeHtml(ts)}</div><div class="text-muted small">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
+        latestCell.innerHTML = `<div>${escapeHtml(ts)}</div><div class="ui-hint">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
       } else {
-        latestCell.innerHTML = '<span class="text-muted small">Unknown</span>';
+        latestCell.innerHTML = '<span class="ui-muted">Unknown</span>';
       }
 
       const countCell = document.createElement('td');
-      countCell.className = 'text-end text-muted';
+      countCell.className = 'ui-muted';
       countCell.textContent = item.versions;
 
       const actionsCell = document.createElement('td');
-      actionsCell.className = 'text-end';
       const btnGroup = document.createElement('div');
-      btnGroup.className = 'btn-group btn-group-sm';
+      btnGroup.className = 'bs-row-actions';
 
       const restoreButton = document.createElement('button');
       restoreButton.type = 'button';
-      restoreButton.className = 'btn btn-outline-primary';
+      restoreButton.className = 'ui-btn ui-btn-sm';
       restoreButton.textContent = 'Restore';
       restoreButton.disabled = !item.latest || !item.restore_url;
       restoreButton.addEventListener('click', () => confirmVersionRestore(null, item.latest, item.key, () => restoreArchivedObject(item)));
 
       const purgeButton = document.createElement('button');
       purgeButton.type = 'button';
-      purgeButton.className = 'btn btn-outline-danger';
+      purgeButton.className = 'ui-btn ui-btn-sm ui-btn-danger';
       purgeButton.textContent = 'Delete versions';
       purgeButton.addEventListener('click', () => confirmArchivedPurge(item));
 
@@ -1942,7 +1926,7 @@
       renderArchivedRows(archivedItemsCache);
       return;
     }
-    archivedBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr>';
+    archivedBody.innerHTML = '<tr><td colspan="4" class="bs-table-empty">Loading…</td></tr>';
     archivedLoadPromise = (async () => {
       try {
         const response = await fetch(archivedEndpoint);
@@ -1975,7 +1959,7 @@
   const propertiesTab = document.getElementById('properties-tab');
   if (propertiesTab) {
     propertiesTab.addEventListener('shown.bs.tab', () => {
-      if (archivedCard && archivedEndpoint) {
+      if (versioningEnabled && archivedCard && archivedEndpoint) {
         loadArchivedObjects();
       }
       if (propertiesTab.dataset.scrollToArchived === 'true') {
@@ -3333,7 +3317,7 @@
   const updateKmsKeyVisibility = () => {
     if (!kmsKeySection) return;
     const showKms = algoKmsRadio?.checked;
-    kmsKeySection.style.display = showKms ? '' : 'none';
+    kmsKeySection.classList.toggle('is-hidden', !showKms);
   };
 
   algoAes256Radio?.addEventListener('change', updateKmsKeyVisibility);
@@ -4073,20 +4057,23 @@
   if (aclCard) loadAcl();
 
   function updateVersioningBadge(state) {
-    var badge = document.querySelector('.badge.rounded-pill');
+    var badge = document.getElementById('bucketVersioningBadge');
     if (!badge) return;
     var enabled = state === true || state === 'enabled';
     var suspended = state === 'suspended';
-    badge.classList.remove('text-bg-success', 'text-bg-warning', 'text-bg-secondary');
-    badge.classList.add(enabled ? 'text-bg-success' : suspended ? 'text-bg-warning' : 'text-bg-secondary');
-    badge.classList.add('d-inline-flex', 'align-items-center');
-    var icon = '<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">' +
-      '<path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>' +
-      '<path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>' +
-      '<path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>' +
-      '</svg>';
-    badge.innerHTML = icon + (enabled ? 'Versioning On' : suspended ? 'Versioning Suspended' : 'Versioning Off');
+    badge.className = 'ui-badge' + (enabled ? ' ui-badge-ok' : suspended ? ' ui-badge-warn' : '');
+    badge.textContent = enabled ? 'Versioning On' : suspended ? 'Versioning Suspended' : 'Versioning Off';
     setVersioningEnabled(enabled);
+  }
+
+  function setSettingStatus(card, tone, label, html) {
+    var badge = card.querySelector('[data-setting-badge]');
+    if (badge) {
+      badge.className = 'ui-badge' + (tone ? ' ui-badge-' + tone : '');
+      badge.textContent = label;
+    }
+    var text = card.querySelector('[data-setting-text]');
+    if (text) text.innerHTML = html;
   }
 
   function interceptForm(formId, options) {
@@ -4100,8 +4087,7 @@
         onSuccess: function (data) {
           if (options.onSuccess) options.onSuccess(data);
           if (options.closeModal) {
-            var modal = bootstrap.Modal.getInstance(document.getElementById(options.closeModal));
-            if (modal) modal.hide();
+            window.UI.dialog.close(document.getElementById(options.closeModal));
           }
           if (options.reload) {
             setTimeout(function () { location.reload(); }, 500);
@@ -4114,102 +4100,20 @@
   function updateVersioningCard(enabled) {
     var card = document.getElementById('bucket-versioning-card');
     if (!card) return;
-    var cardBody = card.querySelector('.card-body');
-    if (!cardBody) return;
+    if (enabled) {
+      setSettingStatus(card, 'ok', 'Enabled', 'All previous versions of objects are preserved. You can roll back accidental changes or deletions at any time.');
+    } else {
+      setSettingStatus(card, 'warn', 'Suspended', 'New uploads overwrite existing objects, but previously archived versions are still retained. Re-enable versioning to start preserving new versions again.');
+    }
+    document.getElementById('suspendVersioningBtn')?.classList.toggle('is-hidden', !enabled);
+    document.getElementById('enableVersioningForm')?.classList.toggle('is-hidden', enabled);
 
-    var enabledHtml = '<div class="alert alert-success d-flex align-items-start mb-4" role="alert">' +
-      '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-      '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>' +
-      '</svg><div><strong>Versioning is enabled</strong>' +
-      '<p class="mb-0 small">All previous versions of objects are preserved. You can roll back accidental changes or deletions at any time.</p>' +
-      '</div></div>' +
-      '<button class="btn btn-outline-danger" type="button" data-bs-toggle="modal" data-bs-target="#suspendVersioningModal">' +
-      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
-      '<path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>' +
-      '</svg>Suspend Versioning</button>';
-
-    var disabledHtml = '<div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">' +
-      '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-      '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
-      '<path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>' +
-      '</svg><div><strong>Versioning is suspended</strong>' +
-      '<p class="mb-0 small">New object uploads overwrite existing objects. Enable versioning to preserve previous versions.</p>' +
-      '</div></div>' +
-      '<form method="post" id="enableVersioningForm">' +
-      '<input type="hidden" name="csrf_token" value="' + window.UICore.getCsrfToken() + '" />' +
-      '<input type="hidden" name="state" value="enable" />' +
-      '<button class="btn btn-success" type="submit">' +
-      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
-      '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>' +
-      '</svg>Enable Versioning</button></form>';
-
-    cardBody.innerHTML = enabled ? enabledHtml : disabledHtml;
-
-    var archivedCardEl = document.getElementById('archived-objects-card');
-    if (archivedCardEl) {
-      archivedCardEl.style.display = enabled ? '' : 'none';
-    } else if (enabled) {
-      var endpoint = window.BucketDetailConfig?.endpoints?.archivedObjects || '';
-      if (endpoint) {
-        var html = '<div class="card shadow-sm mt-4" id="archived-objects-card" data-archived-endpoint="' + endpoint + '">' +
-          '<div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">' +
-          '<div class="d-flex align-items-center">' +
-          '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning me-2" viewBox="0 0 16 16">' +
-          '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
-          '</svg><span class="fw-semibold">Archived Objects</span></div>' +
-          '<div class="d-flex align-items-center gap-2">' +
-          '<span class="badge text-bg-secondary is-hidden" data-archived-count></span>' +
-          '<button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>' +
-          '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
-          '<path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>' +
-          '<path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>' +
-          '</svg>Refresh</button></div></div>' +
-          '<div class="card-body">' +
-          '<p class="text-muted small mb-3">Objects that have been deleted while versioning is enabled. Their previous versions remain available until you restore or purge them.</p>' +
-          '<div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0">' +
-          '<thead class="table-light"><tr>' +
-          '<th scope="col"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 text-muted" viewBox="0 0 16 16">' +
-          '<path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>' +
-          '</svg>Key</th>' +
-          '<th scope="col">Latest Version</th>' +
-          '<th scope="col" class="text-center">Versions</th>' +
-          '<th scope="col" class="text-end">Actions</th>' +
-          '</tr></thead>' +
-          '<tbody data-archived-body><tr><td colspan="4" class="text-center text-muted py-4">' +
-          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="mb-2 d-block mx-auto" viewBox="0 0 16 16">' +
-          '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
-          '</svg>No archived objects</td></tr></tbody>' +
-          '</table></div></div></div>';
-        card.insertAdjacentHTML('afterend', html);
-        archivedCard = document.getElementById('archived-objects-card');
-        archivedBody = archivedCard.querySelector('[data-archived-body]');
-        archivedCountBadge = archivedCard.querySelector('[data-archived-count]');
-        archivedRefreshButton = archivedCard.querySelector('[data-archived-refresh]');
-        archivedEndpoint = endpoint;
-        archivedItemsCache = null;
-        archivedRefreshButton.addEventListener('click', function() { loadArchivedObjects(true); });
-        if (!archivedObjectsChip) {
-          archivedObjectsChip = document.createElement('button');
-          archivedObjectsChip.type = 'button';
-          archivedObjectsChip.id = 'archived-objects-chip';
-          archivedObjectsChip.className = 'ui-btn ui-btn-sm ui-btn-ghost is-hidden';
-          document.getElementById('pagination-controls')?.appendChild(archivedObjectsChip);
-          archivedObjectsChip.addEventListener('click', function() {
-            if (archivedObjectsChip.dataset.state === 'error') {
-              loadArchivedObjects(true);
-              return;
-            }
-            if (!propertiesTab) return;
-            propertiesTab.dataset.scrollToArchived = 'true';
-            bootstrap.Tab.getOrCreateInstance(propertiesTab).show();
-            if (propertiesTab.classList.contains('active')) {
-              propertiesTab.dataset.scrollToArchived = 'false';
-              archivedCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-          });
-        }
-        loadArchivedObjects();
-      }
+    archivedCard?.classList.toggle('is-hidden', !enabled);
+    if (enabled) {
+      loadArchivedObjects(true);
+    } else {
+      archivedItemsCache = null;
+      archivedObjectsChip?.classList.add('is-hidden');
     }
 
     var dropZone = document.getElementById('objects-drop-zone');
@@ -4226,78 +4130,33 @@
       singleDeleteVerWrap.classList.toggle('is-hidden', !enabled);
     }
 
-    if (!enabled) {
-      var newForm = document.getElementById('enableVersioningForm');
-      if (newForm) {
-        newForm.setAttribute('action', window.BucketDetailConfig?.endpoints?.versioning || '');
-        newForm.addEventListener('submit', function (e) {
-          e.preventDefault();
-          window.UICore.submitFormAjax(newForm, {
-            successMessage: 'Versioning enabled',
-            onSuccess: function () {
-              updateVersioningBadge(true);
-              updateVersioningCard(true);
-            }
-          });
-        });
-      }
-    }
   }
 
   function updateEncryptionCard(enabled, algorithm) {
     var encCard = document.getElementById('bucket-encryption-card');
     if (!encCard) return;
-    var alertContainer = encCard.querySelector('.alert');
-    if (alertContainer) {
-      if (enabled) {
-        alertContainer.className = 'alert alert-success d-flex align-items-start mb-4';
-        var algoText = algorithm === 'aws:kms' ? 'KMS' : 'AES-256';
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>' +
-          '<path d="M9.5 6.5a1.5 1.5 0 0 1-1 1.415l.385 1.99a.5.5 0 0 1-.491.595h-.788a.5.5 0 0 1-.49-.595l.384-1.99a1.5 1.5 0 1 1 2-1.415z"/>' +
-          '</svg><div><strong>Default encryption enabled (' + algoText + ')</strong>' +
-          '<p class="mb-0 small">All new objects uploaded to this bucket will be automatically encrypted.</p></div>';
-      } else {
-        alertContainer.className = 'alert alert-secondary d-flex align-items-start mb-4';
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M11 1a2 2 0 0 0-2 2v4a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h5V3a3 3 0 0 1 6 0v4a.5.5 0 0 1-1 0V3a2 2 0 0 0-2-2zM3 8a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H3z"/>' +
-          '</svg><div><strong>Default encryption disabled</strong>' +
-          '<p class="mb-0 small">Objects are stored without default encryption. You can enable server-side encryption below.</p></div>';
-      }
+    if (enabled && algorithm === 'aws:kms') {
+      setSettingStatus(encCard, 'ok', 'SSE-KMS', 'New objects are encrypted with KMS-managed keys (SSE-KMS).');
+    } else if (enabled) {
+      setSettingStatus(encCard, 'ok', 'SSE-S3', 'New objects are encrypted at rest with AES-256 (SSE-S3).');
+    } else {
+      setSettingStatus(encCard, '', 'Disabled', 'Objects are stored without default encryption. You can enable server-side encryption below.');
     }
-    var disableBtn = document.getElementById('disableEncryptionBtn');
-    if (disableBtn) {
-      disableBtn.style.display = enabled ? '' : 'none';
-    }
+    document.getElementById('disableEncryptionBtn')?.classList.toggle('is-hidden', !enabled);
   }
 
   function updateQuotaCard(hasQuota, maxBytes, maxObjects) {
     var quotaCard = document.getElementById('bucket-quota-card');
     if (!quotaCard) return;
-    var alertContainer = quotaCard.querySelector('.alert');
-    if (alertContainer) {
-      if (hasQuota) {
-        alertContainer.className = 'alert alert-info d-flex align-items-start mb-4';
-        var quotaParts = [];
-        if (maxBytes) quotaParts.push(formatBytes(maxBytes) + ' storage');
-        if (maxObjects) quotaParts.push(maxObjects.toLocaleString() + ' objects');
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM8 4a.905.905 0 0 0-.9.995l.35 3.507a.552.552 0 0 0 1.1 0l.35-3.507A.905.905 0 0 0 8 4zm.002 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/>' +
-          '</svg><div><strong>Storage quota active</strong>' +
-          '<p class="mb-0 small">This bucket is limited to ' + quotaParts.join(' and ') + '.</p></div>';
-      } else {
-        alertContainer.className = 'alert alert-secondary d-flex align-items-start mb-4';
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
-          '<path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>' +
-          '</svg><div><strong>No storage quota</strong>' +
-          '<p class="mb-0 small">This bucket has no storage or object count limits. Set limits below to control usage.</p></div>';
-      }
+    if (hasQuota) {
+      var quotaParts = [];
+      if (maxBytes) quotaParts.push(formatBytes(maxBytes) + ' storage');
+      if (maxObjects) quotaParts.push(maxObjects.toLocaleString() + ' objects');
+      setSettingStatus(quotaCard, 'accent', 'Active', 'This bucket is limited to ' + quotaParts.join(' and ') + '.');
+    } else {
+      setSettingStatus(quotaCard, '', 'No limit', 'This bucket has no storage or object count limits. Set limits below to control usage.');
     }
-    var removeBtn = document.getElementById('removeQuotaBtn');
-    if (removeBtn) {
-      removeBtn.style.display = hasQuota ? '' : 'none';
-    }
+    document.getElementById('removeQuotaBtn')?.classList.toggle('is-hidden', !hasQuota);
     var maxMbInput = document.getElementById('max_mb');
     var maxObjInput = document.getElementById('max_objects');
     if (maxMbInput) maxMbInput.value = maxBytes ? Math.floor(maxBytes / 1048576) : '';
@@ -4418,8 +4277,7 @@
       var form = document.getElementById('encryptionForm');
       if (!form) return;
       document.getElementById('encryptionAction').value = 'disable';
-      var modalEl = document.getElementById('disableEncryptionModal');
-      var modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+      var modal = { hide: function () { window.UI.dialog.close(document.getElementById('disableEncryptionModal')); } };
       window.UICore.submitFormAjax(form, {
         successMessage: 'Encryption disabled',
         onSuccess: function (data) {
@@ -4454,34 +4312,14 @@
   function updateWebsiteCard(enabled, indexDoc, errorDoc) {
     var card = document.getElementById('bucket-website-card');
     if (!card) return;
-    var alertContainer = card.querySelector('.alert');
-    if (alertContainer) {
-      if (enabled) {
-        alertContainer.className = 'alert alert-success d-flex align-items-start mb-4';
-        var detail = 'Index: <code>' + escapeHtml(indexDoc || 'index.html') + '</code>';
-        if (errorDoc) detail += '<br>Error: <code>' + escapeHtml(errorDoc) + '</code>';
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>' +
-          '</svg><div><strong>Website hosting is enabled</strong>' +
-          '<p class="mb-0 small">' + detail + '</p></div>';
-      } else {
-        alertContainer.className = 'alert alert-secondary d-flex align-items-start mb-4';
-        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
-          '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
-          '<path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>' +
-          '</svg><div><strong>Website hosting is disabled</strong>' +
-          '<p class="mb-0 small">Enable website hosting to serve bucket contents as a static website.</p></div>';
-      }
+    if (enabled) {
+      var detail = 'Index: <code>' + escapeHtml(indexDoc || 'index.html') + '</code>';
+      if (errorDoc) detail += ' · Error: <code>' + escapeHtml(errorDoc) + '</code>';
+      setSettingStatus(card, 'ok', 'Live', detail);
+    } else {
+      setSettingStatus(card, '', 'Disabled', 'Enable website hosting to serve bucket contents as a static website.');
     }
-    var disableBtn = document.getElementById('disableWebsiteBtn');
-    if (disableBtn) {
-      disableBtn.style.display = enabled ? '' : 'none';
-    }
-    var submitBtn = document.getElementById('websiteSubmitBtn');
-    if (submitBtn) {
-      submitBtn.classList.remove('btn-primary', 'btn-success');
-      submitBtn.classList.add(enabled ? 'btn-primary' : 'btn-success');
-    }
+    document.getElementById('disableWebsiteBtn')?.classList.toggle('is-hidden', !enabled);
     var submitLabel = document.getElementById('websiteSubmitLabel');
     if (submitLabel) {
       submitLabel.textContent = enabled ? 'Save Website Settings' : 'Enable Website Hosting';
@@ -4580,6 +4418,18 @@
   initReplicationStats();
 
   var deleteBucketForm = document.getElementById('deleteBucketForm');
+  var deleteBucketConfirmName = document.getElementById('deleteBucketConfirmName');
+  var deleteBucketSubmit = document.getElementById('deleteBucketSubmit');
+  if (deleteBucketConfirmName && deleteBucketSubmit) {
+    var syncDeleteBucketSubmit = function () {
+      deleteBucketSubmit.disabled = deleteBucketConfirmName.value !== deleteBucketConfirmName.dataset.expected;
+    };
+    deleteBucketConfirmName.addEventListener('input', syncDeleteBucketSubmit);
+    document.getElementById('deleteBucketModal')?.addEventListener('ui:open', function () {
+      deleteBucketConfirmName.value = '';
+      syncDeleteBucketSubmit();
+    });
+  }
   if (deleteBucketForm) {
     deleteBucketForm.addEventListener('submit', function (e) {
       e.preventDefault();

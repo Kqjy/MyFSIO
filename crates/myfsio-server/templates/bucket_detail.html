@@ -3,49 +3,16 @@
 {% block content %}
 {% set active_tab = request_args.tab | default(value="objects") %}
 <div class="d-flex flex-column gap-4 h-100">
-  <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+  <div class="ui-pagehead">
     <div>
-      <nav aria-label="breadcrumb">
-        <ol class="breadcrumb mb-2">
-          <li class="breadcrumb-item"><a href="{{ url_for(endpoint="ui.buckets_overview") }}" class="text-decoration-none">Buckets</a></li>
-          <li class="breadcrumb-item active" aria-current="page">{{ bucket_name }}</li>
-        </ol>
-      </nav>
-      <div class="d-flex align-items-center gap-3">
-        <div class="bucket-icon" style="width: 48px; height: 48px; border-radius: 12px;">
-          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
-            <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
-          </svg>
-        </div>
-        <div>
-          <h1 class="h3 fw-bold mb-1">{{ bucket_name }}</h1>
-          <div class="d-flex align-items-center gap-2">
-            <span class="badge d-inline-flex align-items-center {% if versioning_enabled %}text-bg-success{% elif versioning_suspended %}text-bg-warning{% else %}text-bg-secondary{% endif %} rounded-pill">
-              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
-                <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
-                <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
-                <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
-              </svg>
-              {% if versioning_enabled %}Versioning On{% elif versioning_suspended %}Versioning Suspended{% else %}Versioning Off{% endif %}
-            </span>
-            <span class="text-muted small" id="object-count-badge">
-              <span class="spinner-border spinner-border-sm" role="status" style="width: 0.75rem; height: 0.75rem;"></span>
-              Loading...
-            </span>
-          </div>
-        </div>
+      <h1>{{ bucket_name }}</h1>
+      <div class="ui-pagehead-sub">
+        <span class="ui-badge {% if versioning_enabled %}ui-badge-ok{% elif versioning_suspended %}ui-badge-warn{% endif %}" id="bucketVersioningBadge">{% if versioning_enabled %}Versioning On{% elif versioning_suspended %}Versioning Suspended{% else %}Versioning Off{% endif %}</span>
+        <span id="object-count-badge">
+          <span class="ui-spinner" role="status"></span>
+          Loading...
+        </span>
       </div>
-    </div>
-    <div class="d-flex gap-2">
-      {% if can_delete_bucket %}
-      <button class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBucketModal">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-          <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
-          <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-        </svg>
-        Delete
-      </button>
-      {% endif %}
     </div>
   </div>
 
@@ -179,9 +146,7 @@
         <span id="load-more-status"></span>
         <span id="folder-view-status" class="is-hidden"></span>
       </div>
-      {% if versioning_enabled %}
       <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost is-hidden" id="archived-objects-chip"></button>
-      {% endif %}
       <span class="ui-toolbar-end ui-hide-m">Drop files anywhere to upload</span>
     </div>
   </div>
@@ -540,220 +505,164 @@
     </div>
 
     <div class="tab-pane fade {% if active_tab == "properties" %}show active{% else %}{% endif %}" id="properties-pane" role="tabpanel" aria-labelledby="properties-tab" tabindex="0">
-      <div class="row g-4">
-        <div class="col-lg-8">
-          <div class="card shadow-sm" id="bucket-versioning-card">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
-                <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
-                <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
-              </svg>
-              <span class="fw-semibold">Versioning</span>
+      {% set max_bytes = bucket_quota.max_bytes %}
+      {% set max_objects = bucket_quota.max_objects %}
+      {% set current_objects = bucket_stats.objects | default(value=0) %}
+      {% set version_count = bucket_stats.version_count | default(value=0) %}
+      {% set total_objects = bucket_stats.total_objects | default(value=current_objects) %}
+      {% set current_bytes = bucket_stats.bytes | default(value=0) %}
+      {% set version_bytes = bucket_stats.version_bytes | default(value=0) %}
+      {% set total_bytes = bucket_stats.total_bytes | default(value=current_bytes) %}
+      {% set enc_rules = encryption_config.Rules | default(value=[]) %}
+      {% set enc_algorithm = "" %}
+      {% set enc_kms_key = "" %}
+      {% if enc_rules %}
+        {% set_global enc_algorithm = enc_rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm | default(value="") %}
+        {% set_global enc_kms_key = enc_rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID | default(value="") %}
+      {% endif %}
+      <div class="bs-layout">
+        <nav class="bs-subnav" id="bucketSettingsNav" aria-label="Bucket settings">
+          <a href="#bucket-overview-card">Overview</a>
+          <a href="#bucket-versioning-card">Versioning</a>
+          {% if encryption_enabled %}<a href="#bucket-encryption-card">Encryption</a>{% endif %}
+          <a href="#bucket-quota-card">Quota</a>
+          {% if website_hosting_enabled %}<a href="#bucket-website-card">Static website</a>{% endif %}
+          {% if can_delete_bucket %}<a href="#bucket-danger-card" class="bs-subnav-danger">Danger zone</a>{% endif %}
+        </nav>
+        <div class="bs-panels">
+          <section class="ui-card bs-panel" id="bucket-overview-card" aria-labelledby="bucketOverviewTitle">
+            <div class="bs-panel-head">
+              <h2 id="bucketOverviewTitle">Overview</h2>
             </div>
-            <div class="card-body">
-              {% if versioning_enabled %}
-              <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                </svg>
-                <div>
-                  <strong>Versioning is enabled</strong>
-                  <p class="mb-0 small">All previous versions of objects are preserved. You can roll back accidental changes or deletions at any time.</p>
+            <div class="bs-panel-body">
+              <div class="bs-usage" data-usage-objects data-total-objects="{{ total_objects }}" data-max-objects="{% if has_max_objects %}{{ max_objects }}{% endif %}">
+                <div class="bs-usage-item">
+                  <div class="ui-stat-label">Objects</div>
+                  <div class="ui-stat-value" data-usage-objects-value>{{ current_objects }}</div>
+                </div>
+                <div class="bs-usage-item">
+                  <div class="ui-stat-label">Versions</div>
+                  <div class="ui-stat-value" data-usage-versions-value>{{ version_count }}</div>
+                </div>
+                <div class="bs-usage-item" data-usage-bytes data-total-bytes="{{ total_bytes }}" data-max-bytes="{% if has_max_bytes %}{{ max_bytes }}{% endif %}">
+                  <div class="ui-stat-label">Stored, incl. versions</div>
+                  <div class="ui-stat-value" data-usage-bytes-value>{{ total_bytes | filesizeformat }}</div>
+                  <div data-usage-bytes-limit>
+                  {% if has_max_bytes %}
+                  {% if max_bytes > 0 %}{% set bytes_pct = total_bytes / max_bytes * 100 | int %}{% else %}{% set bytes_pct = 0 %}{% endif %}
+                  <div class="ui-bar bs-usage-bar {% if bytes_pct >= 90 %}is-bad{% elif bytes_pct >= 75 %}is-warn{% else %}is-ok{% endif %}"><i style="width: {% if bytes_pct > 100 %}100{% else %}{{ bytes_pct }}{% endif %}%"></i></div>
+                  <div class="ui-stat-note">{{ bytes_pct }}% of {{ max_bytes | filesizeformat }} limit</div>
+                  {% else %}
+                  <div class="ui-stat-note">No limit</div>
+                  {% endif %}
+                  </div>
+                  {% if version_bytes > 0 %}
+                  <div class="ui-stat-note">{{ current_bytes | filesizeformat }} current + {{ version_bytes | filesizeformat }} versions</div>
+                  {% endif %}
                 </div>
               </div>
-              {% elif versioning_suspended %}
-              <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
-                </svg>
-                <div>
-                  <strong>Versioning is suspended</strong>
-                  <p class="mb-0 small">New uploads overwrite existing objects, but previously archived versions are still retained. Re-enable versioning to start preserving new versions again.</p>
-                </div>
-              </div>
+              <div data-usage-objects-limit>
+              {% if has_max_objects %}
+              {% if max_objects > 0 %}{% set obj_pct = total_objects / max_objects * 100 | int %}{% else %}{% set obj_pct = 0 %}{% endif %}
+              <div class="ui-bar bs-usage-bar {% if obj_pct >= 90 %}is-bad{% elif obj_pct >= 75 %}is-warn{% else %}is-ok{% endif %}"><i style="width: {% if obj_pct > 100 %}100{% else %}{{ obj_pct }}{% endif %}%"></i></div>
+              <div class="ui-stat-note">{{ obj_pct }}% of {{ max_objects }} stored-copy limit</div>
               {% else %}
-              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                </svg>
-                <div>
-                  <strong>Versioning is disabled</strong>
-                  <p class="mb-0 small">This bucket has never had versioning enabled. Enable it to preserve previous versions of every object.</p>
-                </div>
-              </div>
+              <div class="ui-stat-note">No stored-copy limit</div>
               {% endif %}
+              </div>
+            </div>
+          </section>
 
+          <section class="ui-card bs-panel" id="bucket-versioning-card" aria-labelledby="bucketVersioningTitle">
+            <div class="bs-panel-head">
+              <h2 id="bucketVersioningTitle">Versioning</h2>
+              <span class="ui-badge {% if versioning_enabled %}ui-badge-ok{% elif versioning_suspended %}ui-badge-warn{% endif %}" data-setting-badge>{% if versioning_enabled %}Enabled{% elif versioning_suspended %}Suspended{% else %}Disabled{% endif %}</span>
+            </div>
+            <div class="bs-panel-body">
+              <p class="bs-panel-text" data-setting-text>{% if versioning_enabled %}All previous versions of objects are preserved. You can roll back accidental changes or deletions at any time.{% elif versioning_suspended %}New uploads overwrite existing objects, but previously archived versions are still retained. Re-enable versioning to start preserving new versions again.{% else %}This bucket has never had versioning enabled. Enable it to preserve previous versions of every object.{% endif %}</p>
+              <p class="ui-hint">Each upload creates a new version and deleting adds a delete marker. Previous versions stay accessible and count towards storage.</p>
               {% if can_manage_versioning %}
-                {% if versioning_enabled %}
-                <button class="btn btn-outline-danger" type="button" data-bs-toggle="modal" data-bs-target="#suspendVersioningModal">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
-                  </svg>
-                  Suspend Versioning
-                </button>
-                {% else %}
-              <form method="post" action="{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}" id="enableVersioningForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-                <input type="hidden" name="state" value="enable" />
-                <button class="btn btn-success" type="submit">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                  </svg>
-                  Enable Versioning
-                </button>
-              </form>
-                {% endif %}
-              {% else %}
-              <div class="text-center py-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
-                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-                </svg>
-                <p class="text-muted mb-0 small">You do not have permission to modify versioning for this bucket.</p>
+              <div class="bs-actions">
+                <button class="ui-btn ui-btn-danger {% if not versioning_enabled %}is-hidden{% endif %}" type="button" id="suspendVersioningBtn" data-ui-open="#suspendVersioningModal">Suspend versioning</button>
+                <form method="post" action="{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}" id="enableVersioningForm" {% if versioning_enabled %}class="is-hidden"{% endif %}>
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+                  <input type="hidden" name="state" value="enable" />
+                  <button class="ui-btn ui-btn-primary" type="submit">Enable versioning</button>
+                </form>
               </div>
+              {% else %}
+              <p class="bs-locked">You do not have permission to modify versioning for this bucket.</p>
               {% endif %}
             </div>
-          </div>
-
-          {% if versioning_enabled %}
-          <div
-            class="card shadow-sm mt-4"
-            id="archived-objects-card"
-            data-archived-endpoint="{{ url_for(endpoint="ui.archived_objects", bucket_name=bucket_name) }}"
-          >
-            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-              <div class="d-flex align-items-center">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning me-2" viewBox="0 0 16 16">
-                  <path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>
-                </svg>
-                <span class="fw-semibold">Archived Objects</span>
+            <div
+              class="bs-panel-section {% if not versioning_enabled %}is-hidden{% endif %}"
+              id="archived-objects-card"
+              data-archived-endpoint="{{ url_for(endpoint="ui.archived_objects", bucket_name=bucket_name) }}"
+            >
+              <div class="bs-panel-head">
+                <h3>Archived objects</h3>
+                <span class="ui-badge is-hidden" data-archived-count></span>
+                <button class="ui-btn ui-btn-sm bs-panel-head-end" type="button" data-archived-refresh>Refresh</button>
               </div>
-              <div class="d-flex align-items-center gap-2">
-                <span class="badge text-bg-secondary is-hidden" data-archived-count></span>
-                <button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                    <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
-                  </svg>
-                  Refresh
-                </button>
+              <div class="bs-panel-body">
+                <p class="ui-hint">Objects deleted while versioning is enabled. Their previous versions remain available until you restore or purge them.</p>
               </div>
-            </div>
-            <div class="card-body">
-              <p class="text-muted small mb-3">Objects that have been deleted while versioning is enabled. Their previous versions remain available until you restore or purge them.</p>
-              <div class="table-responsive">
-                <table class="table table-sm table-hover align-middle mb-0">
-                  <thead class="table-light">
+              <div class="ui-table-wrap">
+                <table class="ui-table bs-archived-table">
+                  <thead>
                     <tr>
-                      <th scope="col">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 text-muted" viewBox="0 0 16 16">
-                          <path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>
-                        </svg>
-                        Key
-                      </th>
-                      <th scope="col">Latest Version</th>
-                      <th scope="col" class="text-center">Versions</th>
-                      <th scope="col" class="text-end">Actions</th>
+                      <th scope="col">Key</th>
+                      <th scope="col">Latest version</th>
+                      <th scope="col">Versions</th>
+                      <th scope="col" aria-label="Actions"></th>
                     </tr>
                   </thead>
                   <tbody data-archived-body>
                     <tr>
-                      <td colspan="4" class="text-center text-muted py-4">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="mb-2 d-block mx-auto" viewBox="0 0 16 16">
-                          <path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>
-                        </svg>
-                        No archived objects
-                      </td>
+                      <td colspan="4" class="bs-table-empty">No archived objects</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
             </div>
-          </div>
-          {% endif %}
+          </section>
 
           {% if encryption_enabled %}
-          <div class="card shadow-sm mt-4" id="bucket-encryption-card">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
-                <path d="M9.5 6.5a1.5 1.5 0 0 1-1 1.415l.385 1.99a.5.5 0 0 1-.491.595h-.788a.5.5 0 0 1-.49-.595l.384-1.99a1.5 1.5 0 1 1 2-1.415z"/>
-              </svg>
-              <span class="fw-semibold">Default Encryption</span>
+          <section class="ui-card bs-panel" id="bucket-encryption-card" aria-labelledby="bucketEncryptionTitle">
+            <div class="bs-panel-head">
+              <h2 id="bucketEncryptionTitle">Default encryption</h2>
+              <span class="ui-badge {% if enc_algorithm %}ui-badge-ok{% endif %}" data-setting-badge>{% if enc_algorithm == "aws:kms" %}SSE-KMS{% elif enc_algorithm %}SSE-S3{% else %}Disabled{% endif %}</span>
             </div>
-            <div class="card-body">
-              {% set enc_rules = encryption_config.Rules | default(value=[]) %}
-              {% set enc_algorithm = "" %}
-              {% set enc_kms_key = "" %}
-              {% if enc_rules %}
-                {% set_global enc_algorithm = enc_rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm | default(value="") %}
-                {% set_global enc_kms_key = enc_rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID | default(value="") %}
-              {% endif %}
-              
-              {% if enc_algorithm %}
-              <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                </svg>
-                <div>
-                  <strong>Default encryption enabled</strong>
-                  <p class="mb-0 small">
-                    {% if enc_algorithm == "aws:kms" %}
-                    Objects are encrypted with AWS KMS (SSE-KMS).
-                    {% if enc_kms_key %}Key: <code class="small">{{ enc_kms_key | slice(start=0, end=20) }}...</code>{% endif %}
-                    {% else %}
-                    Objects are encrypted with AES-256 (SSE-S3).
-                    {% endif %}
-                  </p>
-                </div>
-              </div>
-              {% else %}
-              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                </svg>
-                <div>
-                  <strong>Default encryption disabled</strong>
-                  <p class="mb-0 small">Objects are stored without default encryption. You can enable server-side encryption below.</p>
-                </div>
-              </div>
-              {% endif %}
-
+            <div class="bs-panel-body">
+              <p class="bs-panel-text" data-setting-text>{% if enc_algorithm == "aws:kms" %}New objects are encrypted with KMS-managed keys (SSE-KMS).{% if enc_kms_key %} Key: <code>{{ enc_kms_key | slice(start=0, end=20) }}...</code>{% endif %}{% elif enc_algorithm %}New objects are encrypted at rest with AES-256 (SSE-S3).{% else %}Objects are stored without default encryption. You can enable server-side encryption below.{% endif %}</p>
+              <p class="ui-hint">Existing objects are not re-encrypted when this changes. Decryption is transparent during download.</p>
               {% if can_manage_encryption %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_encryption", bucket_name=bucket_name) }}" id="encryptionForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="action" value="enable" id="encryptionAction" />
-                
-                <div class="mb-3">
-                  <label class="form-label fw-medium">Encryption Algorithm</label>
-                  <div class="card border">
-                    <div class="card-body p-0">
-                      <div class="form-check p-3 border-bottom m-0">
-                        <input class="form-check-input" type="radio" name="algorithm" id="algo_aes256" value="AES256" {% if enc_algorithm != "aws:kms" %}checked{% else %}{% endif %}>
-                        <label class="form-check-label w-100" for="algo_aes256">
-                          <span class="fw-medium">AES-256 (SSE-S3)</span>
-                          <div class="text-muted small">Server-side encryption with S3-managed keys. Recommended for most use cases.</div>
-                        </label>
-                      </div>
-                      {% if kms_enabled %}
-                      <div class="form-check p-3 m-0">
-                        <input class="form-check-input" type="radio" name="algorithm" id="algo_kms" value="aws:kms" {% if enc_algorithm == "aws:kms" %}checked{% else %}{% endif %}>
-                        <label class="form-check-label w-100" for="algo_kms">
-                          <span class="fw-medium">AWS KMS (SSE-KMS)</span>
-                          <div class="text-muted small">Server-side encryption with KMS-managed keys. Provides audit trail and key rotation.</div>
-                        </label>
-                      </div>
-                      {% endif %}
-                    </div>
-                  </div>
-                </div>
-
+                <fieldset class="bs-choices">
+                  <legend class="ui-label">Encryption algorithm</legend>
+                  <label class="bs-choice" for="algo_aes256">
+                    <input type="radio" name="algorithm" id="algo_aes256" value="AES256" {% if enc_algorithm != "aws:kms" %}checked{% else %}{% endif %}>
+                    <span>
+                      <strong>AES-256 (SSE-S3)</strong>
+                      <span class="ui-hint">Server-side encryption with S3-managed keys. Recommended for most use cases.</span>
+                    </span>
+                  </label>
+                  {% if kms_enabled %}
+                  <label class="bs-choice" for="algo_kms">
+                    <input type="radio" name="algorithm" id="algo_kms" value="aws:kms" {% if enc_algorithm == "aws:kms" %}checked{% else %}{% endif %}>
+                    <span>
+                      <strong>KMS (SSE-KMS)</strong>
+                      <span class="ui-hint">Server-side encryption with KMS-managed keys. Provides audit trail and key rotation.</span>
+                    </span>
+                  </label>
+                  {% endif %}
+                </fieldset>
                 {% if kms_enabled %}
-                <div class="mb-4" id="kmsKeySection" style="{% if enc_algorithm != "aws:kms" %}display: none;{% else %}{% endif %}">
-                  <label for="kms_key_id" class="form-label fw-medium">KMS Key</label>
-                  <select class="form-select" id="kms_key_id" name="kms_key_id">
+                <div class="ui-field {% if enc_algorithm != "aws:kms" %}is-hidden{% endif %}" id="kmsKeySection">
+                  <label for="kms_key_id" class="ui-label">KMS key</label>
+                  <select class="ui-select" id="kms_key_id" name="kms_key_id">
                     <option value="">Use default KMS key</option>
                     {% for key in kms_keys %}
                     <option value="{{ key.key_id }}" {% if key.key_id == enc_kms_key %}selected{% else %}{% endif %}>
@@ -761,369 +670,126 @@
                     </option>
                     {% endfor %}
                   </select>
-                  <div class="form-text">Select a KMS key to encrypt objects. Leave empty to use the default key.</div>
+                  <div class="ui-hint">Select a KMS key to encrypt objects. Leave empty to use the default key.</div>
                 </div>
                 {% endif %}
-
-                <div class="d-flex gap-2 flex-wrap">
-                  <button class="btn btn-primary" type="submit">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
-                    </svg>
-                    Save Encryption Settings
-                  </button>
-                  <button type="button" class="btn btn-outline-danger" id="disableEncryptionBtn"
-                          data-bs-toggle="modal" data-bs-target="#disableEncryptionModal"
-                          {% if not enc_algorithm %}style="display: none;"{% endif %}>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M11 1a2 2 0 0 0-2 2v4a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h5V3a3 3 0 0 1 6 0v4a.5.5 0 0 1-1 0V3a2 2 0 0 0-2-2z"/>
-                    </svg>
-                    Disable Encryption
-                  </button>
+                <div class="bs-actions">
+                  <button class="ui-btn ui-btn-primary" type="submit">Save encryption settings</button>
+                  <button type="button" class="ui-btn ui-btn-danger {% if not enc_algorithm %}is-hidden{% endif %}" id="disableEncryptionBtn" data-ui-open="#disableEncryptionModal">Disable encryption</button>
                 </div>
               </form>
               {% else %}
-              <div class="text-center py-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
-                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-                </svg>
-                <p class="text-muted mb-0 small">You do not have permission to modify encryption settings for this bucket.</p>
-              </div>
+              <p class="bs-locked">You do not have permission to modify encryption settings for this bucket.</p>
               {% endif %}
             </div>
-          </div>
+          </section>
           {% endif %}
 
-          <div class="card shadow-sm mt-4" id="bucket-quota-card">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h3A1.5 1.5 0 0 1 7 2.5v3A1.5 1.5 0 0 1 5.5 7h-3A1.5 1.5 0 0 1 1 5.5v-3zM2.5 2a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zm6.5.5A1.5 1.5 0 0 1 10.5 1h3A1.5 1.5 0 0 1 15 2.5v3A1.5 1.5 0 0 1 13.5 7h-3A1.5 1.5 0 0 1 9 5.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zM1 10.5A1.5 1.5 0 0 1 2.5 9h3A1.5 1.5 0 0 1 7 10.5v3A1.5 1.5 0 0 1 5.5 15h-3A1.5 1.5 0 0 1 1 13.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zm6.5.5A1.5 1.5 0 0 1 10.5 9h3a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-3A1.5 1.5 0 0 1 9 13.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3z"/>
-              </svg>
-              <span class="fw-semibold">Storage Quota</span>
+          <section class="ui-card bs-panel" id="bucket-quota-card" aria-labelledby="bucketQuotaTitle">
+            <div class="bs-panel-head">
+              <h2 id="bucketQuotaTitle">Quota</h2>
+              <span class="ui-badge {% if has_quota %}ui-badge-accent{% endif %}" data-setting-badge>{% if has_quota %}Active{% else %}No limit{% endif %}</span>
             </div>
-            <div class="card-body">
-              {% set max_bytes = bucket_quota.max_bytes %}
-              {% set max_objects = bucket_quota.max_objects %}
-              {% set current_objects = bucket_stats.objects | default(value=0) %}
-              {% set version_count = bucket_stats.version_count | default(value=0) %}
-              {% set total_objects = bucket_stats.total_objects | default(value=current_objects) %}
-              {% set current_bytes = bucket_stats.bytes | default(value=0) %}
-              {% set version_bytes = bucket_stats.version_bytes | default(value=0) %}
-              {% set total_bytes = bucket_stats.total_bytes | default(value=current_bytes) %}
-              
-              <div class="mb-4">
-                <h6 class="small fw-semibold mb-3">Current Usage</h6>
-                <div class="row g-3" data-usage-objects data-total-objects="{{ total_objects }}" data-max-objects="{% if has_max_objects %}{{ max_objects }}{% endif %}">
-                  <div class="col-md-4">
-                    <div class="border rounded p-3 text-center h-100">
-                      <div class="fs-4 fw-bold text-primary" data-usage-objects-value>{{ current_objects }}</div>
-                      <div class="small text-muted">Objects</div>
-                    </div>
-                  </div>
-                  <div class="col-md-4">
-                    <div class="border rounded p-3 text-center h-100">
-                      <div class="fs-4 fw-bold text-primary" data-usage-versions-value>{{ version_count }}</div>
-                      <div class="small text-muted">Versions</div>
-                    </div>
-                  </div>
-                  <div class="col-md-4">
-                    <div class="border rounded p-3 text-center h-100" data-usage-bytes data-total-bytes="{{ total_bytes }}" data-max-bytes="{% if has_max_bytes %}{{ max_bytes }}{% endif %}">
-                      <div class="fs-4 fw-bold text-primary" data-usage-bytes-value>{{ total_bytes | filesizeformat }}</div>
-                      <div class="small text-muted">Total stored (incl. versions)</div>
-                      <div data-usage-bytes-limit>
-                      {% if has_max_bytes %}
-                      <div class="progress mt-2" style="height: 4px;">
-                        {% if max_bytes > 0 %}{% set bytes_pct = total_bytes / max_bytes * 100 | int %}{% else %}{% set bytes_pct = 0 %}{% endif %}
-                        <div class="progress-bar {% if bytes_pct >= 90 %}bg-danger{% elif bytes_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {% if bytes_pct > 100 %}100{% else %}{{ bytes_pct }}{% endif %}%"></div>
-                      </div>
-                      <div class="small text-muted mt-1">{{ bytes_pct }}% of {{ max_bytes | filesizeformat }} limit</div>
-                      {% else %}
-                      <div class="small text-muted mt-2">No limit</div>
-                      {% endif %}
-                      </div>
-                      {% if version_bytes > 0 %}
-                      <div class="small text-muted mt-1">
-                        <span class="text-body-secondary">({{ current_bytes | filesizeformat }} current + {{ version_bytes | filesizeformat }} versions)</span>
-                      </div>
-                      {% endif %}
-                    </div>
-                  </div>
-                </div>
-                <div data-usage-objects-limit>
-                {% if has_max_objects %}
-                <div class="progress mt-3" style="height: 4px;">
-                  {% if max_objects > 0 %}{% set obj_pct = total_objects / max_objects * 100 | int %}{% else %}{% set obj_pct = 0 %}{% endif %}
-                  <div class="progress-bar {% if obj_pct >= 90 %}bg-danger{% elif obj_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {% if obj_pct > 100 %}100{% else %}{{ obj_pct }}{% endif %}%"></div>
-                </div>
-                <div class="small text-muted mt-1">{{ obj_pct }}% of {{ max_objects }} stored-copy limit</div>
-                {% else %}
-                <div class="small text-muted mt-2">No stored-copy limit</div>
-                {% endif %}
-                </div>
-              </div>
-
-              {% if has_quota %}
-              <div class="alert alert-info d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
-                </svg>
-                <div>
-                  <strong>Storage quota active</strong>
-                  <p class="mb-0 small">
-                    {% if has_max_bytes and has_max_objects %}
-                    This bucket is limited to {{ max_bytes | filesizeformat }} storage and {{ max_objects }} objects.
-                    {% elif has_max_bytes %}
-                    This bucket is limited to {{ max_bytes | filesizeformat }} storage.
-                    {% elif has_max_objects %}
-                    This bucket is limited to {{ max_objects }} objects.
-                    {% endif %}
-                  </p>
-                </div>
-              </div>
-              {% else %}
-              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                </svg>
-                <div>
-                  <strong>No storage quota</strong>
-                  <p class="mb-0 small">This bucket has no storage or object count limits. Set limits below to control usage.</p>
-                </div>
-              </div>
-              {% endif %}
-
+            <div class="bs-panel-body">
+              <p class="bs-panel-text" data-setting-text>{% if has_max_bytes and has_max_objects %}This bucket is limited to {{ max_bytes | filesizeformat }} storage and {{ max_objects }} objects.{% elif has_max_bytes %}This bucket is limited to {{ max_bytes | filesizeformat }} storage.{% elif has_max_objects %}This bucket is limited to {{ max_objects }} objects.{% else %}This bucket has no storage or object count limits. Set limits below to control usage.{% endif %}</p>
               {% if can_manage_quota %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_quota", bucket_name=bucket_name) }}" id="quotaForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="action" value="set" id="quotaAction" />
-
-                <div class="mb-3">
-                  <label for="max_mb" class="form-label fw-medium">Maximum Storage Size</label>
-                  <div class="input-group">
-                    <input type="number" class="form-control" id="max_mb" name="max_mb" 
+                <div class="bs-field-row">
+                  <div class="ui-field">
+                    <label for="max_mb" class="ui-label">Maximum storage size (MB)</label>
+                    <input type="number" class="ui-input" id="max_mb" name="max_mb"
                            value="{% if has_max_bytes %}{{ (max_bytes / 1048576) | int }}{% endif %}"
                            min="1" step="1" placeholder="Unlimited">
-                    <span class="input-group-text">MB</span>
+                    <div class="ui-hint">Minimum 1 MB. Leave empty for unlimited.</div>
                   </div>
-                  <div class="form-text">Minimum 1 MB. Leave empty for unlimited.</div>
+                  <div class="ui-field">
+                    <label for="max_objects" class="ui-label">Maximum object count</label>
+                    <input type="number" class="ui-input" id="max_objects" name="max_objects"
+                           value="{% if has_max_objects %}{{ max_objects }}{% endif %}"
+                           min="0" step="1" placeholder="Unlimited">
+                    <div class="ui-hint">Leave empty for unlimited.</div>
+                  </div>
                 </div>
-
-                <div class="mb-4">
-                  <label for="max_objects" class="form-label fw-medium">Maximum Object Count</label>
-                  <input type="number" class="form-control" id="max_objects" name="max_objects" 
-                         value="{% if has_max_objects %}{{ max_objects }}{% endif %}"
-                         min="0" step="1" placeholder="Unlimited">
-                  <div class="form-text">Maximum number of objects allowed. Leave empty for unlimited.</div>
-                </div>
-
-                <div class="d-flex gap-2 flex-wrap">
-                  <button class="btn btn-primary" type="submit">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425a.247.247 0 0 1 .02-.022Z"/>
-                    </svg>
-                    Save Quota Settings
-                  </button>
-                  <button type="button" class="btn btn-outline-danger" id="removeQuotaBtn"{% if not has_quota %} style="display: none;"{% endif %}>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                    </svg>
-                    Remove Quota
-                  </button>
+                <div class="bs-actions">
+                  <button class="ui-btn ui-btn-primary" type="submit">Save quota</button>
+                  <button type="button" class="ui-btn ui-btn-danger {% if not has_quota %}is-hidden{% endif %}" id="removeQuotaBtn">Remove quota</button>
                 </div>
               </form>
               {% else %}
-              <div class="text-center py-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
-                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-                </svg>
-                <p class="text-muted mb-0 small">You do not have permission to modify quota settings for this bucket.</p>
-              </div>
+              <p class="bs-locked">You do not have permission to modify quota settings for this bucket.</p>
               {% endif %}
             </div>
-          </div>
+          </section>
 
           {% if website_hosting_enabled %}
-          <div class="card shadow-sm mt-4" id="bucket-website-card">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
-              </svg>
-              <span class="fw-semibold">Static Website Hosting</span>
+          <section class="ui-card bs-panel" id="bucket-website-card" aria-labelledby="bucketWebsiteTitle">
+            <div class="bs-panel-head">
+              <h2 id="bucketWebsiteTitle">Static website</h2>
+              <span class="ui-badge {% if website_config %}ui-badge-ok{% endif %}" data-setting-badge>{% if website_config %}Live{% else %}Disabled{% endif %}</span>
             </div>
-            <div class="card-body">
-              {% if website_config %}
-              <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                </svg>
-                <div>
-                  <strong>Website hosting is enabled</strong>
-                  <p class="mb-0 small">
-                    Index: <code>{{ website_config.index_document }}</code>
-                    {% set error_doc = website_config.error_document | default(value="") %}
-                    {% if error_doc %}<br>Error: <code>{{ error_doc }}</code>{% endif %}
-                  </p>
-                </div>
-              </div>
-              {% else %}
-              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                </svg>
-                <div>
-                  <strong>Website hosting is disabled</strong>
-                  <p class="mb-0 small">Enable website hosting to serve bucket contents as a static website.</p>
-                </div>
-              </div>
-              {% endif %}
-
+            <div class="bs-panel-body">
+              <p class="bs-panel-text" data-setting-text>{% if website_config %}Index: <code>{{ website_config.index_document }}</code>{% set error_doc = website_config.error_document | default(value="") %}{% if error_doc %} · Error: <code>{{ error_doc }}</code>{% endif %}{% else %}Enable website hosting to serve bucket contents as a static website.{% endif %}</p>
               {% if website_domains %}
-              <div class="mb-4">
-                <label class="form-label fw-medium mb-2">Mapped Domains</label>
-                {% for domain in website_domains %}
-                <div class="d-flex align-items-center mb-1">
-                  <span class="badge bg-success-subtle text-success-emphasis me-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path fill-rule="evenodd" d="M7.21 1.293a1 1 0 0 1 1.58 0l.612.72a1 1 0 0 0 .88.332l.94-.134a1 1 0 0 1 1.118.7l.248.912a1 1 0 0 0 .59.659l.876.388a1 1 0 0 1 .435 1.505l-.546.766a1 1 0 0 0-.156.935l.306.899a1 1 0 0 1-.725 1.282l-.92.216a1 1 0 0 0-.72.555l-.41.856a1 1 0 0 1-1.396.478l-.803-.49a1 1 0 0 0-1.04 0l-.802.49a1 1 0 0 1-1.397-.478l-.41-.857a1 1 0 0 0-.72-.554l-.919-.216a1 1 0 0 1-.725-1.282l.306-.9a1 1 0 0 0-.156-.934l-.546-.766a1 1 0 0 1 .435-1.505l.877-.388a1 1 0 0 0 .589-.66l.248-.911a1 1 0 0 1 1.118-.7l.94.133a1 1 0 0 0 .88-.331l.612-.72zM11 7a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1H6v1.5a.5.5 0 0 0 1 0V7.5h1v2a.5.5 0 0 0 1 0v-2h1.5a.5.5 0 0 0 0-1H10V7z"/>
-                    </svg>
-                    connected
-                  </span>
-                  <code class="small">{{ domain }}</code>
+              <div class="ui-field">
+                <div class="ui-label">Mapped domains</div>
+                <div class="ui-badges">
+                  {% for domain in website_domains %}
+                  <span class="ui-badge ui-badge-ok ui-mono">{{ domain }}</span>
+                  {% endfor %}
                 </div>
-                {% endfor %}
               </div>
               {% elif website_config %}
-              <div class="mb-4">
-                <label class="form-label fw-medium mb-2">Mapped Domains</label>
-                <p class="text-muted small mb-0">No domains mapped to this bucket. <a href="{{ url_for(endpoint="ui.website_domains_dashboard") }}">Manage domains</a></p>
-              </div>
+              <p class="ui-hint">No domains mapped to this bucket. <a href="{{ url_for(endpoint="ui.website_domains_dashboard") }}">Manage domains</a></p>
               {% endif %}
-
               {% if can_manage_website %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_website", bucket_name=bucket_name) }}" id="websiteForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="action" value="enable" id="websiteAction" />
-
-                <div class="mb-3">
-                  <label for="index_document" class="form-label fw-medium">Index Document</label>
-                  <input type="text" class="form-control" id="index_document" name="index_document"
-                         value="{% if website_config %}{{ website_config.index_document }}{% else %}{{ "index.html" }}{% endif %}"
-                         placeholder="index.html">
-                  <div class="form-text">The default page served for directory paths (e.g., index.html).</div>
+                <div class="bs-field-row">
+                  <div class="ui-field">
+                    <label for="index_document" class="ui-label">Index document</label>
+                    <input type="text" class="ui-input" id="index_document" name="index_document"
+                           value="{% if website_config %}{{ website_config.index_document }}{% else %}{{ "index.html" }}{% endif %}"
+                           placeholder="index.html">
+                    <div class="ui-hint">The default page served for directory paths.</div>
+                  </div>
+                  <div class="ui-field">
+                    <label for="error_document" class="ui-label">Error document</label>
+                    <input type="text" class="ui-input" id="error_document" name="error_document"
+                           value="{% if website_config %}{{ website_config.error_document | default(value="") }}{% else %}{{ "" }}{% endif %}"
+                           placeholder="error.html">
+                    <div class="ui-hint">Optional. The page served for 404 errors.</div>
+                  </div>
                 </div>
-
-                <div class="mb-4">
-                  <label for="error_document" class="form-label fw-medium">Error Document</label>
-                  <input type="text" class="form-control" id="error_document" name="error_document"
-                         value="{% if website_config %}{{ website_config.error_document | default(value="") }}{% else %}{{ "" }}{% endif %}"
-                         placeholder="error.html">
-                  <div class="form-text">Optional. The page served for 404 errors.</div>
-                </div>
-
-                <div class="d-flex gap-2 flex-wrap">
-                  <button class="btn {% if website_config %}btn-primary{% else %}btn-success{% endif %}" type="submit" id="websiteSubmitBtn">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425a.247.247 0 0 1 .02-.022Z"/>
-                    </svg>
+                <div class="bs-actions">
+                  <button class="ui-btn ui-btn-primary" type="submit" id="websiteSubmitBtn">
                     <span id="websiteSubmitLabel">{% if website_config %}Save Website Settings{% else %}Enable Website Hosting{% endif %}</span>
                   </button>
-                  <button type="button" class="btn btn-outline-danger" id="disableWebsiteBtn"{% if not website_config %} style="display: none;"{% endif %}>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-                    </svg>
-                    Disable Website Hosting
-                  </button>
+                  <button type="button" class="ui-btn ui-btn-danger {% if not website_config %}is-hidden{% endif %}" id="disableWebsiteBtn">Disable website hosting</button>
                 </div>
               </form>
               {% else %}
-              <div class="text-center py-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
-                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-                </svg>
-                <p class="text-muted mb-0 small">You do not have permission to modify website hosting for this bucket.</p>
-              </div>
+              <p class="bs-locked">You do not have permission to modify website hosting for this bucket.</p>
               {% endif %}
             </div>
-          </div>
-          {% endif %}
-        </div>
-
-        <div class="col-lg-4">
-          <div class="card bg-body-tertiary border-0">
-            <div class="card-body">
-              <h6 class="card-title d-flex align-items-center mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                </svg>
-                About Versioning
-              </h6>
-              <p class="small text-muted mb-3">
-                Versioning keeps multiple variants of an object in the same bucket. You can use versioning to preserve, retrieve, and restore every version of every object.
-              </p>
-              
-              <h6 class="small fw-semibold mb-2">Benefits</h6>
-              <ul class="small text-muted mb-3 ps-3">
-                <li><strong>Recovery</strong> — Restore accidentally deleted or overwritten objects</li>
-                <li><strong>Audit Trail</strong> — Track changes to objects over time</li>
-                <li><strong>Compliance</strong> — Meet retention requirements</li>
-              </ul>
-
-              <h6 class="small fw-semibold mb-2">How It Works</h6>
-              <ul class="small text-muted mb-0 ps-3">
-                <li>Each upload creates a new version</li>
-                <li>Deleting adds a "delete marker"</li>
-                <li>Previous versions remain accessible</li>
-                <li>Storage costs apply to all versions</li>
-              </ul>
-            </div>
-          </div>
-
-          {% if versioning_enabled %}
-          <div class="card bg-body-tertiary border-0 mt-3">
-            <div class="card-body">
-              <h6 class="card-title d-flex align-items-center mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-warning me-2" viewBox="0 0 16 16">
-                  <path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>
-                </svg>
-                About Archives
-              </h6>
-              <p class="small text-muted mb-0">
-                When you delete an object with versioning enabled, S3 inserts a delete marker instead of removing the object. The archived versions remain in the bucket and can be restored at any time.
-              </p>
-            </div>
-          </div>
+          </section>
           {% endif %}
 
-          {% if encryption_enabled %}
-          <div class="card bg-body-tertiary border-0 mt-3">
-            <div class="card-body">
-              <h6 class="card-title d-flex align-items-center mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
-                </svg>
-                About Encryption
-              </h6>
-              <p class="small text-muted mb-3">
-                Server-side encryption protects data at rest. Objects are encrypted when stored and decrypted when retrieved.
-              </p>
-              
-              <h6 class="small fw-semibold mb-2">Encryption Types</h6>
-              <ul class="small text-muted mb-3 ps-3">
-                <li><strong>SSE-S3 (AES-256)</strong> — S3-managed keys, automatic encryption</li>
-                <li><strong>SSE-KMS</strong> — KMS-managed keys with audit trail and key rotation</li>
-              </ul>
-
-              <h6 class="small fw-semibold mb-2">How It Works</h6>
-              <ul class="small text-muted mb-0 ps-3">
-                <li>New objects are encrypted using the default setting</li>
-                <li>Existing objects are not automatically re-encrypted</li>
-                <li>Decryption is transparent during download</li>
-              </ul>
+          {% if can_delete_bucket %}
+          <section class="ui-card bs-panel bs-panel-danger" id="bucket-danger-card" aria-labelledby="bucketDangerTitle">
+            <div class="bs-panel-head">
+              <h2 id="bucketDangerTitle">Danger zone</h2>
             </div>
-          </div>
+            <div class="bs-panel-body bs-setting">
+              <div>
+                <div class="bs-setting-title">Delete bucket</div>
+                <div class="ui-hint">The bucket must be empty. Type the bucket name to confirm.</div>
+              </div>
+              <button class="ui-btn ui-btn-danger" type="button" data-ui-open="#deleteBucketModal">Delete bucket…</button>
+            </div>
+          </section>
           {% endif %}
         </div>
       </div>
@@ -2085,48 +1751,26 @@
 </section>
 
 {% if can_delete_bucket %}
-<div class="modal fade" id="deleteBucketModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
-            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-          </svg>
-          Delete bucket
-        </h1>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <form method="post" action="{{ url_for(endpoint="ui.delete_bucket", bucket_name=bucket_name) }}" id="deleteBucketForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-        <div class="modal-body">
-          <div class="alert alert-danger d-flex align-items-center mb-3" role="alert">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
-              <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
-              <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
-            </svg>
-            <div><strong>Warning:</strong> This action cannot be undone.</div>
-          </div>
-          <p class="mb-0">
-            Are you sure you want to delete <code class="fs-6">{{ bucket_name }}</code>?
-            <span class="text-muted">The bucket must be empty.</span>
-          </p>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-danger" type="submit">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-              <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-            </svg>
-            Delete bucket
-          </button>
-        </div>
-      </form>
+<dialog class="ui-dialog" id="deleteBucketModal" aria-labelledby="deleteBucketTitle">
+  <form method="post" action="{{ url_for(endpoint="ui.delete_bucket", bucket_name=bucket_name) }}" id="deleteBucketForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="deleteBucketTitle">Delete bucket</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-body">
+      <div class="ob-notice ob-notice-danger" role="alert">This action cannot be undone. The bucket must be empty.</div>
+      <div class="ui-field">
+        <label class="ui-label" for="deleteBucketConfirmName">Type <code>{{ bucket_name }}</code> to confirm</label>
+        <input type="text" class="ui-input" id="deleteBucketConfirmName" data-expected="{{ bucket_name }}" autocomplete="off" spellcheck="false" />
+      </div>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button class="ui-btn ui-btn-danger" type="submit" id="deleteBucketSubmit" disabled>Delete bucket</button>
+    </div>
+  </form>
+</dialog>
 {% endif %}
 
 <dialog class="ui-dialog" id="messageModal" aria-labelledby="messageModalTitle">
@@ -2243,80 +1887,39 @@
   </div>
 </dialog>
 
-<div class="modal fade" id="suspendVersioningModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
-            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-          </svg>
-          Suspend Versioning
-        </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-          </svg>
-          <div>
-            <strong>Important:</strong> Suspending versioning will stop creating new versions for uploaded objects, but <strong>existing versioned objects will remain stored</strong> and continue to consume storage space.
-          </div>
-        </div>
-        <p class="text-muted small mb-0">To permanently remove old versions, you must re-enable versioning and manually delete them, or configure a lifecycle rule to expire noncurrent versions.</p>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}" class="d-inline" id="suspendVersioningForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-          <input type="hidden" name="state" value="suspend" />
-          <button type="submit" class="btn btn-warning">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-              <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
-            </svg>
-            Suspend Versioning
-          </button>
-        </form>
-      </div>
+<dialog class="ui-dialog" id="suspendVersioningModal" aria-labelledby="suspendVersioningTitle">
+  <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}" id="suspendVersioningForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <input type="hidden" name="state" value="suspend" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="suspendVersioningTitle">Suspend versioning</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-  </div>
-</div>
+    <div class="ui-dialog-body">
+      <div class="ob-notice" role="alert">New uploads will stop creating versions. Existing versions remain stored and keep using storage space.</div>
+      <p class="ui-hint">To permanently remove old versions, re-enable versioning and delete them, or configure a lifecycle rule to expire noncurrent versions.</p>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button type="submit" class="ui-btn ui-btn-danger">Suspend versioning</button>
+    </div>
+  </form>
+</dialog>
 
-<div class="modal fade" id="disableEncryptionModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header border-0 pb-0">
-        <h5 class="modal-title fw-semibold">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
-            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
-            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
-          </svg>
-          Disable Default Encryption
-        </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
-          </svg>
-          <div>
-            <strong>Are you sure?</strong><br>
-            <span class="small">New objects will not be encrypted automatically.</span>
-          </div>
-        </div>
-        <p class="text-muted small mb-0">Existing encrypted objects remain encrypted and readable.</p>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-danger" id="confirmDisableEncryptionBtn">
-          Disable Encryption
-        </button>
-      </div>
-    </div>
+<dialog class="ui-dialog" id="disableEncryptionModal" aria-labelledby="disableEncryptionTitle">
+  <div class="ui-dialog-head">
+    <h2 class="ui-dialog-title" id="disableEncryptionTitle">Disable default encryption</h2>
+    <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
-</div>
+  <div class="ui-dialog-body">
+    <div class="ob-notice" role="alert">New objects will not be encrypted automatically.</div>
+    <p class="ui-hint">Existing encrypted objects remain encrypted and readable.</p>
+  </div>
+  <div class="ui-dialog-foot">
+    <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+    <button type="button" class="ui-btn ui-btn-danger" id="confirmDisableEncryptionBtn">Disable encryption</button>
+  </div>
+</dialog>
 
 <div class="modal fade" id="disableReplicationModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
