@@ -2916,9 +2916,9 @@
         let pct = 0;
         if (run.enumeration_done && total > 0) {
           pct = Math.min(100, Math.round(((completed + failed) / total) * 100));
-          progressEl.classList.remove('progress-bar-animated');
+          progressEl.classList.remove('is-running');
         } else {
-          progressEl.classList.add('progress-bar-animated');
+          progressEl.classList.add('is-running');
           pct = total > 0 ? Math.min(95, Math.round(((completed + failed) / total) * 100)) : 0;
         }
         progressEl.style.width = `${pct}%`;
@@ -2995,12 +2995,8 @@
           if (statusAlert) statusAlert.classList.add('is-hidden');
 
           if (statusBadge) {
-            statusBadge.className = 'badge bg-warning-subtle text-warning px-3 py-2';
-            statusBadge.innerHTML = `
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
-              </svg>
-              <span>Paused (Endpoint Unavailable)</span>`;
+            statusBadge.className = 'ui-badge ui-badge-warn';
+            statusBadge.textContent = 'Paused (Endpoint Unavailable)';
           }
 
           if (pauseForm) pauseForm.classList.add('is-hidden');
@@ -3009,12 +3005,8 @@
           if (statusAlert) statusAlert.classList.remove('is-hidden');
 
           if (statusBadge) {
-            statusBadge.className = 'badge bg-success-subtle text-success px-3 py-2';
-            statusBadge.innerHTML = `
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-              </svg>
-              <span>Enabled</span>`;
+            statusBadge.className = 'ui-badge ui-badge-ok';
+            statusBadge.textContent = 'Enabled';
           }
 
           if (pauseForm) pauseForm.classList.remove('is-hidden');
@@ -3023,7 +3015,7 @@
         if (syncedEl) syncedEl.textContent = data.objects_synced;
         if (pendingEl) {
           pendingEl.textContent = data.objects_pending;
-          if (data.objects_pending > 0) pendingEl.classList.add('text-warning');
+          pendingEl.classList.toggle('bs-stat-warn', data.objects_pending > 0);
         }
         if (orphanedEl) orphanedEl.textContent = data.objects_orphaned;
         if (bytesEl) bytesEl.textContent = formatBytes(data.bytes_synced);
@@ -3033,7 +3025,7 @@
           const date = new Date(data.last_sync_at * 1000);
           if (lastSyncTimeEl) lastSyncTimeEl.textContent = date.toLocaleString();
           if (lastSyncKeyEl && data.last_sync_key) {
-            lastSyncKeyEl.innerHTML = ' — <code class="small">' + escapeHtml(data.last_sync_key) + '</code>';
+            lastSyncKeyEl.innerHTML = ' — <code class="ui-mono">' + escapeHtml(data.last_sync_key) + '</code>';
           }
         }
 
@@ -3068,7 +3060,7 @@
       if (kindEl) kindEl.textContent = kind === 'retry_all' ? 'Retrying failures' : 'Resuming all objects';
       if (summaryEl) summaryEl.textContent = 'Starting...';
       if (progressEl) {
-        progressEl.classList.add('progress-bar-animated');
+        progressEl.classList.add('is-running');
         progressEl.style.width = '0%';
       }
       if (inFlightEl) inFlightEl.textContent = '0';
@@ -3088,10 +3080,10 @@
     const refreshBtn = document.querySelector('[data-refresh-replication]');
     refreshBtn?.addEventListener('click', () => {
 
-      if (syncedEl) syncedEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
-      if (pendingEl) pendingEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
-      if (orphanedEl) orphanedEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
-      if (bytesEl) bytesEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      if (syncedEl) syncedEl.innerHTML = '<span class="ui-spinner" role="status"></span>';
+      if (pendingEl) pendingEl.innerHTML = '<span class="ui-spinner" role="status"></span>';
+      if (orphanedEl) orphanedEl.innerHTML = '<span class="ui-spinner" role="status"></span>';
+      if (bytesEl) bytesEl.innerHTML = '<span class="ui-spinner" role="status"></span>';
       loadReplicationStats();
       loadReplicationFailures();
     });
@@ -3150,26 +3142,19 @@
       if (!failuresBody) return;
       failuresBody.innerHTML = failures.map(f => `
         <tr data-object-key="${escapeHtml(f.object_key)}">
-          <td class="ps-3" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.object_key)}">
-            <code class="small">${escapeHtml(f.object_key)}</code>
+          <td class="bs-cell-clip" title="${escapeHtml(f.object_key)}">
+            <code class="ui-mono">${escapeHtml(f.object_key)}</code>
           </td>
-          <td class="small text-muted" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.error_message)}">
-            ${f.permanent ? '<span class="badge bg-warning text-dark me-1">Not retried</span>' : ''}${escapeHtml(f.error_message)}
+          <td class="bs-cell-clip ui-muted" title="${escapeHtml(f.error_message)}">
+            ${f.permanent ? '<span class="ui-badge ui-badge-warn">Not retried</span> ' : ''}${escapeHtml(f.error_message)}
           </td>
-          <td class="small text-muted">${new Date(f.timestamp * 1000).toLocaleString()}</td>
-          <td class="text-center"><span class="badge bg-secondary">${f.failure_count}</span></td>
-          <td class="text-end pe-3">
-            <button class="btn btn-sm btn-outline-primary py-0 px-2" data-retry-failure title="Retry">
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
-                <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
-                <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
-              </svg>
-            </button>
-            <button class="btn btn-sm btn-outline-secondary py-0 px-2" data-dismiss-failure title="Dismiss">
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
-                <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
-              </svg>
-            </button>
+          <td class="ui-muted">${new Date(f.timestamp * 1000).toLocaleString()}</td>
+          <td class="is-num">${f.failure_count}</td>
+          <td>
+            <div class="bs-row-actions">
+              <button class="ui-btn ui-btn-sm" type="button" data-retry-failure>Retry</button>
+              <button class="ui-btn ui-btn-sm" type="button" data-dismiss-failure>Dismiss</button>
+            </div>
           </td>
         </tr>
       `).join('');
@@ -3190,7 +3175,7 @@
     window.retryFailure = async (btn, objectKey) => {
       const originalHtml = btn.innerHTML;
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" style="width: 12px; height: 12px;"></span>';
+      btn.innerHTML = '<span class="ui-spinner" role="status"></span>';
       const endpoint = failuresCard.dataset.retryEndpoint.replace('__KEY__', encodeURIComponent(objectKey));
       try {
         const resp = await fetch(endpoint, { method: 'POST' });
@@ -3207,7 +3192,7 @@
     window.dismissFailure = async (btn, objectKey) => {
       const originalHtml = btn.innerHTML;
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" style="width: 12px; height: 12px;"></span>';
+      btn.innerHTML = '<span class="ui-spinner" role="status"></span>';
       const endpoint = failuresCard.dataset.dismissEndpoint.replace('__KEY__', encodeURIComponent(objectKey));
       try {
         const resp = await fetch(endpoint, { method: 'DELETE' });
@@ -3225,7 +3210,7 @@
       const btn = retryAllBtn;
       const originalHtml = btn.innerHTML;
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Retrying...';
+      btn.innerHTML = '<span class="ui-spinner" role="status"></span> Retrying...';
       const endpoint = failuresCard.dataset.retryAllEndpoint;
       if (typeof window.__myfsioShowOptimisticRun === 'function') {
         window.__myfsioShowOptimisticRun('retry_all');
@@ -3421,7 +3406,7 @@
 
   const loadLifecycleRules = async () => {
     if (!lifecycleUrl || !lifecycleRulesBody) return;
-    lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="bs-table-empty">Loading…</td></tr>';
     try {
       const resp = await fetch(lifecycleUrl);
       const data = await resp.json();
@@ -3429,36 +3414,32 @@
       lifecycleRules = data.rules || [];
       renderLifecycleRules();
     } catch (err) {
-      lifecycleRulesBody.innerHTML = `<tr><td colspan="7" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+      lifecycleRulesBody.innerHTML = `<tr><td colspan="7" class="bs-table-empty ui-error">${escapeHtml(err.message)}</td></tr>`;
     }
   };
 
   const renderLifecycleRules = () => {
     if (!lifecycleRulesBody) return;
     if (lifecycleRules.length === 0) {
-      lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No lifecycle rules configured</td></tr>';
+      lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="bs-table-empty">No lifecycle rules configured</td></tr>';
       return;
     }
     lifecycleRulesBody.innerHTML = lifecycleRules.map((rule, idx) => {
       const expiration = rule.Expiration?.Days ? `${rule.Expiration.Days}d` : '-';
       const noncurrent = rule.NoncurrentVersionExpiration?.NoncurrentDays ? `${rule.NoncurrentVersionExpiration.NoncurrentDays}d` : '-';
       const abortMpu = rule.AbortIncompleteMultipartUpload?.DaysAfterInitiation ? `${rule.AbortIncompleteMultipartUpload.DaysAfterInitiation}d` : '-';
-      const statusClass = rule.Status === 'Enabled' ? 'bg-success' : 'bg-secondary';
+      const statusClass = rule.Status === 'Enabled' ? 'ui-badge-ok' : '';
       return `<tr>
-        <td><code class="small">${escapeHtml(rule.ID || '')}</code></td>
-        <td><code class="small">${escapeHtml(rule.Filter?.Prefix || '*')}</code></td>
-        <td><span class="badge ${statusClass}">${escapeHtml(rule.Status)}</span></td>
-        <td class="small">${expiration}</td>
-        <td class="small">${noncurrent}</td>
-        <td class="small">${abortMpu}</td>
-        <td class="text-end">
-          <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" onclick="editLifecycleRule(${idx})" title="Edit rule">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg>
-            </button>
-            <button class="btn btn-outline-danger" onclick="deleteLifecycleRule(${idx})" title="Delete rule">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
-            </button>
+        <td><code class="ui-mono">${escapeHtml(rule.ID || '')}</code></td>
+        <td><code class="ui-mono">${escapeHtml(rule.Filter?.Prefix || '*')}</code></td>
+        <td><span class="ui-badge ${statusClass}">${escapeHtml(rule.Status)}</span></td>
+        <td>${expiration}</td>
+        <td>${noncurrent}</td>
+        <td>${abortMpu}</td>
+        <td>
+          <div class="bs-row-actions">
+            <button class="ui-btn ui-btn-sm" type="button" onclick="editLifecycleRule(${idx})">Edit</button>
+            <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" onclick="deleteLifecycleRule(${idx})">Delete</button>
           </div>
         </td>
       </tr>`;
@@ -3550,7 +3531,7 @@
 
   const loadCorsRules = async () => {
     if (!corsUrl || !corsRulesBody) return;
-    corsRulesBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    corsRulesBody.innerHTML = '<tr><td colspan="5" class="bs-table-empty">Loading…</td></tr>';
     try {
       const resp = await fetch(corsUrl);
       const data = await resp.json();
@@ -3558,33 +3539,34 @@
       corsRules = data.rules || [];
       renderCorsRules();
     } catch (err) {
-      corsRulesBody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+      corsRulesBody.innerHTML = `<tr><td colspan="5" class="bs-table-empty ui-error">${escapeHtml(err.message)}</td></tr>`;
     }
   };
 
   const renderCorsRules = () => {
     if (!corsRulesBody) return;
+    const corsRuleCount = document.getElementById('corsRuleCount');
+    if (corsRuleCount) {
+      corsRuleCount.textContent = corsRules.length === 1 ? '1 rule' : `${corsRules.length} rules`;
+      corsRuleCount.classList.toggle('ui-badge-accent', corsRules.length > 0);
+    }
     if (corsRules.length === 0) {
-      corsRulesBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No CORS rules configured</td></tr>';
+      corsRulesBody.innerHTML = '<tr><td colspan="5" class="bs-table-empty">No CORS rules configured</td></tr>';
       return;
     }
     corsRulesBody.innerHTML = corsRules.map((rule, idx) => {
-      const origins = (rule.AllowedOrigins || []).map(o => `<code class="small">${escapeHtml(o)}</code>`).join(', ');
-      const methods = (rule.AllowedMethods || []).map(m => `<span class="badge bg-primary-subtle text-primary">${escapeHtml(m)}</span>`).join(' ');
-      const headers = (rule.AllowedHeaders || []).slice(0, 3).map(h => `<code class="small">${escapeHtml(h)}</code>`).join(', ');
+      const origins = (rule.AllowedOrigins || []).map(o => `<code class="ui-mono">${escapeHtml(o)}</code>`).join(', ');
+      const methods = (rule.AllowedMethods || []).map(m => `<span class="ui-badge">${escapeHtml(m)}</span>`).join(' ');
+      const headers = (rule.AllowedHeaders || []).slice(0, 3).map(h => `<code class="ui-mono">${escapeHtml(h)}</code>`).join(', ');
       return `<tr>
-        <td>${origins || '<span class="text-muted">None</span>'}</td>
-        <td>${methods || '<span class="text-muted">None</span>'}</td>
-        <td>${headers || '<span class="text-muted">*</span>'}</td>
-        <td>${rule.MaxAgeSeconds || '<span class="text-muted">-</span>'}</td>
-        <td class="text-end">
-          <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" onclick="editCorsRule(${idx})" title="Edit rule">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg>
-            </button>
-            <button class="btn btn-outline-danger" onclick="deleteCorsRule(${idx})" title="Delete rule">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
-            </button>
+        <td>${origins || '<span class="ui-muted">None</span>'}</td>
+        <td>${methods || '<span class="ui-muted">None</span>'}</td>
+        <td>${headers || '<span class="ui-muted">*</span>'}</td>
+        <td class="is-num">${rule.MaxAgeSeconds || '<span class="ui-muted">-</span>'}</td>
+        <td>
+          <div class="bs-row-actions">
+            <button class="ui-btn ui-btn-sm" type="button" onclick="editCorsRule(${idx})">Edit</button>
+            <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" onclick="deleteCorsRule(${idx})">Delete</button>
           </div>
         </td>
       </tr>`;
@@ -3715,7 +3697,7 @@
       if (!canned || !aclUrl) return;
       btn.disabled = true;
       const originalText = btn.innerHTML;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      btn.innerHTML = '<span class="ui-spinner" role="status"></span>';
       try {
         const resp = await fetch(aclUrl, {
           method: 'POST',
@@ -3963,7 +3945,7 @@
     const endpoint = lifecycleHistoryCard.dataset.historyEndpoint;
     const limit = historyExpanded ? 50 : 5;
 
-    lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="bs-table-empty">Loading…</td></tr>';
 
     try {
       const resp = await fetch(`${endpoint}?limit=${limit}`);
@@ -3971,7 +3953,7 @@
       const data = await resp.json();
 
       if (!data.enabled) {
-        lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">Lifecycle enforcement is not enabled</td></tr>';
+        lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="bs-table-empty">Lifecycle enforcement is not enabled</td></tr>';
         return;
       }
 
@@ -3979,8 +3961,8 @@
       const total = data.total || 0;
 
       if (executions.length === 0) {
-        lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No executions recorded yet</td></tr>';
-        lifecycleHistoryPagination.style.display = 'none';
+        lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="bs-table-empty">No executions recorded yet</td></tr>';
+        lifecycleHistoryPagination.classList.add('is-hidden');
         return;
       }
 
@@ -3990,31 +3972,31 @@
         const hasActivity = e.objects_deleted > 0 || e.versions_deleted > 0 || e.uploads_aborted > 0;
         let statusBadge;
         if (hasErrors) {
-          statusBadge = '<span class="badge bg-danger">Errors</span>';
+          statusBadge = '<span class="ui-badge ui-badge-bad">Errors</span>';
         } else if (hasActivity) {
-          statusBadge = '<span class="badge bg-success">Success</span>';
+          statusBadge = '<span class="ui-badge ui-badge-ok">Success</span>';
         } else {
-          statusBadge = '<span class="badge bg-secondary">No action</span>';
+          statusBadge = '<span class="ui-badge">No action</span>';
         }
         const errorTooltip = hasErrors ? ` title="${escapeHtml(e.errors.join('; '))}"` : '';
         return `<tr${errorTooltip}>
-          <td class="small">${date.toLocaleString()}</td>
-          <td class="text-center"><span class="badge bg-danger-subtle text-danger">${e.objects_deleted}</span></td>
-          <td class="text-center"><span class="badge bg-warning-subtle text-warning">${e.versions_deleted}</span></td>
-          <td class="text-center"><span class="badge bg-secondary">${e.uploads_aborted}</span></td>
-          <td class="text-center">${statusBadge}</td>
+          <td>${date.toLocaleString()}</td>
+          <td class="is-num">${e.objects_deleted}</td>
+          <td class="is-num">${e.versions_deleted}</td>
+          <td class="is-num">${e.uploads_aborted}</td>
+          <td>${statusBadge}</td>
         </tr>`;
       }).join('');
 
       if (total > 5 && !historyExpanded) {
-        lifecycleHistoryPagination.style.display = '';
+        lifecycleHistoryPagination.classList.remove('is-hidden');
         historyShownCount.textContent = `Showing ${Math.min(5, total)} of ${total}`;
       } else {
-        lifecycleHistoryPagination.style.display = 'none';
+        lifecycleHistoryPagination.classList.add('is-hidden');
       }
     } catch (err) {
       console.error('Failed to load lifecycle history:', err);
-      lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-danger py-4">Failed to load history</td></tr>';
+      lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="bs-table-empty ui-error">Failed to load history</td></tr>';
     }
   };
 
@@ -4049,6 +4031,9 @@
   }
 
   if (corsCard) loadCorsRules();
+  if (new URLSearchParams(window.location.search).get('tab') === 'cors') {
+    document.getElementById('bucket-cors-card')?.scrollIntoView({ block: 'start' });
+  }
   if (aclCard) loadAcl();
 
   function updateVersioningBadge(state) {

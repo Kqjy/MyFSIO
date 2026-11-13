@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ bucket_name }}{% endblock %}
 {% block content %}
-{% set active_tab = request_args.tab | default(value="objects") %}
-<div class="d-flex flex-column gap-4 h-100">
+{% set requested_tab = request_args.tab | default(value="objects") %}
+{% if requested_tab == "cors" %}{% set active_tab = "properties" %}{% else %}{% set active_tab = requested_tab %}{% endif %}
+<div class="bd-page">
   <div class="ui-pagehead">
     <div>
       <h1>{{ bucket_name }}</h1>
@@ -25,9 +26,6 @@
     {% endif %}
     {% if can_manage_lifecycle %}
     <button class="ui-tab" type="button" role="tab" id="lifecycle-tab" aria-controls="lifecycle-pane" aria-selected="{% if active_tab == "lifecycle" %}true{% else %}false{% endif %}">Lifecycle</button>
-    {% endif %}
-    {% if can_manage_cors %}
-    <button class="ui-tab" type="button" role="tab" id="cors-tab" aria-controls="cors-pane" aria-selected="{% if active_tab == "cors" %}true{% else %}false{% endif %}">CORS</button>
     {% endif %}
   </div>
 
@@ -344,6 +342,7 @@
           {% if encryption_enabled %}<a href="#bucket-encryption-card">Encryption</a>{% endif %}
           <a href="#bucket-quota-card">Quota</a>
           {% if website_hosting_enabled %}<a href="#bucket-website-card">Static website</a>{% endif %}
+          {% if can_manage_cors %}<a href="#bucket-cors-card">CORS</a>{% endif %}
           {% if can_delete_bucket %}<a href="#bucket-danger-card" class="bs-subnav-danger">Danger zone</a>{% endif %}
         </nav>
         <div class="bs-panels">
@@ -594,6 +593,40 @@
           </section>
           {% endif %}
 
+          {% if can_manage_cors %}
+          <section class="ui-card bs-panel" id="bucket-cors-card" aria-labelledby="bucketCorsTitle">
+            <div class="bs-panel-head">
+              <h2 id="bucketCorsTitle">CORS</h2>
+              <span class="ui-badge" id="corsRuleCount">0 rules</span>
+              <div class="bs-panel-head-end">
+                <button class="ui-btn ui-btn-sm ui-btn-primary" type="button" data-ui-open="#addCorsRuleModal">Add rule</button>
+              </div>
+            </div>
+            <div class="bs-panel-body">
+              <p class="bs-panel-text">CORS rules define which external websites can access this bucket from browser JavaScript. Without a rule, browsers block cross-origin requests.</p>
+              <p class="ui-hint">Per-bucket CORS is separate from the server-level CORS_ORIGINS setting. Origins are domains such as <code>https://myapp.com</code> or <code>*</code> for all; max age is how long browsers cache preflight responses.</p>
+            </div>
+            <div class="ui-table-wrap bs-panel-section" id="cors-rules-card" data-cors-url="{{ cors_url }}">
+              <table class="ui-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Origins</th>
+                    <th scope="col">Methods</th>
+                    <th scope="col">Headers</th>
+                    <th scope="col" class="is-num">Max age</th>
+                    <th scope="col" aria-label="Actions"></th>
+                  </tr>
+                </thead>
+                <tbody id="cors-rules-body">
+                  <tr>
+                    <td colspan="5" class="bs-table-empty">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          {% endif %}
+
           {% if can_delete_bucket %}
           <section class="ui-card bs-panel bs-panel-danger" id="bucket-danger-card" aria-labelledby="bucketDangerTitle">
             <div class="bs-panel-head">
@@ -614,554 +647,258 @@
 
     {% if can_manage_replication %}
     <div class="bd-pane" id="replication-pane" aria-labelledby="replication-tab"{% if active_tab != "replication" %} hidden{% endif %}>
-      <div class="row g-4">
-        <div class="col-lg-8">
-          <div class="card shadow-sm">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-              </svg>
-              <span class="fw-semibold">Replication Configuration</span>
-            </div>
-            <div class="card-body">
-              {% if replication_rule and replication_rule.enabled %}
-              <div id="replication-status-alert" class="alert alert-success d-flex align-items-center mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill flex-shrink-0 me-2" viewBox="0 0 16 16">
-                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                </svg>
-                <div>
-                  <strong>Replication Active</strong> —
-                  {% if replication_rule.mode == "bidirectional" %}
-                  Bi-directional sync enabled with LWW conflict resolution.
-                  {% elif replication_rule.mode == "all" %}
-                  All objects (existing + new) are being replicated.
-                  {% else %}
-                  New uploads to this bucket are automatically replicated.
-                  {% endif %}
-                </div>
-              </div>
-
-              <div id="replication-endpoint-warning" class="alert alert-danger is-hidden mb-4" role="alert">
-                <div class="d-flex align-items-start">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
-                    <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-                  </svg>
-                  <div>
-                    <strong>Replication Endpoint Unreachable</strong>
-                    <p class="mb-0 small" id="replication-endpoint-error">The target endpoint is not responding. Replication is paused until the endpoint is available.</p>
-                  </div>
-                </div>
-              </div>
-              
-              <div class="row g-3 mb-4" id="replication-stats-cards" data-status-endpoint="{{ url_for(endpoint="ui.get_replication_status", bucket_name=bucket_name) }}">
-                <div class="col-6 col-lg">
-                  <div class="card bg-body-tertiary border-0 h-100">
-                    <div class="card-body text-center py-3">
-                      <div class="d-flex justify-content-center align-items-center mb-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-success" viewBox="0 0 16 16">
-                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                        </svg>
-                      </div>
-                      <div class="text-muted small text-uppercase">Synced</div>
-                      <div class="fw-semibold fs-5 text-success" data-stat="synced">
-                        <span class="spinner-border spinner-border-sm" role="status"></span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div class="col-6 col-lg">
-                  <div class="card bg-body-tertiary border-0 h-100">
-                    <div class="card-body text-center py-3">
-                      <div class="d-flex justify-content-center align-items-center mb-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
-                          <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-                        </svg>
-                      </div>
-                      <div class="text-muted small text-uppercase">Pending</div>
-                      <div class="fw-semibold fs-5" data-stat="pending">
-                        <span class="spinner-border spinner-border-sm" role="status"></span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div class="col-6 col-lg">
-                  <div class="card bg-body-tertiary border-0 h-100">
-                    <div class="card-body text-center py-3">
-                      <div class="d-flex justify-content-center align-items-center mb-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
-                          <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                          <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                        </svg>
-                      </div>
-                      <div class="text-muted small text-uppercase">Orphaned</div>
-                      <div class="fw-semibold fs-5" data-stat="orphaned">
-                        <span class="spinner-border spinner-border-sm" role="status"></span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div class="col-6 col-lg">
-                  <div class="card bg-body-tertiary border-0 h-100">
-                    <div class="card-body text-center py-3">
-                      <div class="d-flex justify-content-center align-items-center mb-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-info" viewBox="0 0 16 16">
-                          <path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>
-                        </svg>
-                      </div>
-                      <div class="text-muted small text-uppercase">Data Synced</div>
-                      <div class="fw-semibold small" data-stat="bytes">
-                        <span class="spinner-border spinner-border-sm" role="status"></span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div class="col-12 col-lg">
-                  <div class="card bg-body-tertiary border-0 h-100">
-                    <div class="card-body text-center py-3">
-                      <div class="d-flex justify-content-center align-items-center mb-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                          <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
-                          <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
-                        </svg>
-                      </div>
-                      <div class="text-muted small text-uppercase">Mode</div>
-                      <div class="fw-semibold small">
-                        {% if replication_rule.mode == "bidirectional" %}Bidirectional{% elif replication_rule.mode == "all" %}All Objects{% else %}New Only{% endif %}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div class="alert alert-light border small mb-4" id="replication-last-sync" style="display: none;">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
-                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
-                </svg>
-                <strong>Last sync:</strong>
-                <span data-stat="last-sync-time"></span>
-                <span data-stat="last-sync-key"></span>
-              </div>
-
-              <div class="card border-primary mb-4" id="replication-current-run-card" style="display: none;">
-                <div class="card-body py-3">
-                  <div class="d-flex align-items-center justify-content-between mb-2">
-                    <div class="d-flex align-items-center">
-                      <div class="spinner-border spinner-border-sm text-primary me-2" role="status" id="current-run-spinner"></div>
-                      <span class="fw-semibold" id="current-run-title">Replication run</span>
-                      <span class="badge bg-primary-subtle text-primary ms-2" id="current-run-kind"></span>
-                    </div>
-                    <span class="text-muted small" id="current-run-elapsed"></span>
-                  </div>
-                  <div class="small text-muted mb-2" id="current-run-summary">Starting...</div>
-                  <div class="progress mb-2" style="height: 8px;">
-                    <div class="progress-bar progress-bar-striped progress-bar-animated"
-                         id="current-run-progress"
-                         role="progressbar"
-                         style="width: 0%;"
-                         aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
-                  </div>
-                  <div class="d-flex justify-content-between align-items-center small">
-                    <span class="text-muted">
-                      <span id="current-run-in-flight">0</span> in-flight
-                      &middot; <span class="text-danger" id="current-run-failed">0</span> failed
-                    </span>
-                    <code class="small text-truncate" style="max-width: 60%;" id="current-run-last-object" title=""></code>
-                  </div>
-                </div>
-              </div>
-
-              <div class="alert alert-light border small mb-4" id="replication-last-run-card" style="display: none;">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                </svg>
-                <strong>Last run:</strong> <span id="last-run-summary"></span>
-              </div>
-
-              <div class="d-flex flex-wrap gap-3 small text-muted mb-3" id="replication-ambient-strip" style="display: none;">
-                <span><strong>Live:</strong> <span id="live-in-flight">0</span> in-flight &middot; <span id="live-replicated">0</span> replicated &middot; <span id="live-failed" class="text-danger">0</span> failed</span>
-                <span><strong>Healer:</strong> <span id="healer-status">idle</span></span>
-              </div>
-
-              <div class="card border mb-4" id="replication-failures-card" style="display: none;"
-                   data-failures-endpoint="{{ url_for(endpoint="ui.get_replication_failures", bucket_name=bucket_name) }}"
-                   data-retry-endpoint="{{ url_for(endpoint="ui.retry_replication_failure", bucket_name=bucket_name, object_key="__KEY__") }}"
-                   data-retry-all-endpoint="{{ url_for(endpoint="ui.retry_all_replication_failures", bucket_name=bucket_name) }}"
-                   data-dismiss-endpoint="{{ url_for(endpoint="ui.dismiss_replication_failure", bucket_name=bucket_name, object_key="__KEY__") }}"
-                   data-clear-endpoint="{{ url_for(endpoint="ui.clear_replication_failures", bucket_name=bucket_name) }}">
-                <div class="card-header d-flex justify-content-between align-items-center py-2">
-                  <div class="d-flex align-items-center">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger me-2" viewBox="0 0 16 16">
-                      <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-                    </svg>
-                    <span class="fw-semibold small">Failed Replications</span>
-                    <span class="badge bg-danger ms-2" id="replication-failure-count">0</span>
-                  </div>
-                  <div class="btn-group btn-group-sm">
-                    <button class="btn btn-outline-primary btn-sm" id="retry-all-failures-btn" title="Retry All">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                        <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
-                        <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
-                      </svg>
-                      Retry All
-                    </button>
-                    <button class="btn btn-outline-secondary btn-sm" id="clear-failures-btn" title="Clear All">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                      </svg>
-                      Clear
-                    </button>
-                  </div>
-                </div>
-                <div class="card-body p-0">
-                  <div class="table-responsive">
-                    <table class="table table-sm table-hover mb-0" style="table-layout: fixed;">
-                      <thead class="table-light">
-                        <tr>
-                          <th class="ps-3" style="width: 25%;">Object Key</th>
-                          <th style="width: 35%;">Error</th>
-                          <th style="width: 18%;">Last Attempt</th>
-                          <th class="text-center" style="width: 10%;">Attempts</th>
-                          <th class="text-end pe-3" style="width: 12%;">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody id="replication-failures-body">
-                      </tbody>
-                    </table>
-                  </div>
-                  <div class="px-3 py-2 border-top" id="replication-failures-pagination" style="display: none;">
-                    <button class="btn btn-link btn-sm p-0" id="show-more-failures">Show more...</button>
-                    <span class="text-muted small ms-2" id="failures-shown-count"></span>
-                  </div>
-                </div>
-              </div>
-
-              <h6 class="text-muted text-uppercase small mb-3">Replication Target</h6>
-              <div class="card border mb-4">
-                <div class="card-body">
-                  <div class="row align-items-center">
-                    <div class="col-auto">
-                      <div class="rounded-circle bg-primary bg-opacity-10 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                          <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
-                          <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
-                        </svg>
-                      </div>
-                    </div>
-                    <div class="col">
-                      {% set_global target_conn_name = "" %}
-                      {% for c in connections %}{% if c.id == replication_rule.target_connection_id %}{% set_global target_conn_name = c.name %}{% endif %}{% endfor %}
-                      <div class="fw-semibold">{% if target_conn_name %}{{ target_conn_name }}{% else %}Unknown Connection{% endif %}</div>
-                      <div class="text-muted small">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                          <path d="M5 4a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zM5 8a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm0 2a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1H5z"/>
-                          <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/>
-                        </svg>
-                        {{ replication_rule.target_bucket }}
-                      </div>
-                      {% if target_conn %}
-                      <div class="text-muted small">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                          <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
-                        </svg>
-                        {{ target_conn.endpoint_url }}
-                      </div>
-                      {% endif %}
-                    </div>
-                    <div class="col-auto">
-                      <span id="replication-status-badge" class="badge bg-success-subtle text-success px-3 py-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
-                        </svg>
-                        <span id="replication-status-text">Enabled</span>
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div class="d-flex gap-2">
-                <a href="{{ url_for(endpoint="ui.bucket_detail", bucket_name=bucket_name, tab="replication") }}" class="btn btn-outline-secondary">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-                  </svg>
-                  Refresh
-                </a>
-                <form id="pause-replication-form" method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}" class="d-inline">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-                  <input type="hidden" name="action" value="pause">
-                  <button type="submit" class="btn btn-outline-warning">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
-                    </svg>
-                    Pause Replication
-                  </button>
-                </form>
-                {% if is_replication_admin %}
-                <button type="button" class="btn btn-outline-danger" data-ui-open="#disableReplicationModal">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                  </svg>
-                  Remove Configuration
-                </button>
-                {% endif %}
-              </div>
-
-              {% elif replication_rule and not replication_rule.enabled %}
-              <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-                  <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
-                </svg>
-                <div>
-                  <strong>Replication Paused</strong>
-                  <p class="mb-1">Replication is configured but currently paused. New uploads will not be replicated until resumed.</p>
-                  {% if replication_rule.mode == "bidirectional" %}
-                  <p class="mb-0 small text-dark"><strong>Tip:</strong> When you resume, bi-directional sync will continue and any missed changes will be reconciled using LWW conflict resolution.</p>
-                  {% elif replication_rule.mode == "all" %}
-                  <p class="mb-0 small text-dark"><strong>Tip:</strong> When you resume, any objects uploaded while paused will be automatically synced to the target.</p>
-                  {% else %}
-                  <p class="mb-0 small text-dark"><strong>Note:</strong> Objects uploaded while paused will not be synced (mode: new_only). Consider switching to "All Objects" mode if you need to sync missed uploads.</p>
-                  {% endif %}
-                </div>
-              </div>
-              
-              <h6 class="text-muted text-uppercase small mb-3">Replication Target</h6>
-              <div class="card border mb-4">
-                <div class="card-body">
-                  <div class="row align-items-center">
-                    <div class="col-auto">
-                      <div class="rounded-circle bg-warning bg-opacity-10 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
-                          <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
-                          <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
-                        </svg>
-                      </div>
-                    </div>
-                    <div class="col">
-                      {% set_global target_conn_name = "" %}
-                      {% for c in connections %}{% if c.id == replication_rule.target_connection_id %}{% set_global target_conn_name = c.name %}{% endif %}{% endfor %}
-                      <div class="fw-semibold">{% if target_conn_name %}{{ target_conn_name }}{% else %}Unknown Connection{% endif %}</div>
-                      <div class="text-muted small">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                          <path d="M5 4a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zM5 8a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm0 2a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1H5z"/>
-                          <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/>
-                        </svg>
-                        {{ replication_rule.target_bucket }}
-                      </div>
-                    </div>
-                    <div class="col-auto">
-                      <span class="badge bg-warning-subtle text-warning px-3 py-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                          <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
-                        </svg>
-                        Paused
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div class="d-flex gap-2">
-                <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}" class="d-inline">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-                  <input type="hidden" name="action" value="resume">
-                  <button type="submit" class="btn btn-primary">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/>
-                    </svg>
-                    Resume Replication
-                  </button>
-                </form>
-                {% if is_replication_admin %}
-                <button type="button" class="btn btn-outline-danger" data-ui-open="#disableReplicationModal">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                  </svg>
-                  Remove Configuration
-                </button>
-                {% endif %}
-              </div>
-              
+      <div class="bs-panels">
+        <section class="ui-card bs-panel" aria-labelledby="replicationTitle">
+          <div class="bs-panel-head">
+            <h2 id="replicationTitle">Replication</h2>
+          </div>
+          {% if replication_rule and replication_rule.enabled %}
+          <div class="bs-panel-body">
+            <p class="bs-panel-text" id="replication-status-alert"><strong>Replication active.</strong>
+              {% if replication_rule.mode == "bidirectional" %}
+              Bi-directional sync enabled with LWW conflict resolution.
+              {% elif replication_rule.mode == "all" %}
+              All objects (existing + new) are being replicated.
               {% else %}
-              <div class="text-center py-4">
-                <div class="rounded-circle bg-body-tertiary d-inline-flex align-items-center justify-content-center mb-3" style="width: 64px; height: 64px;">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-                  </svg>
-                </div>
-                {% if is_replication_admin %}
-                <h5 class="mb-2">Set Up Replication</h5>
-                <p class="text-muted mb-4">Automatically copy new objects from this bucket to a bucket in another S3-compatible service.</p>
-                {% else %}
-                <h5 class="mb-2">Replication Not Configured</h5>
-                <p class="text-muted mb-4">An administrator needs to configure replication settings for this bucket before you can enable it.</p>
+              New uploads to this bucket are automatically replicated.
+              {% endif %}
+            </p>
+            <div id="replication-endpoint-warning" class="ob-notice ob-notice-danger is-hidden" role="alert">
+              <span><strong>Replication endpoint unreachable.</strong> <span id="replication-endpoint-error">The target endpoint is not responding. Replication is paused until the endpoint is available.</span></span>
+            </div>
+            <div class="ui-stats bs-repl-stats" id="replication-stats-cards" data-status-endpoint="{{ url_for(endpoint="ui.get_replication_status", bucket_name=bucket_name) }}">
+              <div class="ui-card ui-stat">
+                <div class="ui-stat-label">Synced</div>
+                <div class="ui-stat-value" data-stat="synced"><span class="ui-spinner" role="status"></span></div>
+              </div>
+              <div class="ui-card ui-stat">
+                <div class="ui-stat-label">Pending</div>
+                <div class="ui-stat-value" data-stat="pending"><span class="ui-spinner" role="status"></span></div>
+              </div>
+              <div class="ui-card ui-stat">
+                <div class="ui-stat-label">Orphaned</div>
+                <div class="ui-stat-value" data-stat="orphaned"><span class="ui-spinner" role="status"></span></div>
+              </div>
+              <div class="ui-card ui-stat">
+                <div class="ui-stat-label">Data synced</div>
+                <div class="ui-stat-value" data-stat="bytes"><span class="ui-spinner" role="status"></span></div>
+              </div>
+              <div class="ui-card ui-stat">
+                <div class="ui-stat-label">Mode</div>
+                <div class="ui-stat-value">{% if replication_rule.mode == "bidirectional" %}Bidirectional{% elif replication_rule.mode == "all" %}All Objects{% else %}New Only{% endif %}</div>
+              </div>
+            </div>
+
+            <p class="ui-hint" id="replication-last-sync" style="display: none;">
+              <strong>Last sync:</strong>
+              <span data-stat="last-sync-time"></span>
+              <span data-stat="last-sync-key"></span>
+            </p>
+
+            <div class="ui-card bs-repl-run" id="replication-current-run-card" style="display: none;">
+              <div class="bs-repl-run-head">
+                <span class="ui-spinner" role="status" id="current-run-spinner"></span>
+                <strong id="current-run-title">Replication run</strong>
+                <span class="ui-badge ui-badge-accent" id="current-run-kind"></span>
+                <span class="ui-hint" id="current-run-elapsed"></span>
+              </div>
+              <div class="ui-hint" id="current-run-summary">Starting...</div>
+              <div class="ui-bar is-ok"><i id="current-run-progress" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></i></div>
+              <div class="bs-repl-run-foot ui-hint">
+                <span><span id="current-run-in-flight">0</span> in-flight &middot; <span class="ui-error" id="current-run-failed">0</span> failed</span>
+                <code class="ui-mono" id="current-run-last-object" title=""></code>
+              </div>
+            </div>
+
+            <p class="ui-hint" id="replication-last-run-card" style="display: none;">
+              <strong>Last run:</strong> <span id="last-run-summary"></span>
+            </p>
+
+            <p class="ui-hint" id="replication-ambient-strip" style="display: none;">
+              <span><strong>Live:</strong> <span id="live-in-flight">0</span> in-flight &middot; <span id="live-replicated">0</span> replicated &middot; <span id="live-failed" class="ui-error">0</span> failed</span>
+              <span><strong>Healer:</strong> <span id="healer-status">idle</span></span>
+            </p>
+          </div>
+
+          <div class="bs-panel-section" id="replication-failures-card" style="display: none;"
+               data-failures-endpoint="{{ url_for(endpoint="ui.get_replication_failures", bucket_name=bucket_name) }}"
+               data-retry-endpoint="{{ url_for(endpoint="ui.retry_replication_failure", bucket_name=bucket_name, object_key="__KEY__") }}"
+               data-retry-all-endpoint="{{ url_for(endpoint="ui.retry_all_replication_failures", bucket_name=bucket_name) }}"
+               data-dismiss-endpoint="{{ url_for(endpoint="ui.dismiss_replication_failure", bucket_name=bucket_name, object_key="__KEY__") }}"
+               data-clear-endpoint="{{ url_for(endpoint="ui.clear_replication_failures", bucket_name=bucket_name) }}">
+            <div class="bs-panel-head">
+              <h2>Failed replications</h2>
+              <span class="ui-badge ui-badge-bad" id="replication-failure-count">0</span>
+              <div class="bs-panel-head-end bs-row-actions">
+                <button class="ui-btn ui-btn-sm" type="button" id="retry-all-failures-btn">Retry all</button>
+                <button class="ui-btn ui-btn-sm" type="button" id="clear-failures-btn">Clear</button>
+              </div>
+            </div>
+            <div class="ui-table-wrap">
+              <table class="ui-table bs-failures-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Object key</th>
+                    <th scope="col">Error</th>
+                    <th scope="col">Last attempt</th>
+                    <th scope="col" class="is-num">Attempts</th>
+                    <th scope="col" aria-label="Actions"></th>
+                  </tr>
+                </thead>
+                <tbody id="replication-failures-body">
+                </tbody>
+              </table>
+            </div>
+            <div class="bs-panel-body" id="replication-failures-pagination" style="display: none;">
+              <button class="ui-btn ui-btn-sm ui-btn-ghost" type="button" id="show-more-failures">Show more...</button>
+              <span class="ui-hint" id="failures-shown-count"></span>
+            </div>
+          </div>
+
+            <div class="bs-setting bs-panel-section bs-panel-body">
+              <div>
+                <div class="ui-hint">Replication target</div>
+                {% set_global target_conn_name = "" %}
+                {% for c in connections %}{% if c.id == replication_rule.target_connection_id %}{% set_global target_conn_name = c.name %}{% endif %}{% endfor %}
+                <div class="bs-setting-title">{% if target_conn_name %}{{ target_conn_name }}{% else %}Unknown Connection{% endif %}</div>
+                <div class="ui-hint ui-mono">{{ replication_rule.target_bucket }}</div>
+                {% if target_conn %}
+                <div class="ui-hint">{{ target_conn.endpoint_url }}</div>
                 {% endif %}
               </div>
-              
-              {% if is_replication_admin and connections %}
+              <span id="replication-status-badge" class="ui-badge ui-badge-ok"><span id="replication-status-text">Enabled</span></span>
+            </div>
+          <div class="bs-panel-body bs-panel-section">
+            <div class="bs-actions bs-actions-flush">
+              <a href="{{ url_for(endpoint="ui.bucket_detail", bucket_name=bucket_name, tab="replication") }}" class="ui-btn">Refresh</a>
+              <form id="pause-replication-form" method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+                <input type="hidden" name="action" value="pause">
+                <button type="submit" class="ui-btn">Pause replication</button>
+              </form>
+              {% if is_replication_admin %}
+              <button type="button" class="ui-btn ui-btn-danger" data-ui-open="#disableReplicationModal">Remove configuration</button>
+              {% endif %}
+            </div>
+          </div>
+
+          {% elif replication_rule and not replication_rule.enabled %}
+          <div class="bs-panel-body">
+            <div class="ob-notice" role="alert">
+              <span><strong>Replication paused.</strong> Replication is configured but currently paused. New uploads will not be replicated until resumed.
+              {% if replication_rule.mode == "bidirectional" %}
+              When you resume, bi-directional sync will continue and any missed changes will be reconciled using LWW conflict resolution.
+              {% elif replication_rule.mode == "all" %}
+              When you resume, any objects uploaded while paused will be automatically synced to the target.
+              {% else %}
+              Objects uploaded while paused will not be synced (mode: new_only). Consider switching to "All Objects" mode if you need to sync missed uploads.
+              {% endif %}
+              </span>
+            </div>
+          </div>
+            <div class="bs-setting bs-panel-section bs-panel-body">
+              <div>
+                <div class="ui-hint">Replication target</div>
+                {% set_global target_conn_name = "" %}
+                {% for c in connections %}{% if c.id == replication_rule.target_connection_id %}{% set_global target_conn_name = c.name %}{% endif %}{% endfor %}
+                <div class="bs-setting-title">{% if target_conn_name %}{{ target_conn_name }}{% else %}Unknown Connection{% endif %}</div>
+                <div class="ui-hint ui-mono">{{ replication_rule.target_bucket }}</div>
+              </div>
+              <span class="ui-badge ui-badge-warn">Paused</span>
+            </div>
+          <div class="bs-panel-body bs-panel-section">
+            <div class="bs-actions bs-actions-flush">
               <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-                <input type="hidden" name="action" value="create">
-                
-                <div class="mb-3">
-                  <label for="target_connection_id" class="form-label fw-medium">Target Connection</label>
-                  <select class="form-select" id="target_connection_id" name="target_connection_id" required>
-                    <option value="" selected disabled>Select a connection...</option>
-                    {% for conn in connections %}
-                    <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
-                    {% endfor %}
-                  </select>
-                  <div class="form-text">Select the remote service where objects should be replicated.</div>
-                </div>
-                
-                <div class="mb-3">
-                  <label for="target_bucket" class="form-label fw-medium">Target Bucket Name</label>
-                  <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket" pattern="^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" minlength="3" maxlength="63">
-                  <div id="target_bucket_feedback" class="invalid-feedback"></div>
-                  <div class="form-text">
-                    <span id="target_bucket_hint">If the target bucket does not exist, it will be created automatically.</span>
-                    <div class="mt-1 text-muted small">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                        <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                      </svg>
-                      Rules: 3-63 characters, lowercase letters, numbers, hyphens, and periods only. Must start/end with letter or number.
-                    </div>
-                  </div>
-                </div>
-                
-                <div class="mb-4">
-                  <label class="form-label fw-medium">Replication Mode</label>
-                  <div class="card border">
-                    <div class="card-body p-0">
-                      <div class="form-check p-3 border-bottom m-0">
-                        <input class="form-check-input" type="radio" name="replication_mode" id="mode_new_only" value="new_only" checked>
-                        <label class="form-check-label w-100" for="mode_new_only">
-                          <span class="fw-medium">New uploads only</span>
-                          <div class="text-muted small">Only replicate objects uploaded after enabling replication. Existing objects will not be copied.</div>
-                        </label>
-                      </div>
-                      <div class="form-check p-3 border-bottom m-0">
-                        <input class="form-check-input" type="radio" name="replication_mode" id="mode_all" value="all">
-                        <label class="form-check-label w-100" for="mode_all">
-                          <span class="fw-medium">All objects (existing + new)</span>
-                          <div class="text-muted small">Replicate all existing objects immediately, plus all future uploads. <span class="text-warning">This may take time for large buckets.</span></div>
-                        </label>
-                      </div>
-                      {% if site_sync_enabled %}
-                      <div class="form-check p-3 m-0">
-                        <input class="form-check-input" type="radio" name="replication_mode" id="mode_bidirectional" value="bidirectional">
-                        <label class="form-check-label w-100" for="mode_bidirectional">
-                          <span class="fw-medium">Bidirectional sync</span>
-                          <div class="text-muted small">Two-way sync with Last-Write-Wins conflict resolution.</div>
-                        </label>
-                      </div>
-                      {% endif %}
-                    </div>
-                  </div>
-                </div>
-
-                <div id="bidirWarningBucket" class="alert alert-warning is-hidden mb-4" role="alert">
-                  <h6 class="alert-heading fw-bold d-flex align-items-center gap-2 mb-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
-                      <path fill-rule="evenodd" d="M1 11.5a.5.5 0 0 0 .5.5h11.793l-3.147 3.146a.5.5 0 0 0 .708.708l4-4a.5.5 0 0 0 0-.708l-4-4a.5.5 0 0 0-.708.708L13.293 11H1.5a.5.5 0 0 0-.5.5zm14-7a.5.5 0 0 1-.5.5H2.707l3.147 3.146a.5.5 0 1 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 1 1 .708.708L2.707 4H14.5a.5.5 0 0 1 .5.5z"/>
-                    </svg>
-                    Requires Configuration on Both Sites
-                  </h6>
-                  <p class="mb-2 small">For bidirectional sync to work, <strong>both sites</strong> must be configured:</p>
-                  <ol class="mb-2 ps-3 small">
-                    <li>This site: Enable bidirectional replication here</li>
-                    <li>Remote site: Register this site as a peer with a connection</li>
-                    <li>Remote site: Create matching bidirectional rule pointing back</li>
-                    <li>Both sites: Ensure <code>SITE_SYNC_ENABLED=true</code></li>
-                  </ol>
-                  <div class="small">
-                    <a href="{{ url_for(endpoint="ui.sites_dashboard") }}" class="alert-link">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077z"/>
-                      </svg>
-                      Check bidirectional status in Sites Dashboard
-                    </a>
-                  </div>
-                </div>
-
-                <button type="submit" class="btn btn-primary">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-                  </svg>
-                  Enable Replication
-                </button>
+                <input type="hidden" name="action" value="resume">
+                <button type="submit" class="ui-btn ui-btn-primary">Resume replication</button>
               </form>
-              {% elif is_replication_admin %}
-              <div class="alert alert-warning d-flex align-items-start" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-                </svg>
-                <div>
-                  <strong>No connections configured.</strong>
-                  <p class="mb-1">You need to add a remote connection before you can enable replication.</p>
-                  <a href="{{ url_for(endpoint="ui.connections_dashboard") }}" class="alert-link">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
-                    </svg>
-                    Add Connection
-                  </a>
-                </div>
+              {% if is_replication_admin %}
+              <button type="button" class="ui-btn ui-btn-danger" data-ui-open="#disableReplicationModal">Remove configuration</button>
+              {% endif %}
+            </div>
+          </div>
+
+          {% else %}
+          <div class="bs-panel-body">
+            {% if is_replication_admin %}
+            <p class="bs-panel-text">Automatically copy new objects from this bucket to a bucket in another S3-compatible service.</p>
+            {% else %}
+            <p class="bs-locked">Replication is not configured. An administrator needs to configure replication settings for this bucket before you can enable it.</p>
+            {% endif %}
+            <p class="ui-hint">Uploads, updates and deletes are replicated asynchronously in the background. The connection's credentials need write permissions on the target bucket.</p>
+
+            {% if is_replication_admin and connections %}
+            <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+              <input type="hidden" name="action" value="create">
+              <div class="ui-field">
+                <label for="target_connection_id" class="ui-label">Target connection</label>
+                <select class="ui-select" id="target_connection_id" name="target_connection_id" required>
+                  <option value="" selected disabled>Select a connection...</option>
+                  {% for conn in connections %}
+                  <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
+                  {% endfor %}
+                </select>
+                <div class="ui-hint">Select the remote service where objects should be replicated.</div>
               </div>
-              {% endif %}
-              
-              {% endif %}
+              <div class="ui-field">
+                <label for="target_bucket" class="ui-label">Target bucket name</label>
+                <input type="text" class="ui-input" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket" pattern="^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$" minlength="3" maxlength="63">
+                <div id="target_bucket_feedback" class="ui-error"></div>
+                <div class="ui-hint" id="target_bucket_hint">If the target bucket does not exist, it will be created automatically.</div>
+                <div class="ui-hint">Rules: 3-63 characters, lowercase letters, numbers, hyphens, and periods only. Must start/end with letter or number.</div>
+              </div>
+              <fieldset class="bs-choices">
+                <legend class="ui-label">Replication mode</legend>
+                <label class="bs-choice" for="mode_new_only">
+                  <input type="radio" name="replication_mode" id="mode_new_only" value="new_only" checked>
+                  <span>
+                    <strong>New uploads only</strong>
+                    <span class="ui-hint">Only replicate objects uploaded after enabling replication. Existing objects will not be copied.</span>
+                  </span>
+                </label>
+                <label class="bs-choice" for="mode_all">
+                  <input type="radio" name="replication_mode" id="mode_all" value="all">
+                  <span>
+                    <strong>All objects (existing + new)</strong>
+                    <span class="ui-hint">Replicate all existing objects immediately, plus all future uploads. This may take time for large buckets.</span>
+                  </span>
+                </label>
+                {% if site_sync_enabled %}
+                <label class="bs-choice" for="mode_bidirectional">
+                  <input type="radio" name="replication_mode" id="mode_bidirectional" value="bidirectional">
+                  <span>
+                    <strong>Bidirectional sync</strong>
+                    <span class="ui-hint">Two-way sync with Last-Write-Wins conflict resolution.</span>
+                  </span>
+                </label>
+                {% endif %}
+              </fieldset>
+
+              <div id="bidirWarningBucket" class="ob-notice bs-notice-block is-hidden" role="alert">
+                <strong>Requires configuration on both sites</strong>
+                <ol>
+                  <li>This site: Enable bidirectional replication here</li>
+                  <li>Remote site: Register this site as a peer with a connection</li>
+                  <li>Remote site: Create matching bidirectional rule pointing back</li>
+                  <li>Both sites: Ensure <code>SITE_SYNC_ENABLED=true</code></li>
+                </ol>
+                <a href="{{ url_for(endpoint="ui.sites_dashboard") }}">Check bidirectional status in Sites Dashboard</a>
+              </div>
+
+              <div class="bs-actions">
+                <button type="submit" class="ui-btn ui-btn-primary">Enable replication</button>
+              </div>
+            </form>
+            {% elif is_replication_admin %}
+            <div class="ob-notice" role="alert">
+              <span><strong>No connections configured.</strong> You need to add a remote connection before you can enable replication. <a href="{{ url_for(endpoint="ui.connections_dashboard") }}">Add connection</a></span>
             </div>
+            {% endif %}
           </div>
-        </div>
-        
-        <div class="col-lg-4">
-          <div class="card shadow-sm">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted me-2" viewBox="0 0 16 16">
-                <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-              </svg>
-              <span class="fw-semibold">About Replication</span>
-            </div>
-            <div class="card-body">
-              <ul class="list-unstyled mb-0 small">
-                <li class="d-flex align-items-start mb-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-                    <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
-                  </svg>
-                  <span class="text-muted">Choose to replicate <strong>new uploads only</strong> or <strong>all objects</strong> (including existing).</span>
-                </li>
-                <li class="d-flex align-items-start mb-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-                  </svg>
-                  <span class="text-muted"><strong>All changes sync</strong> — uploads, updates, and deletes are replicated.</span>
-                </li>
-                <li class="d-flex align-items-start mb-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-info flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-                    <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z"/>
-                  </svg>
-                  <span class="text-muted">Replication happens <strong>asynchronously</strong> in the background.</span>
-                </li>
-                <li class="d-flex align-items-start">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-                    <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
-                  </svg>
-                  <span class="text-muted">Ensure credentials have <strong>write permissions</strong> on target bucket.</span>
-                </li>
-              </ul>
-            </div>
-          </div>
-        </div>
+          {% endif %}
+        </section>
       </div>
     </div>
     {% endif %}
@@ -1169,409 +906,76 @@
     {% if can_manage_lifecycle %}
     <div class="bd-pane" id="lifecycle-pane" aria-labelledby="lifecycle-tab"{% if active_tab != "lifecycle" %} hidden{% endif %}>
       {% if not lifecycle_enabled %}
-      <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
-          <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-        </svg>
-        <div>
-          <strong>Lifecycle enforcement is disabled.</strong>
-          <div class="small mt-1">To enable, set <code>LIFECYCLE_ENABLED=true</code>.</div>
-        </div>
-      </div>
+      <div class="ob-notice" role="alert"><span><strong>Lifecycle enforcement is disabled.</strong> To enable, set <code>LIFECYCLE_ENABLED=true</code>.</span></div>
       {% endif %}
-      <div class="row g-4">
-        <div class="col-lg-8">
-          <div class="card shadow-sm" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <div class="d-flex align-items-center">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
-                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
-                </svg>
-                <span class="fw-semibold">Lifecycle Rules</span>
-              </div>
-              <button class="btn btn-primary btn-sm" type="button" data-ui-open="#addLifecycleRuleModal" {% if not lifecycle_enabled %}disabled title="Lifecycle enforcement is not enabled. Enable LIFECYCLE_ENABLED=true to use this feature."{% endif %}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
-                </svg>
-                Add Rule
-              </button>
-            </div>
-            <div class="card-body">
-              <p class="text-muted small mb-3">Lifecycle rules automatically delete objects or abort multipart uploads after a specified number of days.</p>
-              <div class="table-responsive">
-                <table class="table table-sm align-middle mb-0">
-                  <thead class="table-light">
-                    <tr>
-                      <th>ID</th>
-                      <th>Prefix</th>
-                      <th>Status</th>
-                      <th>Expiration</th>
-                      <th>Noncurrent</th>
-                      <th>Abort MPU</th>
-                      <th class="text-end">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody id="lifecycle-rules-body">
-                    <tr>
-                      <td colspan="7" class="text-center text-muted py-4">
-                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-                        Loading...
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+      <div class="bs-panels">
+        <section class="ui-card bs-panel" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}" aria-labelledby="lifecycleRulesTitle">
+          <div class="bs-panel-head">
+            <h2 id="lifecycleRulesTitle">Lifecycle rules</h2>
+            <div class="bs-panel-head-end">
+              <button class="ui-btn ui-btn-sm ui-btn-primary" type="button" data-ui-open="#addLifecycleRuleModal" {% if not lifecycle_enabled %}disabled title="Lifecycle enforcement is not enabled. Enable LIFECYCLE_ENABLED to add rules."{% endif %}>Add rule</button>
             </div>
           </div>
+          <div class="bs-panel-body">
+            <p class="bs-panel-text">Lifecycle rules automatically delete objects or abort multipart uploads after a specified number of days.</p>
+            <p class="ui-hint">Expiration deletes current versions N days after creation. Noncurrent expiration deletes old versions N days after they stop being current (requires versioning). Abort MPU cleans up incomplete multipart uploads after N days.</p>
+          </div>
+          <div class="ui-table-wrap bs-panel-section">
+            <table class="ui-table">
+              <thead>
+                <tr>
+                  <th scope="col">ID</th>
+                  <th scope="col">Prefix</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Expiration</th>
+                  <th scope="col">Noncurrent</th>
+                  <th scope="col">Abort MPU</th>
+                  <th scope="col" aria-label="Actions"></th>
+                </tr>
+              </thead>
+              <tbody id="lifecycle-rules-body">
+                <tr>
+                  <td colspan="7" class="bs-table-empty">Loading…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-          <div class="card shadow-sm mt-4" id="lifecycle-history-card"
-               data-history-endpoint="{{ url_for(endpoint="ui.get_lifecycle_history", bucket_name=bucket_name) }}">
-            <div class="card-header d-flex align-items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
-                <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
-                <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
-              </svg>
-              <span class="fw-semibold">Execution History</span>
-            </div>
-            <div class="card-body">
-              <p class="text-muted small mb-3">Lifecycle rules are evaluated automatically (default: every hour). Recent executions are shown below.</p>
-              <div class="table-responsive">
-                <table class="table table-sm align-middle mb-0">
-                  <thead class="table-light">
-                    <tr>
-                      <th>Executed</th>
-                      <th class="text-center">Deleted</th>
-                      <th class="text-center">Versions</th>
-                      <th class="text-center">Aborted</th>
-                      <th class="text-center">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody id="lifecycle-history-body">
-                    <tr>
-                      <td colspan="5" class="text-center text-muted py-4">
-                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-                        Loading...
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <div class="mt-2" id="lifecycle-history-pagination" style="display: none;">
-                <button class="btn btn-link btn-sm p-0" id="show-more-history">Show more...</button>
-                <span class="text-muted small ms-2" id="history-shown-count"></span>
-              </div>
-            </div>
+        <section class="ui-card bs-panel" id="lifecycle-history-card" aria-labelledby="lifecycleHistoryTitle"
+                 data-history-endpoint="{{ url_for(endpoint="ui.get_lifecycle_history", bucket_name=bucket_name) }}">
+          <div class="bs-panel-head">
+            <h2 id="lifecycleHistoryTitle">Execution history</h2>
           </div>
-        </div>
-        <div class="col-lg-4">
-          <div class="card bg-body-tertiary border-0 mb-3">
-            <div class="card-body">
-              <h6 class="card-title d-flex align-items-center mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                </svg>
-                What are Lifecycle Rules?
-              </h6>
-              <p class="small text-muted mb-3">Lifecycle rules automate object management by scheduling actions based on object age. This helps reduce storage costs and manage data retention automatically.</p>
-              <div class="alert alert-info small py-2 px-3 mb-3">
-                <strong>Tip:</strong> Use lifecycle rules to automatically clean up temporary files, logs, or expired content.
-              </div>
-            </div>
+          <div class="bs-panel-body">
+            <p class="ui-hint">Lifecycle rules are evaluated automatically (default: every hour). Recent executions are shown below.</p>
           </div>
-          <div class="card bg-body-tertiary border-0">
-            <div class="card-body">
-              <h6 class="small fw-semibold mb-3">Available Actions</h6>
-              <div class="d-flex align-items-start mb-3">
-                <div class="bg-danger bg-opacity-10 rounded p-2 me-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
-                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="fw-semibold small">Expiration</div>
-                  <div class="text-muted small">Delete current version objects after N days from creation</div>
-                </div>
-              </div>
-              <div class="d-flex align-items-start mb-3">
-                <div class="bg-warning bg-opacity-10 rounded p-2 me-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
-                    <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
-                    <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
-                    <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="fw-semibold small">Noncurrent Expiration</div>
-                  <div class="text-muted small">Delete old versions N days after becoming noncurrent (requires versioning)</div>
-                </div>
-              </div>
-              <div class="d-flex align-items-start">
-                <div class="bg-secondary bg-opacity-10 rounded p-2 me-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
-                    <path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="fw-semibold small">Abort Multipart</div>
-                  <div class="text-muted small">Clean up incomplete multipart uploads after N days</div>
-                </div>
-              </div>
-            </div>
+          <div class="ui-table-wrap bs-panel-section">
+            <table class="ui-table">
+              <thead>
+                <tr>
+                  <th scope="col">Executed</th>
+                  <th scope="col" class="is-num">Deleted</th>
+                  <th scope="col" class="is-num">Versions</th>
+                  <th scope="col" class="is-num">Aborted</th>
+                  <th scope="col">Status</th>
+                </tr>
+              </thead>
+              <tbody id="lifecycle-history-body">
+                <tr>
+                  <td colspan="5" class="bs-table-empty">Loading…</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
-        </div>
+          <div class="bs-panel-body bs-panel-section is-hidden" id="lifecycle-history-pagination">
+            <button class="ui-btn ui-btn-sm ui-btn-ghost" type="button" id="show-more-history">Show more...</button>
+            <span class="ui-hint" id="history-shown-count"></span>
+          </div>
+        </section>
       </div>
     </div>
     {% endif %}
-
-    {% if can_manage_cors %}
-    <div class="bd-pane" id="cors-pane" aria-labelledby="cors-tab"{% if active_tab != "cors" %} hidden{% endif %}>
-      <div class="row g-4">
-        <div class="col-lg-8">
-          <div class="card shadow-sm" id="cors-rules-card" data-cors-url="{{ cors_url }}">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <div class="d-flex align-items-center">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
-                </svg>
-                <span class="fw-semibold">CORS Configuration</span>
-                <span class="ms-2 text-muted" data-bs-toggle="tooltip" data-bs-placement="top" title="Per-bucket CORS controls which websites can access objects directly via browser JavaScript. This is separate from the server-level CORS_ORIGINS environment variable." style="cursor: help;">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                    <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                  </svg>
-                </span>
-              </div>
-              <button class="btn btn-primary btn-sm" type="button" data-ui-open="#addCorsRuleModal">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                  <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
-                </svg>
-                Add Rule
-              </button>
-            </div>
-            <div class="card-body">
-              <p class="text-muted small mb-3">CORS rules define which external websites can access your bucket. Required for web apps making direct browser requests.</p>
-              <div class="table-responsive">
-                <table class="table table-sm align-middle mb-0">
-                  <thead class="table-light">
-                    <tr>
-                      <th>Origins</th>
-                      <th>Methods</th>
-                      <th>Headers</th>
-                      <th>Max Age</th>
-                      <th class="text-end">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody id="cors-rules-body">
-                    <tr>
-                      <td colspan="5" class="text-center text-muted py-4">
-                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-                        Loading...
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="col-lg-4">
-          <div class="card bg-body-tertiary border-0 mb-3">
-            <div class="card-body">
-              <h6 class="card-title d-flex align-items-center mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-                </svg>
-                What is CORS?
-              </h6>
-              <p class="small text-muted mb-3">CORS (Cross-Origin Resource Sharing) is a browser security feature that controls which websites can access your bucket data via JavaScript. Without CORS rules, browsers block cross-origin requests.</p>
-              <div class="alert alert-warning small py-2 px-3 mb-0">
-                <strong>When needed:</strong> Configure CORS if your web app fetches files directly from this bucket (e.g., loading images, JSON, or downloading files via JavaScript).
-              </div>
-            </div>
-          </div>
-          <div class="card bg-body-tertiary border-0 mb-3">
-            <div class="card-body">
-              <h6 class="small fw-semibold mb-3">Configuration Fields</h6>
-              <div class="d-flex align-items-start mb-3">
-                <div class="bg-primary bg-opacity-10 rounded p-2 me-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                    <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="fw-semibold small">Allowed Origins</div>
-                  <div class="text-muted small">Domains that can make requests (e.g., <code>https://myapp.com</code> or <code>*</code> for all)</div>
-                </div>
-              </div>
-              <div class="d-flex align-items-start mb-3">
-                <div class="bg-success bg-opacity-10 rounded p-2 me-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success" viewBox="0 0 16 16">
-                    <path d="M14.5 3a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h13zm-13-1A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 14.5 2h-13z"/>
-                    <path d="M3 5.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zM3 8a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9A.5.5 0 0 1 3 8zm0 2.5a.5.5 0 0 1 .5-.5h6a.5.5 0 0 1 0 1h-6a.5.5 0 0 1-.5-.5z"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="fw-semibold small">Allowed Methods</div>
-                  <div class="text-muted small">HTTP methods permitted (GET, PUT, POST, DELETE, HEAD)</div>
-                </div>
-              </div>
-              <div class="d-flex align-items-start mb-3">
-                <div class="bg-info bg-opacity-10 rounded p-2 me-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-info" viewBox="0 0 16 16">
-                    <path d="M4 11a1 1 0 1 1 2 0v1a1 1 0 1 1-2 0v-1zm6-4a1 1 0 1 1 2 0v5a1 1 0 1 1-2 0V7zM7 9a1 1 0 0 1 2 0v3a1 1 0 1 1-2 0V9z"/>
-                    <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
-                    <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="fw-semibold small">Allowed Headers</div>
-                  <div class="text-muted small">Request headers the browser may send (e.g., <code>Content-Type</code>, <code>Authorization</code>)</div>
-                </div>
-              </div>
-              <div class="d-flex align-items-start">
-                <div class="bg-secondary bg-opacity-10 rounded p-2 me-3">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
-                    <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
-                    <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="fw-semibold small">Max Age (seconds)</div>
-                  <div class="text-muted small">How long browsers cache preflight responses (default: 0)</div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="card bg-body-tertiary border-0">
-            <div class="card-body">
-              <h6 class="small fw-semibold mb-2">Quick Examples</h6>
-              <div class="small text-muted">
-                <p class="mb-2"><strong>Allow all origins:</strong></p>
-                <code class="d-block bg-body rounded p-2 mb-2">Origins: *<br>Methods: GET, HEAD</code>
-                <p class="mb-2"><strong>Specific domain:</strong></p>
-                <code class="d-block bg-body rounded p-2">Origins: https://myapp.com<br>Methods: GET, PUT, DELETE</code>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    {% endif %}
-  </div>
-</div>
-
-<dialog class="ui-dialog" id="deletePolicyModal" aria-labelledby="deletePolicyTitle">
-  <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" id="deletePolicyForm">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-    <input type="hidden" name="mode" value="delete" />
-    <div class="ui-dialog-head">
-      <h2 class="ui-dialog-title" id="deletePolicyTitle">Delete bucket policy</h2>
-      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
-    </div>
-    <div class="ui-dialog-body">
-      <div class="ob-notice" role="alert">Removing the bucket policy will revert access control to IAM-only. Users relying on policy-based permissions may lose access.</div>
-      <p class="ui-hint">Are you sure you want to delete the bucket policy for <strong>{{ bucket_name }}</strong>?</p>
-    </div>
-    <div class="ui-dialog-foot">
-      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
-      <button type="submit" class="ui-btn ui-btn-danger">Delete policy</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog class="ui-dialog" id="uploadModal" aria-labelledby="uploadTitle">
-  <form
-    method="post"
-    action="{{ url_for(endpoint="ui.upload_object", bucket_name=bucket_name) }}"
-    enctype="multipart/form-data"
-    data-upload-form
-    data-multipart-init-url="{{ url_for(endpoint="ui.initiate_multipart_upload", bucket_name=bucket_name) }}"
-    data-multipart-part-template="{{ url_for(endpoint="ui.upload_multipart_part", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
-    data-multipart-complete-template="{{ url_for(endpoint="ui.complete_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
-    data-multipart-abort-template="{{ url_for(endpoint="ui.abort_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
-  >
-    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-    <div class="ui-dialog-head">
-      <h2 class="ui-dialog-title" id="uploadTitle">Upload objects</h2>
-      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
-    </div>
-    <div class="ui-dialog-body">
-      <p class="ui-muted">Upload files to <code id="uploadDestination"></code>. Files of 8&nbsp;MB or more are sent as multipart uploads.</p>
-      <input class="ob-upload-input" type="file" name="object" id="uploadFileInput" multiple tabindex="-1" aria-hidden="true" />
-      <div class="ob-dropzone" data-dropzone role="button" tabindex="0" aria-label="Choose files to upload">
-        <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
-        <strong>Drop files here or click to browse</strong>
-        <span class="ui-hint" data-dropzone-label>No files selected</span>
-      </div>
-      <button class="ui-btn ui-btn-ghost ui-btn-sm ob-upload-advanced" type="button" data-ui-collapse="#uploadAdvancedOptions">Advanced options</button>
-      <div id="uploadAdvancedOptions" hidden>
-        <div class="ui-field" id="singleFileOptions">
-          <label class="ui-label" for="uploadObjectKey">Object key</label>
-          <input class="ui-input ui-mono" type="text" name="object_key" id="uploadObjectKey" placeholder="folder/document.pdf" />
-          <div class="ui-hint">Leave blank to keep the original filename. Applies to a single file only.</div>
-        </div>
-        <div class="ui-field">
-          <label class="ui-label" for="uploadKeyPrefix">Key prefix</label>
-          <input class="ui-input ui-mono" type="text" name="key_prefix" id="uploadKeyPrefix" placeholder="uploads/2024/" />
-          <div class="ui-hint">Added in front of every uploaded file name, for example <code>folder/subfolder/</code>.</div>
-        </div>
-        <div class="ui-field">
-          <label class="ui-label" for="uploadMetadata">Metadata (JSON)</label>
-          <textarea class="ui-input ui-mono" name="metadata" id="uploadMetadata" rows="3" placeholder='{"project":"demo"}'></textarea>
-          <div class="ui-hint">Custom key/value pairs stored with each object.</div>
-        </div>
-      </div>
-    </div>
-    <div class="ui-dialog-foot">
-      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
-      <button class="ui-btn ui-btn-primary" type="submit" id="uploadSubmitBtn">
-        <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
-        <span id="uploadBtnText">Upload</span>
-      </button>
-    </div>
-  </form>
-</dialog>
-
-<section class="ob-upload-tray" id="uploadTray" aria-label="Uploads" hidden>
-  <div class="ob-upload-head">
-    <div class="ob-upload-heading">
-      <strong id="uploadTrayTitle" aria-live="polite">Uploading</strong>
-      <span class="ui-hint" id="uploadTraySummary"></span>
-    </div>
-    <button type="button" class="icon-btn" id="uploadTrayToggle" aria-expanded="true" aria-label="Hide uploads"><svg class="ic ob-upload-caret" aria-hidden="true"><use href="#i-chevron"/></svg></button>
-    <button type="button" class="icon-btn" id="uploadTrayClose" aria-label="Cancel uploads"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
-  </div>
-  <div class="ui-bar ob-upload-total"><i id="uploadTrayBar"></i></div>
-  <div class="ob-upload-list" id="uploadTrayList"></div>
-</section>
-
-{% if can_delete_bucket %}
-<dialog class="ui-dialog" id="deleteBucketModal" aria-labelledby="deleteBucketTitle">
-  <form method="post" action="{{ url_for(endpoint="ui.delete_bucket", bucket_name=bucket_name) }}" id="deleteBucketForm">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
-    <div class="ui-dialog-head">
-      <h2 class="ui-dialog-title" id="deleteBucketTitle">Delete bucket</h2>
-      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
-    </div>
-    <div class="ui-dialog-body">
-      <div class="ob-notice ob-notice-danger" role="alert">This action cannot be undone. The bucket must be empty.</div>
-      <div class="ui-field">
-        <label class="ui-label" for="deleteBucketConfirmName">Type <code>{{ bucket_name }}</code> to confirm</label>
-        <input type="text" class="ui-input" id="deleteBucketConfirmName" data-expected="{{ bucket_name }}" autocomplete="off" spellcheck="false" />
-      </div>
-    </div>
-    <div class="ui-dialog-foot">
-      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
-      <button class="ui-btn ui-btn-danger" type="submit" id="deleteBucketSubmit" disabled>Delete bucket</button>
-    </div>
-  </form>
-</dialog>
-{% endif %}
 
 <dialog class="ui-dialog" id="messageModal" aria-labelledby="messageModalTitle">
   <div class="ui-dialog-head">

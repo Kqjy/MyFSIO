@@ -2823,3 +2823,94 @@ textarea.ui-input {
 .ui-dialog-body .bs-field-row + .ui-field {
 	margin-top: 12px;
 }
+
+.bs-repl-stats {
+	grid-template-columns: repeat(5, minmax(0, 1fr));
+	margin-top: 12px;
+}
+
+.bs-repl-stats .ui-stat-value {
+	font-size: 18px;
+}
+
+.bs-stat-warn {
+	color: var(--c-warn);
+}
+
+.bs-repl-run {
+	display: grid;
+	gap: 8px;
+	padding: 12px 14px;
+	margin-bottom: 12px;
+	border-color: var(--c-accent);
+}
+
+.bs-repl-run-head,
+.bs-repl-run-foot {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.bs-repl-run-head .ui-hint {
+	margin-left: auto;
+}
+
+.bs-repl-run-foot {
+	justify-content: space-between;
+}
+
+.bs-repl-run-foot code {
+	max-width: 60%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.bs-failures-table {
+	table-layout: fixed;
+}
+
+.bs-cell-clip {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.bs-actions-flush {
+	margin-top: 0;
+}
+
+.bs-notice-block {
+	display: block;
+	margin-top: 12px;
+}
+
+.bs-notice-block ol {
+	margin: 6px 0;
+	padding-left: 18px;
+}
+
+.bs-panel-body > .ob-notice,
+.bd-pane > .ob-notice {
+	border: 1px solid var(--c-line);
+	border-radius: var(--c-radius);
+	margin-bottom: 12px;
+}
+
+.bs-panel-body > .ob-notice:last-child {
+	margin-bottom: 0;
+}
+
+@media (max-width: 720px) {
+	.bs-repl-stats {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
+
+.bd-page {
+	display: flex;
+	flex-direction: column;
+	gap: 1.5rem;
+	height: 100%;
+}
