@@ -3396,6 +3396,7 @@
         } catch (error) {
           uploadErrorFiles.push({ name: file.name, error: error.message || 'Unknown error' });
         }
+        versionsCache.clear();
 
         uploadStats.uploadedBytes += file.size;
         uploadStats.completedFiles++;
