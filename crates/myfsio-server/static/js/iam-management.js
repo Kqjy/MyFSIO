@@ -8,6 +8,7 @@ window.IAMManagement = (function() {
   var selectedId = null;
   var draft = [];
   var dirty = false;
+  var savingUserId = null;
   var rotateUserId = null;
 
   var GRID_ACTIONS = ['list', 'read', 'write', 'delete'];
@@ -176,7 +177,11 @@ window.IAMManagement = (function() {
 
   function setDirty(value) {
     dirty = value;
-    byId('permGridSave').disabled = !value;
+    byId('permGridSave').disabled = !value || savingUserId !== null;
+  }
+
+  function gridBusy() {
+    return savingUserId !== null && savingUserId === selectedId;
   }
 
   function gridEditable(policy) {
@@ -199,6 +204,7 @@ window.IAMManagement = (function() {
   function renderGrid() {
     var body = byId('permGridBody');
     var locked = false;
+    var busy = gridBusy();
     body.replaceChildren();
     draft.forEach(function(policy, index) {
       var editable = gridEditable(policy);
@@ -223,7 +229,7 @@ window.IAMManagement = (function() {
         var box = document.createElement('input');
         box.type = 'checkbox';
         box.checked = hasWildcardAction(policy) || (policy.actions || []).indexOf(action) >= 0;
-        box.disabled = !editable;
+        box.disabled = !editable || busy;
         box.setAttribute('aria-label', action + ' on ' + bucketLabel);
         box.setAttribute('data-grid-index', index);
         box.setAttribute('data-grid-action', action);
@@ -231,19 +237,26 @@ window.IAMManagement = (function() {
         tr.appendChild(td);
       });
       var removeCell = document.createElement('td');
-      var remove = document.createElement('button');
-      remove.type = 'button';
-      remove.className = 'icon-btn';
-      remove.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>';
-      remove.setAttribute('aria-label', 'Remove ' + bucketLabel);
-      remove.setAttribute('data-grid-remove', index);
-      removeCell.appendChild(remove);
+      if (editable) {
+        var remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'icon-btn';
+        remove.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>';
+        remove.setAttribute('aria-label', 'Remove ' + bucketLabel);
+        remove.setAttribute('data-grid-remove', index);
+        remove.disabled = busy;
+        removeCell.appendChild(remove);
+      }
       tr.appendChild(removeCell);
       body.appendChild(tr);
     });
     byId('permGridWrap').hidden = draft.length === 0;
     byId('permGridEmpty').hidden = draft.length > 0;
     byId('permGridNote').hidden = !locked;
+    byId('permGridBucket').disabled = busy;
+    byId('permGridAdd').disabled = busy;
+    byId('permGridEditJson').disabled = busy;
+    byId('permGridForm').setAttribute('aria-busy', busy ? 'true' : 'false');
   }
 
   function renderPanel() {
@@ -270,7 +283,7 @@ window.IAMManagement = (function() {
   }
 
   function selectUser(userId, reveal) {
-    if (dirty && selectedId && selectedId !== userId) {
+    if (dirty && selectedId && selectedId !== userId && !gridBusy()) {
       var previous = getUser(selectedId);
       if (previous) {
         window.showToast('Unsaved permission changes for ' + (previous.display_name || previous.access_key) + ' were discarded.', 'Permissions', 'warning');
@@ -328,6 +341,10 @@ window.IAMManagement = (function() {
     body.addEventListener('change', function(event) {
       var box = event.target.closest('[data-grid-action]');
       if (!box) return;
+      if (gridBusy()) {
+        renderGrid();
+        return;
+      }
       var policy = draft[Number(box.getAttribute('data-grid-index'))];
       if (!policy) return;
       var action = box.getAttribute('data-grid-action');
@@ -339,7 +356,9 @@ window.IAMManagement = (function() {
 
     body.addEventListener('click', function(event) {
       var remove = event.target.closest('[data-grid-remove]');
-      if (!remove) return;
+      if (!remove || gridBusy()) return;
+      var target = draft[Number(remove.getAttribute('data-grid-remove'))];
+      if (!target || !gridEditable(target)) return;
       draft.splice(Number(remove.getAttribute('data-grid-remove')), 1);
       setDirty(true);
       renderGrid();
@@ -347,6 +366,7 @@ window.IAMManagement = (function() {
 
     var bucketInput = byId('permGridBucket');
     function addBucket() {
+      if (gridBusy()) return;
       var bucket = bucketInput.value.trim();
       if (!bucket) {
         bucketInput.focus();
@@ -372,17 +392,29 @@ window.IAMManagement = (function() {
     var form = byId('permGridForm');
     form.addEventListener('submit', function(event) {
       event.preventDefault();
-      if (!selectedId) return;
+      if (!selectedId || savingUserId !== null || !dirty) return;
       var userId = selectedId;
-      byId('permGridPolicies').value = JSON.stringify(draft);
+      var submitted = clonePolicies(draft);
+      var saved = false;
+      savingUserId = userId;
+      byId('permGridPolicies').value = JSON.stringify(submitted);
       form.action = buildUserUrl(endpoints.updatePolicies, userId);
+      renderGrid();
       window.UICore.submitFormAjax(form, {
         successMessage: 'Permissions updated',
         onSuccess: function(data) {
-          applyPolicies(userId, data.policies || clonePolicies(draft));
+          saved = true;
+          savingUserId = null;
+          applyPolicies(userId, data.policies || submitted);
         }
       }).then(function() {
+        savingUserId = null;
+        if (!saved && selectedId === userId) {
+          draft = submitted;
+          dirty = true;
+        }
         setDirty(dirty);
+        renderGrid();
       });
     });
   }
