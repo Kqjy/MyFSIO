@@ -314,6 +314,25 @@ window.IAMManagement = (function() {
     }
   }
 
+  function submitPolicies(form, userId, successMessage, onSaved) {
+    var saved = false;
+    savingUserId = userId;
+    form.action = buildUserUrl(endpoints.updatePolicies, userId);
+    setDirty(dirty);
+    renderGrid();
+    return window.UICore.submitFormAjax(form, {
+      successMessage: successMessage,
+      onSuccess: function(data) {
+        saved = true;
+        savingUserId = null;
+        onSaved(data);
+      }
+    }).then(function() {
+      savingUserId = null;
+      return saved;
+    });
+  }
+
   function setupUserTable() {
     byId('iamUsersBody').addEventListener('click', function(event) {
       var row = event.target.closest('.iam-user-item');
@@ -395,20 +414,10 @@ window.IAMManagement = (function() {
       if (!selectedId || savingUserId !== null || !dirty) return;
       var userId = selectedId;
       var submitted = clonePolicies(draft);
-      var saved = false;
-      savingUserId = userId;
       byId('permGridPolicies').value = JSON.stringify(submitted);
-      form.action = buildUserUrl(endpoints.updatePolicies, userId);
-      renderGrid();
-      window.UICore.submitFormAjax(form, {
-        successMessage: 'Permissions updated',
-        onSuccess: function(data) {
-          saved = true;
-          savingUserId = null;
-          applyPolicies(userId, data.policies || submitted);
-        }
-      }).then(function() {
-        savingUserId = null;
+      submitPolicies(form, userId, 'Permissions updated', function(data) {
+        applyPolicies(userId, data.policies || submitted);
+      }).then(function(saved) {
         if (!saved && selectedId === userId) {
           draft = submitted;
           dirty = true;
@@ -592,14 +601,17 @@ window.IAMManagement = (function() {
       event.preventDefault();
       var userId = byId('policyEditorUserId').value;
       if (!userId) return;
-      form.action = buildUserUrl(endpoints.updatePolicies, userId);
-      window.UICore.submitFormAjax(form, {
-        successMessage: 'Policies updated',
-        onSuccess: function(data) {
-          window.UI.dialog.close('#policyEditorModal');
-          if (data.policies) applyPolicies(userId, data.policies);
-          else window.location.reload();
-        }
+      if (savingUserId !== null) {
+        window.showToast('Another permission save is still in progress. Try again in a moment.', 'Permissions', 'warning');
+        return;
+      }
+      submitPolicies(form, userId, 'Policies updated', function(data) {
+        if (byId('policyEditorUserId').value === userId) window.UI.dialog.close('#policyEditorModal');
+        if (data.policies) applyPolicies(userId, data.policies);
+        else window.location.reload();
+      }).then(function() {
+        setDirty(dirty);
+        renderGrid();
       });
     });
   }
