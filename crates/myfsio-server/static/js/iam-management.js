@@ -116,6 +116,11 @@ window.IAMManagement = (function() {
     return String(name || '').slice(0, 2);
   }
 
+  function maskKey(key) {
+    key = key || '';
+    return key.length > 12 ? key.slice(0, 8) + '...' + key.slice(-4) : key;
+  }
+
   function clonePolicies(policies) {
     return JSON.parse(JSON.stringify(policies || []));
   }
@@ -132,7 +137,7 @@ window.IAMManagement = (function() {
     row.setAttribute('data-access-key-filter', String(user.access_key || '').toLowerCase());
     row.querySelector('.ak-avatar').textContent = initials(name);
     row.querySelector('.ak-user-name').textContent = name;
-    row.querySelector('.ak-user-key').textContent = user.access_key;
+    row.querySelector('.ak-user-key').textContent = maskKey(user.access_key);
     fillRowAccess(row, user);
     fillRowExpiry(row, user);
   }
@@ -228,8 +233,8 @@ window.IAMManagement = (function() {
       var removeCell = document.createElement('td');
       var remove = document.createElement('button');
       remove.type = 'button';
-      remove.className = 'ui-btn ui-btn-sm ui-btn-ghost';
-      remove.textContent = 'Remove';
+      remove.className = 'icon-btn';
+      remove.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>';
       remove.setAttribute('aria-label', 'Remove ' + bucketLabel);
       remove.setAttribute('data-grid-remove', index);
       removeCell.appendChild(remove);

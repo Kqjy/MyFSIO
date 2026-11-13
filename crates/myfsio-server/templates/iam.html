@@ -59,7 +59,7 @@
   <p class="ui-muted st-cardnote ak-cardnote-end">Secrets are masked above. IAM config is encrypted at rest.</p>
 </div>
 
-<div class="ad-split ad-split-end">
+<div class="ad-split ad-split-end ak-split">
   <div class="ui-card">
     <div id="iamTableWrap"{% if not users %} hidden{% endif %}>
       <div class="ui-toolbar">
@@ -84,7 +84,7 @@
               <td>
                 <div class="ui-name"><span class="ak-avatar" aria-hidden="true">{{ user.display_name | truncate(length=2, end="") }}</span><span class="ak-user-name">{{ user.display_name }}</span></div>
               </td>
-              <td class="ui-hide-m"><span class="ui-mono ak-user-key">{{ user.access_key }}</span></td>
+              <td class="ui-hide-m"><span class="ui-mono ak-user-key">{% if user.access_key | length > 12 %}{{ user.access_key | slice(start=0, end=8) }}...{{ user.access_key | slice(start=-4) }}{% else %}{{ user.access_key }}{% endif %}</span></td>
               <td><span class="ui-badge{% if user.is_admin %} ui-badge-bad{% else %} ui-badge-accent{% endif %} ak-user-access">{% if user.is_admin %}Admin{% else %}{{ user.policies|length }} statement{% if user.policies|length != 1 %}s{% endif %}{% endif %}</span></td>
               <td class="ui-hide-m ak-user-expiry">{% if user.is_expired %}<span class="ui-badge ui-badge-bad">Expired</span>{% elif user.is_expiring_soon %}<span class="ui-badge ui-badge-warn">Expiring soon</span>{% elif user.expires_at %}<span class="ui-muted" data-expires-at="{{ user.expires_at }}">{{ user.expires_at | truncate(length=10, end="") }}</span>{% else %}<span class="ui-muted">Never</span>{% endif %}</td>
               <td>

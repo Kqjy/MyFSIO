@@ -870,3 +870,13 @@
 	border-top: 1px solid var(--c-line);
 	border-bottom: 0;
 }
+
+.ak-grid td:last-child {
+	width: 36px;
+}
+
+@media (min-width: 768px) {
+	.ak-split {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 440px);
+	}
+}
