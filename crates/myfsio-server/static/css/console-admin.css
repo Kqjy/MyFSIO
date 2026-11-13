@@ -437,3 +437,322 @@
 		grid-template-columns: minmax(0, 1fr);
 	}
 }
+
+.st-block {
+	margin-bottom: 16px;
+}
+
+.st-cardhead {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px 12px;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--c-line);
+}
+
+.st-cardhead h2 {
+	margin: 0 auto 0 0;
+	font-size: 15px;
+	font-weight: 650;
+}
+
+.st-cardnote {
+	margin: 0;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--c-line);
+	overflow-wrap: anywhere;
+}
+
+.st-stamp {
+	font-size: 12.5px;
+}
+
+.st-sub {
+	font-size: 12.5px;
+	overflow-wrap: anywhere;
+}
+
+.st-only-m {
+	display: none;
+}
+
+.st-num {
+	text-align: right;
+	white-space: nowrap;
+}
+
+.st-ok {
+	color: var(--c-ok);
+}
+
+.st-warn {
+	color: var(--c-warn);
+}
+
+.st-bad {
+	color: var(--c-bad);
+}
+
+.st-endpoint {
+	max-width: 260px;
+	padding: 0;
+	border: 0;
+	background: none;
+	font-size: 12.5px;
+	text-align: left;
+	overflow-wrap: anywhere;
+	cursor: pointer;
+}
+
+.st-endpoint:hover,
+.st-endpoint:focus-visible {
+	text-decoration: underline;
+}
+
+.st-topo {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 22px 16px;
+}
+
+.st-topo-peers {
+	display: grid;
+	gap: 10px;
+	flex: 0 1 auto;
+	min-width: 0;
+}
+
+.st-topo-peer {
+	display: flex;
+	align-items: center;
+	min-width: 0;
+}
+
+.st-node {
+	min-width: 170px;
+	max-width: 280px;
+	padding: 12px 16px;
+	border: 1.5px solid var(--c-line);
+	border-radius: 12px;
+	background: var(--c-panel);
+	overflow-wrap: anywhere;
+}
+
+.st-node.is-self {
+	border-color: var(--c-accent);
+	box-shadow: 0 0 0 3px var(--c-accent-weak);
+}
+
+.st-node b,
+.st-node small {
+	display: block;
+}
+
+.st-node small {
+	color: var(--c-muted);
+	font-size: 12.5px;
+}
+
+.st-node-badges {
+	margin-top: 6px;
+}
+
+.st-link {
+	position: relative;
+	flex: 0 0 150px;
+	padding: 0 8px 16px;
+	color: var(--c-muted);
+	font-size: 12px;
+	text-align: center;
+}
+
+.st-link::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 8px;
+	border-top: 2px solid var(--c-ok);
+}
+
+.st-link.is-bad {
+	color: var(--c-bad);
+}
+
+.st-link.is-bad::after {
+	border-top: 2px dashed var(--c-bad);
+}
+
+.st-link.is-none::after {
+	border-top: 2px dashed var(--c-line);
+}
+
+.st-steps {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 14px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	color: var(--c-muted);
+	font-size: 13px;
+}
+
+.st-steps b {
+	display: inline-grid;
+	place-items: center;
+	width: 20px;
+	height: 20px;
+	margin-right: 6px;
+	border-radius: 50%;
+	background: var(--c-hover);
+	font-size: 11.5px;
+}
+
+.st-steps .is-on {
+	color: var(--c-accent);
+	font-weight: 600;
+}
+
+.st-steps .is-on b {
+	background: var(--c-accent);
+	color: #fff;
+}
+
+.st-steps .is-done b {
+	background: var(--c-ok-weak);
+	color: var(--c-ok);
+}
+
+.st-setting {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	padding: 14px 16px;
+	border-bottom: 1px solid var(--c-line);
+}
+
+.st-setting > :first-child {
+	flex: 1 1 0;
+	min-width: 0;
+}
+
+.st-setting-title {
+	display: block;
+	font-weight: 600;
+}
+
+.st-setting .ui-hint {
+	margin: 2px 0 0;
+}
+
+.st-setting-control {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+	flex: 0 1 380px;
+	min-width: 0;
+}
+
+.st-setting-control .ui-input,
+.st-setting-control .ui-select {
+	flex: 1 1 auto;
+	width: 100%;
+	min-width: 0;
+}
+
+.st-foot {
+	border-top: 0;
+}
+
+.st-foot-end {
+	margin-left: auto;
+}
+
+.st-grid {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.st-dialog-wide {
+	width: min(720px, calc(100vw - 24px));
+	max-width: none;
+}
+
+.st-issues {
+	margin: 0;
+	padding-left: 20px;
+}
+
+.st-facts-grid {
+	gap: 12px;
+}
+
+.st-facts-card {
+	padding: 12px 14px;
+	border: 1px solid var(--c-line);
+	border-radius: var(--c-radius);
+	min-width: 0;
+}
+
+.st-facts-card p {
+	margin: 0;
+}
+
+.ad-note-ok {
+	background: var(--c-ok-weak);
+	color: var(--c-ok);
+}
+
+.ad-note-bad {
+	background: var(--c-bad-weak);
+	color: var(--c-bad);
+}
+
+@media (max-width: 767.98px) {
+	.st-topo,
+	.st-topo-peer {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.st-topo {
+		gap: 6px;
+	}
+
+	.st-link {
+		flex: 0 0 auto;
+		padding: 4px 0;
+	}
+
+	.st-link::after {
+		display: none;
+	}
+
+	.st-node {
+		max-width: none;
+	}
+
+	.st-setting {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 8px;
+	}
+
+	.st-setting-control {
+		flex: 0 0 auto;
+		justify-content: flex-start;
+	}
+
+	.st-only-m {
+		display: block;
+	}
+
+	.st-grid,
+	.st-facts-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
