@@ -281,7 +281,9 @@ window.UI = (function() {
   document.addEventListener('keydown', function(event) {
     var tab = event.target.closest ? event.target.closest('[data-ui-tabs] [role="tab"]') : null;
     if (!tab) return;
-    var tabs = tabsOf(tab.closest('[data-ui-tabs]'));
+    var tabs = tabsOf(tab.closest('[data-ui-tabs]')).filter(function(other) {
+      return !other.hidden && !other.classList.contains('is-hidden');
+    });
     var index = tabs.indexOf(tab);
     var next = null;
     if (event.key === 'ArrowRight') next = tabs[(index + 1) % tabs.length];

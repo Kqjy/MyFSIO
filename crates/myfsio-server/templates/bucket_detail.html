@@ -233,9 +233,7 @@
       <div id="preview-error-alert" class="ob-notice is-hidden" role="alert"></div>
       <div class="ui-tabs ob-drawer-tabs" data-ui-tabs aria-label="Object details sections">
         <button class="ui-tab" type="button" role="tab" id="obTabDetails" aria-controls="obPanelDetails" aria-selected="true">Details</button>
-        {% if versioning_enabled %}
-        <button class="ui-tab" type="button" role="tab" id="obTabVersions" aria-controls="obPanelVersions">Versions</button>
-        {% endif %}
+        <button class="ui-tab {% if not versioning_enabled %}is-hidden{% endif %}" type="button" role="tab" id="obTabVersions" aria-controls="obPanelVersions">Versions</button>
         <button class="ui-tab" type="button" role="tab" id="obTabTags" aria-controls="obPanelTags">Tags <span class="ui-badge" id="preview-tags-count">0</span></button>
         <button class="ui-tab" type="button" role="tab" id="obTabMetadata" aria-controls="obPanelMetadata">Metadata</button>
       </div>
@@ -249,16 +247,14 @@
           <dd class="ui-mono" id="preview-s3-uri"></dd>
         </dl>
       </div>
-      {% if versioning_enabled %}
       <div id="obPanelVersions" aria-labelledby="obTabVersions" hidden>
         <div id="version-panel" class="is-hidden">
           <div class="ob-panel-bar">
             <button class="ui-btn ui-btn-sm" type="button" id="refreshVersionsButton">Refresh</button>
           </div>
-          <div id="version-list" class="version-list-stable list-group list-group-flush small rounded" style="border: 1px solid var(--myfsio-card-border);"></div>
+          <div id="version-list" class="ob-versions"></div>
         </div>
       </div>
-      {% endif %}
       <div id="obPanelTags" aria-labelledby="obTabTags" hidden>
         <div id="preview-tags" class="is-hidden">
           <div class="ob-panel-bar">

@@ -1673,6 +1673,78 @@ body {
 	margin-bottom: 8px;
 }
 
+.ob-versions {
+	min-height: 112px;
+	max-height: 260px;
+	overflow-y: auto;
+	border: 1px solid var(--c-line);
+	border-radius: var(--c-radius);
+	font-size: 13px;
+}
+
+.ob-version {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--c-line);
+}
+
+.ob-version:last-child {
+	border-bottom: 0;
+}
+
+.ob-version-text {
+	min-width: 0;
+}
+
+.ob-version-heading {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.ob-version-title {
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.ob-version-meta {
+	color: var(--c-muted);
+	font-size: 12.5px;
+}
+
+.ob-version .ui-btn {
+	flex-shrink: 0;
+}
+
+.ob-version-note {
+	margin: 0;
+	padding: 10px;
+	color: var(--c-muted);
+}
+
+.ob-version-note-bad {
+	color: var(--c-bad);
+}
+
+.ob-restore-heading {
+	margin: 14px 0 6px;
+	padding-bottom: 6px;
+	border-bottom: 1px solid var(--c-line);
+	color: var(--c-muted);
+	font-size: 11.5px;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+}
+
+.ob-preview-title {
+	margin-bottom: 4px;
+	font-weight: 600;
+}
+
 .ob-tag-actions {
 	display: flex;
 	gap: 6px;

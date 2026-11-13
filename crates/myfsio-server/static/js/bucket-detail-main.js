@@ -668,10 +668,7 @@
             switch (msg.type) {
               case 'meta':
                 urlTemplates = msg.url_templates;
-                versioningEnabled = msg.versioning_enabled;
-                if (objectsContainer) {
-                  objectsContainer.dataset.versioning = versioningEnabled ? 'true' : 'false';
-                }
+                setVersioningEnabled(msg.versioning_enabled);
                 break;
               case 'count':
                 totalObjectCount = msg.total_count || 0;
@@ -783,10 +780,7 @@
 
       const data = await response.json();
 
-      versioningEnabled = data.versioning_enabled;
-      if (objectsContainer) {
-        objectsContainer.dataset.versioning = versioningEnabled ? 'true' : 'false';
-      }
+      setVersioningEnabled(data.versioning_enabled);
 
       totalObjectCount = data.total_count || 0;
       if (!append && !currentPrefix) bucketTotalObjects = totalObjectCount;
@@ -1703,7 +1697,7 @@
       const wrapper = document.createElement('div');
       wrapper.className = 'metadata-entry';
       const label = document.createElement('div');
-      label.className = 'metadata-key small';
+      label.className = 'metadata-key';
       label.textContent = key;
       const val = document.createElement('div');
       val.className = 'metadata-value text-break';
@@ -1740,21 +1734,21 @@
     const targetLabel = label || row?.dataset.key || 'this object';
     const metadata = version.metadata && typeof version.metadata === 'object' ? Object.entries(version.metadata) : [];
     const metadataHtml = metadata.length
-      ? `<div class="mt-3"><div class="fw-semibold text-uppercase small">Metadata</div><hr class="my-2"><div class="metadata-stack small">${metadata
+      ? `<div class="ob-restore-heading">Metadata</div><div class="metadata-stack ob-metadata">${metadata
         .map(
           ([key, value]) =>
-            `<div class="metadata-entry"><div class="metadata-key small">${escapeHtml(key)}</div><div class="metadata-value text-break">${escapeHtml(value)}</div></div>`
+            `<div class="metadata-entry"><div class="metadata-key">${escapeHtml(key)}</div><div class="metadata-value">${escapeHtml(value)}</div></div>`
         )
-        .join('')}</div></div>`
+        .join('')}</div>`
       : '';
     const summaryHtml = `
-      <div class="small">
-        <div><strong>Target:</strong> ${escapeHtml(targetLabel)}</div>
-        <div><strong>Version ID:</strong> ${escapeHtml(version.version_id)}</div>
-        <div><strong>Timestamp:</strong> ${escapeHtml(timestamp)}</div>
-        <div><strong>Size:</strong> ${escapeHtml(sizeLabel)}</div>
-        <div><strong>Reason:</strong> ${escapeHtml(reasonLabel)}</div>
-      </div>
+      <dl class="ob-facts">
+        <dt>Target</dt><dd>${escapeHtml(targetLabel)}</dd>
+        <dt>Version ID</dt><dd class="ui-mono">${escapeHtml(version.version_id)}</dd>
+        <dt>Timestamp</dt><dd>${escapeHtml(timestamp)}</dd>
+        <dt>Size</dt><dd>${escapeHtml(sizeLabel)}</dd>
+        <dt>Reason</dt><dd>${escapeHtml(reasonLabel)}</dd>
+      </dl>
       ${metadataHtml}
     `;
     const fallbackText = `Restore ${targetLabel} from ${timestamp}? Size ${sizeLabel}. Reason: ${reasonLabel}.`;
@@ -2044,32 +2038,40 @@
     }
   }
 
+  function setVersionListNote(text, failed = false) {
+    if (!versionList) return;
+    const note = document.createElement('p');
+    note.className = failed ? 'ob-version-note ob-version-note-bad' : 'ob-version-note';
+    note.textContent = text;
+    versionList.replaceChildren(note);
+  }
+
   function renderVersionEntries(entries, row) {
     if (!versionList) return;
     if (!entries || entries.length === 0) {
-      versionList.innerHTML = '<p class="text-muted small mb-0">No previous versions yet.</p>';
+      setVersionListNote('No previous versions yet.');
       return;
     }
     versionList.innerHTML = '';
     entries.forEach((entry, index) => {
       const versionNumber = index + 1;
       const item = document.createElement('div');
-      item.className = 'd-flex align-items-center justify-content-between py-2 border-bottom';
+      item.className = 'ob-version';
       const textStack = document.createElement('div');
-      textStack.className = 'me-3';
+      textStack.className = 'ob-version-text';
       const heading = document.createElement('div');
-      heading.className = 'd-flex align-items-center';
+      heading.className = 'ob-version-heading';
       const badge = document.createElement('span');
-      badge.className = 'badge text-bg-secondary me-2';
+      badge.className = 'ui-badge';
       badge.textContent = `#${versionNumber}`;
       const title = document.createElement('div');
-      title.className = 'fw-semibold small';
+      title.className = 'ob-version-title';
       const timestamp = versionTimestamp(entry);
       title.textContent = timestamp;
       heading.appendChild(badge);
       heading.appendChild(title);
       const meta = document.createElement('div');
-      meta.className = 'text-muted small';
+      meta.className = 'ob-version-meta';
       const reason = describeVersionReason(entry.reason);
       const sizeLabel = formatBytes(Number(entry.size) || 0);
       meta.textContent = `${sizeLabel} · ${reason}`;
@@ -2077,13 +2079,33 @@
       textStack.appendChild(meta);
       const restoreButton = document.createElement('button');
       restoreButton.type = 'button';
-      restoreButton.className = 'btn btn-outline-primary btn-sm';
+      restoreButton.className = 'ui-btn ui-btn-sm';
       restoreButton.textContent = 'Restore';
       restoreButton.addEventListener('click', () => confirmVersionRestore(row, entry));
       item.appendChild(textStack);
       item.appendChild(restoreButton);
       versionList.appendChild(item);
     });
+  }
+
+  function setVersioningEnabled(enabled) {
+    versioningEnabled = Boolean(enabled);
+    if (objectsContainer) {
+      objectsContainer.dataset.versioning = versioningEnabled ? 'true' : 'false';
+    }
+    const versionsTab = document.getElementById('obTabVersions');
+    if (versionsTab) {
+      const wasHidden = versionsTab.classList.contains('is-hidden');
+      versionsTab.classList.toggle('is-hidden', !versioningEnabled);
+      if (!versioningEnabled && versionsTab.getAttribute('aria-selected') === 'true') {
+        document.getElementById('obTabDetails')?.click();
+      }
+      if (versioningEnabled && wasHidden && activeRow) {
+        loadObjectVersions(activeRow, { force: true });
+      }
+    }
+    document.getElementById('bulkDeletePurgeWrap')?.classList.toggle('is-hidden', !versioningEnabled);
+    document.getElementById('deleteObjectVersioningWrap')?.classList.toggle('is-hidden', !versioningEnabled);
   }
 
   async function loadObjectVersions(row, { force = false } = {}) {
@@ -2105,7 +2127,7 @@
       renderVersionEntries(versionsCache.get(endpoint), row);
       return;
     }
-    versionList.innerHTML = '<div class="text-muted small">Loading versions…</div>';
+    setVersionListNote('Loading versions…');
     try {
       const response = await fetch(endpoint);
       let data = {};
@@ -2121,7 +2143,7 @@
       versionsCache.set(endpoint, entries);
       renderVersionEntries(entries, row);
     } catch (error) {
-      versionList.innerHTML = `<p class="text-danger small mb-0">${(error && error.message) || 'Unable to load versions'}</p>`;
+      setVersionListNote((error && error.message) || 'Unable to load versions', true);
     }
   }
 
@@ -2139,7 +2161,7 @@
       try {
         if (submitBtn) {
           submitBtn.disabled = true;
-          submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Deleting...';
+          submitBtn.innerHTML = '<span class="ui-spinner" role="status"></span>Deleting...';
         }
         const formData = new FormData(deleteObjectForm);
         const csrfToken = formData.get('csrf_token') || (window.getCsrfToken ? window.getCsrfToken() : '');
@@ -2209,7 +2231,7 @@
     if (!previewPlaceholder) return;
     setAudioStage(false);
     previewIframe?.classList.add('is-hidden');
-    previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="fw-semibold mb-1">Preview unavailable</div><div class="small text-muted">Download to view</div></div>';
+    previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="ob-preview-title">Preview unavailable</div><div class="ui-hint">Download to view</div></div>';
     previewPlaceholder.classList.remove('is-hidden');
   };
 
@@ -2294,7 +2316,7 @@
         .then((r) => {
           if (activeRow !== currentRow) return;
           if (!r.ok) {
-            previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+            previewPlaceholder.innerHTML = '<div class="ui-hint">Failed to load preview</div>';
             handlePreviewError();
             return;
           }
@@ -2311,13 +2333,13 @@
           previewImage.onerror = () => {
             if (activeRow !== currentRow) { URL.revokeObjectURL(url); return; }
             URL.revokeObjectURL(url);
-            previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+            previewPlaceholder.innerHTML = '<div class="ui-hint">Failed to load preview</div>';
           };
           previewImage.src = url;
         })
         .catch(() => {
           if (activeRow !== currentRow) return;
-          previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          previewPlaceholder.innerHTML = '<div class="ui-hint">Failed to load preview</div>';
           handlePreviewError();
         });
     } else if (previewUrl && lower.match(/\.(mp4|webm|ogv|mov|avi|mkv)$/)) {
@@ -2326,7 +2348,7 @@
         if (activeRow !== currentRow) return;
         previewVideo.classList.add('is-hidden');
         previewPlaceholder.classList.remove('is-hidden');
-        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+        previewPlaceholder.innerHTML = '<div class="ui-hint">Failed to load preview</div>';
         handlePreviewError();
       };
       previewVideo.src = previewUrl;
@@ -2339,7 +2361,7 @@
         setAudioStage(false);
         previewAudio.classList.add('is-hidden');
         previewPlaceholder.classList.remove('is-hidden');
-        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+        previewPlaceholder.innerHTML = '<div class="ui-hint">Failed to load preview</div>';
         handlePreviewError();
       };
       previewAudio.src = previewUrl;
@@ -2398,7 +2420,7 @@
           if (activeRow !== currentRow) return;
           previewText.classList.add('is-hidden');
           previewPlaceholder.classList.remove('is-hidden');
-          previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          previewPlaceholder.innerHTML = '<div class="ui-hint">Failed to load preview</div>';
           handlePreviewError();
         });
     }
@@ -2650,7 +2672,7 @@
 
   refreshVersionsButton?.addEventListener('click', () => {
     if (!activeRow) {
-      versionList.innerHTML = '<p class="text-muted small mb-0">Select an object to view versions.</p>';
+      setVersionListNote('Select an object to view versions.');
       return;
     }
     const endpoint = activeRow.dataset.versionsEndpoint;
@@ -3798,9 +3820,9 @@
     if (!previewTagsInputs) return;
     previewTagsInputs.innerHTML = currentObjectTags.map((t, idx) => `
       <div class="tag-editor-row">
-        <input type="text" class="form-control form-control-sm" placeholder="e.g. Environment" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
-        <input type="text" class="form-control form-control-sm" placeholder="e.g. Production" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
-        <button class="tag-editor-delete" type="button" onclick="removeTagRow(${idx})">
+        <input type="text" class="ui-input" aria-label="Tag key" placeholder="e.g. Environment" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
+        <input type="text" class="ui-input" aria-label="Tag value" placeholder="e.g. Production" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
+        <button class="tag-editor-delete" type="button" aria-label="Remove tag" onclick="removeTagRow(${idx})">
           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
         </button>
       </div>
@@ -4064,7 +4086,7 @@
       '<path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>' +
       '</svg>';
     badge.innerHTML = icon + (enabled ? 'Versioning On' : suspended ? 'Versioning Suspended' : 'Versioning Off');
-    versioningEnabled = enabled;
+    setVersioningEnabled(enabled);
   }
 
   function interceptForm(formId, options) {
@@ -4170,7 +4192,7 @@
           archivedObjectsChip = document.createElement('button');
           archivedObjectsChip.type = 'button';
           archivedObjectsChip.id = 'archived-objects-chip';
-          archivedObjectsChip.className = 'btn btn-link btn-sm py-0 px-1 text-decoration-none is-hidden';
+          archivedObjectsChip.className = 'ui-btn ui-btn-sm ui-btn-ghost is-hidden';
           document.getElementById('pagination-controls')?.appendChild(archivedObjectsChip);
           archivedObjectsChip.addEventListener('click', function() {
             if (archivedObjectsChip.dataset.state === 'error') {
