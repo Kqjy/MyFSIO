@@ -347,11 +347,11 @@ fn render_cluster_with_sites() {
         .find("js/ui-core.js")
         .expect("base template must load ui-core.js");
     let inline_idx = rendered
-        .find("window.MyFSIO.formatBytes")
-        .expect("cluster inline script must be present");
+        .find("js/cluster.js")
+        .expect("cluster script must be loaded");
     assert!(
         core_idx < inline_idx,
-        "cluster inline script must run after ui-core.js"
+        "cluster script must run after ui-core.js"
     );
     assert!(rendered.contains("1.0 MiB"), "{}", rendered);
     assert!(rendered.contains("95.4 MiB"), "{}", rendered);
@@ -405,7 +405,7 @@ fn render_website_domains_with_mappings() {
     ctx.insert("website_port", &5000u16);
     let rendered = render_to_string_or_panic("website_domains.html", &ctx);
     assert!(rendered.contains("id=\"btnCheckAllDns\""));
-    assert!(rendered.contains("class=\"dns-status-icon text-muted\""));
+    assert!(rendered.contains("dns-status-text"));
     assert!(rendered.contains("/ui/website-domains/__DOMAIN__/dns-check"));
     assert!(rendered.contains("Only buckets with website hosting enabled are listed."));
 }
