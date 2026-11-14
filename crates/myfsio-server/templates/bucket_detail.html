@@ -976,6 +976,116 @@
       </div>
     </div>
     {% endif %}
+  </div>
+</div>
+
+<dialog class="ui-dialog" id="deletePolicyModal" aria-labelledby="deletePolicyTitle">
+  <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" id="deletePolicyForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <input type="hidden" name="mode" value="delete" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="deletePolicyTitle">Delete bucket policy</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="ui-dialog-body">
+      <div class="ob-notice" role="alert">Removing the bucket policy will revert access control to IAM-only. Users relying on policy-based permissions may lose access.</div>
+      <p class="ui-hint">Are you sure you want to delete the bucket policy for <strong>{{ bucket_name }}</strong>?</p>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button type="submit" class="ui-btn ui-btn-danger">Delete policy</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="ui-dialog" id="uploadModal" aria-labelledby="uploadTitle">
+  <form
+    method="post"
+    action="{{ url_for(endpoint="ui.upload_object", bucket_name=bucket_name) }}"
+    enctype="multipart/form-data"
+    data-upload-form
+    data-multipart-init-url="{{ url_for(endpoint="ui.initiate_multipart_upload", bucket_name=bucket_name) }}"
+    data-multipart-part-template="{{ url_for(endpoint="ui.upload_multipart_part", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
+    data-multipart-complete-template="{{ url_for(endpoint="ui.complete_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
+    data-multipart-abort-template="{{ url_for(endpoint="ui.abort_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="uploadTitle">Upload objects</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="ui-dialog-body">
+      <p class="ui-muted">Upload files to <code id="uploadDestination"></code>. Files of 8&nbsp;MB or more are sent as multipart uploads.</p>
+      <input class="ob-upload-input" type="file" name="object" id="uploadFileInput" multiple tabindex="-1" aria-hidden="true" />
+      <div class="ob-dropzone" data-dropzone role="button" tabindex="0" aria-label="Choose files to upload">
+        <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
+        <strong>Drop files here or click to browse</strong>
+        <span class="ui-hint" data-dropzone-label>No files selected</span>
+      </div>
+      <button class="ui-btn ui-btn-ghost ui-btn-sm ob-upload-advanced" type="button" data-ui-collapse="#uploadAdvancedOptions">Advanced options</button>
+      <div id="uploadAdvancedOptions" hidden>
+        <div class="ui-field" id="singleFileOptions">
+          <label class="ui-label" for="uploadObjectKey">Object key</label>
+          <input class="ui-input ui-mono" type="text" name="object_key" id="uploadObjectKey" placeholder="folder/document.pdf" />
+          <div class="ui-hint">Leave blank to keep the original filename. Applies to a single file only.</div>
+        </div>
+        <div class="ui-field">
+          <label class="ui-label" for="uploadKeyPrefix">Key prefix</label>
+          <input class="ui-input ui-mono" type="text" name="key_prefix" id="uploadKeyPrefix" placeholder="uploads/2024/" />
+          <div class="ui-hint">Added in front of every uploaded file name, for example <code>folder/subfolder/</code>.</div>
+        </div>
+        <div class="ui-field">
+          <label class="ui-label" for="uploadMetadata">Metadata (JSON)</label>
+          <textarea class="ui-input ui-mono" name="metadata" id="uploadMetadata" rows="3" placeholder='{"project":"demo"}'></textarea>
+          <div class="ui-hint">Custom key/value pairs stored with each object.</div>
+        </div>
+      </div>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button class="ui-btn ui-btn-primary" type="submit" id="uploadSubmitBtn">
+        <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>
+        <span id="uploadBtnText">Upload</span>
+      </button>
+    </div>
+  </form>
+</dialog>
+
+<section class="ob-upload-tray" id="uploadTray" aria-label="Uploads" hidden>
+  <div class="ob-upload-head">
+    <div class="ob-upload-heading">
+      <strong id="uploadTrayTitle" aria-live="polite">Uploading</strong>
+      <span class="ui-hint" id="uploadTraySummary"></span>
+    </div>
+    <button type="button" class="icon-btn" id="uploadTrayToggle" aria-expanded="true" aria-label="Hide uploads"><svg class="ic ob-upload-caret" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+    <button type="button" class="icon-btn" id="uploadTrayClose" aria-label="Cancel uploads"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="ui-bar ob-upload-total"><i id="uploadTrayBar"></i></div>
+  <div class="ob-upload-list" id="uploadTrayList"></div>
+</section>
+
+{% if can_delete_bucket %}
+<dialog class="ui-dialog" id="deleteBucketModal" aria-labelledby="deleteBucketTitle">
+  <form method="post" action="{{ url_for(endpoint="ui.delete_bucket", bucket_name=bucket_name) }}" id="deleteBucketForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+    <div class="ui-dialog-head">
+      <h2 class="ui-dialog-title" id="deleteBucketTitle">Delete bucket</h2>
+      <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="ui-dialog-body">
+      <div class="ob-notice ob-notice-danger" role="alert">This action cannot be undone. The bucket must be empty.</div>
+      <div class="ui-field">
+        <label class="ui-label" for="deleteBucketConfirmName">Type <code>{{ bucket_name }}</code> to confirm</label>
+        <input type="text" class="ui-input" id="deleteBucketConfirmName" data-expected="{{ bucket_name }}" autocomplete="off" spellcheck="false" />
+      </div>
+    </div>
+    <div class="ui-dialog-foot">
+      <button type="button" class="ui-btn" data-ui-close>Cancel</button>
+      <button class="ui-btn ui-btn-danger" type="submit" id="deleteBucketSubmit" disabled>Delete bucket</button>
+    </div>
+  </form>
+</dialog>
+{% endif %}
 
 <dialog class="ui-dialog" id="messageModal" aria-labelledby="messageModalTitle">
   <div class="ui-dialog-head">
