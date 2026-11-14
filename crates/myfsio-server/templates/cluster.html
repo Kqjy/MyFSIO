@@ -36,7 +36,7 @@
 
 <div class="cl-sites" id="cluster-sites-row">
   {% for site in cluster_sites %}
-  <section class="ui-card ad-card-pad site-card{% if not site.online %} is-offline{% endif %}" data-site-id="{{ site.site_id }}">
+  <section class="ui-card adm-card-pad site-card{% if not site.online %} is-offline{% endif %}" data-site-id="{{ site.site_id }}">
     <div class="ui-badges">
       <span class="ui-badge ui-badge-ok site-status-online"{% if not site.online %} hidden{% endif %}>Online</span>
       <span class="ui-badge ui-badge-bad site-status-offline"{% if site.online %} hidden{% endif %}>Offline</span>
@@ -165,7 +165,7 @@
 <section class="ui-card cl-audit" aria-labelledby="clusterAuditTitle">
   <div class="ui-toolbar">
     <div>
-      <h2 class="ad-card-title cl-audit-title" id="clusterAuditTitle">Audit activity</h2>
+      <h2 class="adm-card-title cl-audit-title" id="clusterAuditTitle">Audit activity</h2>
       <div class="ui-muted cl-site-meta">Recent cluster admin actions. Each entry pairs origin and target by <code>correlation_id</code>.</div>
     </div>
     {% if audit_entries | length > 0 %}
@@ -173,8 +173,8 @@
     {% endif %}
   </div>
   {% if not audit_enabled %}
-  <div class="ad-card-pad">
-    <div class="ad-note ad-note-warn" role="alert">Audit log is disabled. Set <code>AUDIT_LOG_ENABLED=true</code> to start recording cluster-relayed actions.</div>
+  <div class="adm-card-pad">
+    <div class="adm-note adm-note-warn" role="alert">Audit log is disabled. Set <code>AUDIT_LOG_ENABLED=true</code> to start recording cluster-relayed actions.</div>
   </div>
   {% elif audit_entries | length == 0 %}
   <div class="ui-empty">
@@ -199,7 +199,7 @@
           <td class="ui-muted">{{ e.ts | format_datetime }}</td>
           <td class="ui-hide-m"><span class="ui-mono">{{ e.origin_site_id | default(value="") }}</span></td>
           <td class="ui-hide-m">{{ e.admin_user_id | default(value="") }}</td>
-          <td class="ad-wrap"><span class="ui-mono">{{ e.method }}</span> {{ e.path }}</td>
+          <td class="adm-wrap"><span class="ui-mono">{{ e.method }}</span> {{ e.path }}</td>
           <td class="ui-hide-m">
             {% if e.target == "outbound" %}
             <span class="ui-badge">Outbound</span>

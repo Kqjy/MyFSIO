@@ -15,7 +15,7 @@
 </div>
 
 {% if iam_locked %}
-<div class="ad-note ad-note-warn ad-banner" role="alert">
+<div class="adm-note adm-note-warn adm-banner" role="alert">
   <p><strong>Administrator permissions required</strong></p>
   <p>You need the <code>iam:list_users</code> action to edit users or policies. {% if locked_reason %}{{ locked_reason }}{% else %}Sign in with an admin identity to continue.{% endif %}</p>
 </div>
@@ -29,19 +29,19 @@
 {% else %}
 
 {% if disclosed_secret %}
-<div class="ui-card ad-card-pad ad-banner" role="alert">
-  <h2 class="ad-card-title">{% if disclosed_secret.operation == "rotate" %}Secret rotated for{% else %}New user created:{% endif %} <code>{{ disclosed_secret.access_key }}</code></h2>
-  <p class="ui-hint ad-field-note">These credentials are only shown once. Copy them now and store them securely.</p>
+<div class="ui-card adm-card-pad adm-banner" role="alert">
+  <h2 class="adm-card-title">{% if disclosed_secret.operation == "rotate" %}Secret rotated for{% else %}New user created:{% endif %} <code>{{ disclosed_secret.access_key }}</code></h2>
+  <p class="ui-hint adm-field-note">These credentials are only shown once. Copy them now and store them securely.</p>
   <div class="ui-field">
     <label class="ui-label" for="disclosedAccessKeyValue">Access key</label>
-    <div class="ad-input-row">
+    <div class="adm-input-row">
       <input class="ui-input ui-mono" type="text" value="{{ disclosed_secret.access_key }}" readonly id="disclosedAccessKeyValue">
       <button class="ui-btn" type="button" data-copy-input="disclosedAccessKeyValue">Copy</button>
     </div>
   </div>
   <div class="ui-field">
     <label class="ui-label" for="disclosedSecretValue">Secret key</label>
-    <div class="ad-input-row">
+    <div class="adm-input-row">
       <input class="ui-input ui-mono" type="text" value="{{ disclosed_secret.secret_key }}" readonly id="disclosedSecretValue">
       <button class="ui-btn" type="button" data-copy-input="disclosedSecretValue">Copy</button>
     </div>
@@ -49,7 +49,7 @@
 </div>
 {% endif %}
 
-<div class="ui-card ad-banner" id="configPreview" hidden>
+<div class="ui-card adm-banner" id="configPreview" hidden>
   <div class="st-cardhead">
     <h2>Configuration preview</h2>
     <span class="ui-badge">{{ config_summary.user_count }} users</span>
@@ -59,11 +59,11 @@
   <p class="ui-muted st-cardnote ak-cardnote-end">Secrets are masked above. IAM config is encrypted at rest.</p>
 </div>
 
-<div class="ad-split ad-split-end ak-split">
+<div class="adm-split adm-split-end ak-split">
   <div class="ui-card">
     <div id="iamTableWrap"{% if not users %} hidden{% endif %}>
       <div class="ui-toolbar">
-        <div class="ad-filter">
+        <div class="adm-filter">
           <input type="search" class="ui-input" id="iam-user-search" placeholder="Filter users by name or access key" aria-label="Filter users" autocomplete="off">
         </div>
       </div>
@@ -75,7 +75,7 @@
               <th scope="col" class="ui-hide-m">Access key</th>
               <th scope="col">Access</th>
               <th scope="col" class="ui-hide-m">Key expires</th>
-              <th scope="col"><span class="ad-sr">Actions</span></th>
+              <th scope="col"><span class="adm-sr">Actions</span></th>
             </tr>
           </thead>
           <tbody id="iamUsersBody">
@@ -88,7 +88,7 @@
               <td><span class="ui-badge{% if user.is_admin %} ui-badge-bad{% else %} ui-badge-accent{% endif %} ak-user-access">{% if user.is_admin %}Admin{% else %}{{ user.policies|length }} statement{% if user.policies|length != 1 %}s{% endif %}{% endif %}</span></td>
               <td class="ui-hide-m ak-user-expiry">{% if user.is_expired %}<span class="ui-badge ui-badge-bad">Expired</span>{% elif user.is_expiring_soon %}<span class="ui-badge ui-badge-warn">Expiring soon</span>{% elif user.expires_at %}<span class="ui-muted" data-expires-at="{{ user.expires_at }}">{{ user.expires_at | truncate(length=10, end="") }}</span>{% else %}<span class="ui-muted">Never</span>{% endif %}</td>
               <td>
-                <div class="ad-row-actions">
+                <div class="adm-row-actions">
                   <button type="button" class="ui-btn ui-btn-sm" data-user-manage>Manage</button>
                 </div>
               </td>
@@ -109,11 +109,11 @@
   </div>
 
   <div>
-    <div class="ui-card ad-card-pad" id="userPanel" hidden>
+    <div class="ui-card adm-card-pad" id="userPanel" hidden>
       <div class="ak-panel-head">
         <span class="ak-avatar ak-avatar-lg" id="panelAvatar" aria-hidden="true"></span>
         <div class="ak-panel-id">
-          <h2 class="ad-card-title" id="panelName"></h2>
+          <h2 class="adm-card-title" id="panelName"></h2>
           <button type="button" class="st-endpoint ui-mono ui-muted" id="panelKey" data-ui-tip="Copy access key"></button>
         </div>
         <span class="ui-badge" id="panelRole"></span>
@@ -139,14 +139,14 @@
                 <th scope="col">Read</th>
                 <th scope="col">Write</th>
                 <th scope="col">Delete</th>
-                <th scope="col"><span class="ad-sr">Remove</span></th>
+                <th scope="col"><span class="adm-sr">Remove</span></th>
               </tr>
             </thead>
             <tbody id="permGridBody"></tbody>
           </table>
         </div>
         <p class="ui-hint" id="permGridEmpty" hidden>No permissions yet. This user cannot perform any S3 action until a bucket is added.</p>
-        <div class="ad-input-row ak-add">
+        <div class="adm-input-row ak-add">
           <input type="text" class="ui-input" id="permGridBucket" list="permGridBuckets" placeholder="Bucket name, or * for all" aria-label="Bucket to add" autocomplete="off">
           <datalist id="permGridBuckets">
             <option value="*">All buckets</option>
@@ -155,7 +155,7 @@
           <button type="button" class="ui-btn" id="permGridAdd">Add bucket</button>
         </div>
         <p class="ui-hint" id="permGridNote" hidden>Rows marked Full access, Deny, prefix or conditional can only be changed or removed as JSON.</p>
-        <div class="ad-foot-actions ak-foot">
+        <div class="adm-foot-actions ak-foot">
           <button type="button" class="ui-btn" id="permGridEditJson" data-user-action="policies">Edit as JSON</button>
           <button type="submit" class="ui-btn ui-btn-primary" id="permGridSave" disabled>Save permissions</button>
         </div>
@@ -180,7 +180,7 @@
     <td><span class="ui-badge ak-user-access"></span></td>
     <td class="ui-hide-m ak-user-expiry"></td>
     <td>
-      <div class="ad-row-actions">
+      <div class="adm-row-actions">
         <button type="button" class="ui-btn ui-btn-sm" data-user-manage>Manage</button>
       </div>
     </td>
@@ -188,7 +188,7 @@
 </template>
 
 <dialog class="ui-dialog" id="createUserModal" aria-labelledby="createUserTitle">
-  <form method="post" action="{{ url_for(endpoint="ui.create_iam_user") }}" id="createUserForm" class="ad-dialog-form">
+  <form method="post" action="{{ url_for(endpoint="ui.create_iam_user") }}" id="createUserForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="createUserTitle">Create user</h2>
@@ -201,14 +201,14 @@
       </div>
       <div class="ui-field">
         <label class="ui-label" for="createUserAccessKey">Access key <span class="ui-faint">optional</span></label>
-        <div class="ad-input-row">
+        <div class="adm-input-row">
           <input class="ui-input ui-mono" type="text" name="access_key" id="createUserAccessKey" placeholder="Leave blank to auto-generate" autocomplete="off">
           <button class="ui-btn" type="button" id="generateAccessKeyBtn">Generate</button>
         </div>
       </div>
       <div class="ui-field">
         <label class="ui-label" for="createUserSecretKey">Secret key <span class="ui-faint">optional</span></label>
-        <div class="ad-input-row">
+        <div class="adm-input-row">
           <input class="ui-input ui-mono" type="text" name="secret_key" id="createUserSecretKey" placeholder="Leave blank to auto-generate" autocomplete="off" aria-describedby="createUserSecretHint">
           <button class="ui-btn" type="button" id="generateSecretKeyBtn">Generate</button>
         </div>
@@ -248,17 +248,17 @@
     <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <div class="ui-dialog-body">
-    <div class="ad-note ad-note-warn ad-field-note">These credentials are only shown once. Copy them now and store them securely.</div>
+    <div class="adm-note adm-note-warn adm-field-note">These credentials are only shown once. Copy them now and store them securely.</div>
     <div class="ui-field">
       <label class="ui-label" for="newUserAccessKey">Access key</label>
-      <div class="ad-input-row">
+      <div class="adm-input-row">
         <input class="ui-input ui-mono" type="text" readonly id="newUserAccessKey">
         <button class="ui-btn" type="button" data-copy-input="newUserAccessKey">Copy</button>
       </div>
     </div>
     <div class="ui-field">
       <label class="ui-label" for="newUserSecret">Secret key</label>
-      <div class="ad-input-row">
+      <div class="adm-input-row">
         <input class="ui-input ui-mono" type="text" readonly id="newUserSecret">
         <button class="ui-btn" type="button" data-copy-input="newUserSecret">Copy</button>
       </div>
@@ -270,7 +270,7 @@
 </dialog>
 
 <dialog class="ui-dialog st-dialog-wide" id="policyEditorModal" aria-labelledby="policyEditorTitle">
-  <form method="post" id="policyEditorForm" class="ad-dialog-form">
+  <form method="post" id="policyEditorForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     <input type="hidden" id="policyEditorUserId" name="user_id">
     <div class="ui-dialog-head">
@@ -278,7 +278,7 @@
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead ui-muted">Editing policies for <code id="policyEditorUserLabel"></code></p>
+      <p class="adm-lead ui-muted">Editing policies for <code id="policyEditorUserLabel"></code></p>
       <div class="ui-field">
         <label class="ui-label" for="policyEditorDocument">Inline policies (JSON array)</label>
         <textarea class="ui-input ui-mono ak-json" id="policyEditorDocument" name="policies" rows="14" spellcheck="false" aria-describedby="policyEditorHint"></textarea>
@@ -301,7 +301,7 @@
 </dialog>
 
 <dialog class="ui-dialog" id="editUserModal" aria-labelledby="editUserTitle">
-  <form method="post" id="editUserForm" class="ad-dialog-form">
+  <form method="post" id="editUserForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="editUserTitle">Rename user</h2>
@@ -321,15 +321,15 @@
 </dialog>
 
 <dialog class="ui-dialog" id="deleteUserModal" aria-labelledby="deleteUserTitle">
-  <form method="post" id="deleteUserForm" class="ad-dialog-form">
+  <form method="post" id="deleteUserForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="deleteUserTitle">Delete user</h2>
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead">Delete user <strong id="deleteUserLabel"></strong>? This cannot be undone.</p>
-      <div class="ad-note ad-note-bad" id="deleteSelfWarning" hidden>You are deleting your own account. You will be signed out immediately.</div>
+      <p class="adm-lead">Delete user <strong id="deleteUserLabel"></strong>? This cannot be undone.</p>
+      <div class="adm-note adm-note-bad" id="deleteSelfWarning" hidden>You are deleting your own account. You will be signed out immediately.</div>
     </div>
     <div class="ui-dialog-foot">
       <button type="button" class="ui-btn" data-ui-close>Cancel</button>
@@ -344,14 +344,14 @@
     <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <div class="ui-dialog-body" id="rotateSecretConfirm">
-    <p class="ad-lead">Rotate the secret key for <strong id="rotateUserLabel"></strong>?</p>
-    <div class="ad-note ad-note-warn">The old secret key stops working immediately. Update any applications using it.</div>
+    <p class="adm-lead">Rotate the secret key for <strong id="rotateUserLabel"></strong>?</p>
+    <div class="adm-note adm-note-warn">The old secret key stops working immediately. Update any applications using it.</div>
   </div>
   <div class="ui-dialog-body" id="rotateSecretResult" hidden>
-    <div class="ad-note ad-note-ok ad-field-note" role="status">Secret rotated. Copy it now; it will not be shown again.</div>
+    <div class="adm-note adm-note-ok adm-field-note" role="status">Secret rotated. Copy it now; it will not be shown again.</div>
     <div class="ui-field">
       <label class="ui-label" for="newSecretKey">New secret key</label>
-      <div class="ad-input-row">
+      <div class="adm-input-row">
         <input type="text" class="ui-input ui-mono" id="newSecretKey" readonly>
         <button class="ui-btn" type="button" data-copy-input="newSecretKey">Copy</button>
       </div>
@@ -365,14 +365,14 @@
 </dialog>
 
 <dialog class="ui-dialog" id="expiryModal" aria-labelledby="expiryTitle">
-  <form method="post" id="expiryForm" class="ad-dialog-form">
+  <form method="post" id="expiryForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}">
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="expiryTitle">Set expiry</h2>
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead ui-muted">Set expiration for <code id="expiryUserLabel"></code></p>
+      <p class="adm-lead ui-muted">Set expiration for <code id="expiryUserLabel"></code></p>
       <div class="ui-field">
         <label class="ui-label" for="expiryDateInput">Expires at</label>
         <input class="ui-input" type="datetime-local" name="expires_at" id="expiryDateInput" aria-describedby="expiryHint">

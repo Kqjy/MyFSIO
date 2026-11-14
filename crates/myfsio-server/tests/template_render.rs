@@ -628,3 +628,49 @@ fn render_login() {
     let ctx = base_ctx();
     render_or_panic("login.html", &ctx);
 }
+
+fn ad_blocker_bait_names(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let is_name_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    text.match_indices("ad-")
+        .filter(|(start, _)| *start == 0 || !is_name_byte(bytes[*start - 1]))
+        .filter(|(start, _)| {
+            bytes
+                .get(*start + 3)
+                .is_some_and(|next| next.is_ascii_lowercase())
+        })
+        .map(|(start, _)| {
+            let end = bytes[start..]
+                .iter()
+                .position(|b| !is_name_byte(*b))
+                .map_or(bytes.len(), |offset| start + offset);
+            text[start..end].to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn console_assets_avoid_class_names_hidden_by_ad_blockers() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for (dir, extension) in [
+        ("templates", "html"),
+        ("static/js", "js"),
+        ("static/css", "css"),
+    ] {
+        for entry in std::fs::read_dir(root.join(dir)).expect("asset directory") {
+            let path = entry.expect("asset entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some(extension) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("asset text");
+            for name in ad_blocker_bait_names(&text) {
+                offenders.push(format!("{}: {}", path.display(), name));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "names starting with ad- are hidden by ad blockers: {offenders:?}"
+    );
+}

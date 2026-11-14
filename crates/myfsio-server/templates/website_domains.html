@@ -16,19 +16,19 @@
 </div>
 
 {% if not website_hosting_enabled %}
-<div class="ad-note ad-note-warn ad-banner" role="alert">
+<div class="adm-note adm-note-warn adm-banner" role="alert">
   <strong>Website hosting is disabled.</strong> Domain mappings cannot be created or served.
   Set <code>WEBSITE_HOSTING_ENABLED=true</code> and restart the server to enable this feature.
 </div>
 {% endif %}
 
-<div class="ad-split ad-split-end">
+<div class="adm-split adm-split-end">
   <section class="ui-card" aria-labelledby="mappingsTitle">
-    <h2 class="ad-sr" id="mappingsTitle">Active mappings</h2>
+    <h2 class="adm-sr" id="mappingsTitle">Active mappings</h2>
     {% if mappings %}
     {% if mappings|length > 3 %}
     <div class="ui-toolbar">
-      <div class="ad-filter">
+      <div class="adm-filter">
         <input type="search" class="ui-input" id="domainSearch" placeholder="Filter by domain or bucket" aria-label="Filter mappings" autocomplete="off">
       </div>
     </div>
@@ -38,25 +38,25 @@
         <thead>
           <tr>
             <th scope="col">Domain</th>
-            <th scope="col" class="ui-hide-m ad-domain-col-bucket">Bucket</th>
-            <th scope="col" class="ad-domain-col-dns">DNS</th>
-            <th scope="col" class="ad-domain-col-actions"><span class="ad-sr">Actions</span></th>
+            <th scope="col" class="ui-hide-m adm-domain-col-bucket">Bucket</th>
+            <th scope="col" class="adm-domain-col-dns">DNS</th>
+            <th scope="col" class="adm-domain-col-actions"><span class="adm-sr">Actions</span></th>
           </tr>
         </thead>
         <tbody>
           {% for m in mappings %}
           <tr data-domain="{{ m.domain }}" data-bucket="{{ m.bucket }}">
             <td>
-              <div class="ui-name"><span class="ui-fileicon is-accent"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg></span><span class="ui-mono ad-wrap">{{ m.domain }}</span></div>
-              <div class="ui-muted ad-sub ui-show-m">{{ m.bucket }}</div>
-              <div class="ad-sub dns-status-text" hidden></div>
+              <div class="ui-name"><span class="ui-fileicon is-accent"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg></span><span class="ui-mono adm-wrap">{{ m.domain }}</span></div>
+              <div class="ui-muted adm-sub ui-show-m">{{ m.bucket }}</div>
+              <div class="adm-sub dns-status-text" hidden></div>
             </td>
             <td class="ui-hide-m"><span class="ui-badge ui-badge-accent">{{ m.bucket }}</span></td>
             <td>
-              <button type="button" class="ui-badge ad-badge-btn dns-check-btn" data-domain="{{ m.domain }}" data-ui-tip="DNS not checked yet. Click to check.">Not checked</button>
+              <button type="button" class="ui-badge adm-badge-btn dns-check-btn" data-domain="{{ m.domain }}" data-ui-tip="DNS not checked yet. Click to check.">Not checked</button>
             </td>
             <td>
-              <div class="ad-row-actions">
+              <div class="adm-row-actions">
                 <button type="button" class="ui-btn ui-btn-sm" data-domain-action="edit">Edit</button>
                 <button type="button" class="ui-btn ui-btn-sm ui-btn-danger" data-domain-action="delete">Delete</button>
               </div>
@@ -78,9 +78,9 @@
     {% endif %}
   </section>
 
-  <div class="ad-stack">
-    <section class="ui-card ad-card-pad" aria-labelledby="addMappingTitle">
-      <h2 class="ad-card-title" id="addMappingTitle">Add domain mapping</h2>
+  <div class="adm-stack">
+    <section class="ui-card adm-card-pad" aria-labelledby="addMappingTitle">
+      <h2 class="adm-card-title" id="addMappingTitle">Add domain mapping</h2>
       {% if not website_hosting_enabled %}
       <p class="ui-hint">Set <code>WEBSITE_HOSTING_ENABLED=true</code> to add domain mappings.</p>
       {% else %}
@@ -96,13 +96,13 @@
                  {% if not buckets %}disabled{% endif %}>
           <div class="ui-hint" id="domainHint">Hostname only, without <code>http://</code> or a trailing slash.</div>
         </div>
-        <div id="domainPreview" class="ad-note ad-field-note" hidden>
+        <div id="domainPreview" class="adm-note adm-field-note" hidden>
           Will be served at <code id="domainPreviewUrl"></code>
         </div>
         <div class="ui-field">
           <label class="ui-label" for="bucket">Bucket</label>
           {% if buckets %}
-          <select class="ui-select ad-select-full" id="bucket" name="bucket" required aria-describedby="bucketHint">
+          <select class="ui-select adm-select-full" id="bucket" name="bucket" required aria-describedby="bucketHint">
             <option value="" selected disabled>Select a bucket</option>
             {% for b in buckets %}
             <option value="{{ b }}">{{ b }}</option>
@@ -110,7 +110,7 @@
           </select>
           <div class="ui-hint" id="bucketHint">Only buckets with website hosting enabled are listed.</div>
           {% else %}
-          <div class="ad-note ad-note-warn">
+          <div class="adm-note adm-note-warn">
             {% if has_any_buckets %}
             No bucket has website hosting enabled yet. Turn it on from a bucket's <strong>Properties</strong> tab, then map a domain here.
             {% else %}
@@ -119,14 +119,14 @@
           </div>
           {% endif %}
         </div>
-        <button type="submit" class="ui-btn ui-btn-primary ad-btn-block" id="addMappingBtn" {% if not buckets %}disabled{% endif %}>Add mapping</button>
+        <button type="submit" class="ui-btn ui-btn-primary adm-btn-block" id="addMappingBtn" {% if not buckets %}disabled{% endif %}>Add mapping</button>
       </form>
       {% endif %}
     </section>
 
-    <section class="ui-card ad-card-pad" aria-labelledby="howItWorksTitle">
-      <h2 class="ad-card-title" id="howItWorksTitle">How it works</h2>
-      <ol class="ad-steps">
+    <section class="ui-card adm-card-pad" aria-labelledby="howItWorksTitle">
+      <h2 class="adm-card-title" id="howItWorksTitle">How it works</h2>
+      <ol class="adm-steps">
         <li>Enable website hosting on a bucket (Properties tab).</li>
         <li>Create a domain mapping here.</li>
         <li>Point your DNS (A/CNAME) to this server.</li>
@@ -137,7 +137,7 @@
 </div>
 
 <dialog class="ui-dialog" id="editDomainDialog" aria-labelledby="editDomainTitle">
-  <form method="POST" id="editDomainForm" class="ad-dialog-form">
+  <form method="POST" id="editDomainForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="editDomainTitle">Edit domain mapping</h2>
@@ -151,14 +151,14 @@
       <div class="ui-field">
         <label class="ui-label" for="editBucket">Bucket</label>
         {% if buckets %}
-        <select class="ui-select ad-select-full" id="editBucket" name="bucket" required>
+        <select class="ui-select adm-select-full" id="editBucket" name="bucket" required>
           {% for b in buckets %}
           <option value="{{ b }}">{{ b }}</option>
           {% endfor %}
         </select>
         <div class="ui-hint">Only buckets with website hosting enabled are listed.</div>
         {% else %}
-        <div class="ad-note ad-note-warn">
+        <div class="adm-note adm-note-warn">
           No bucket has website hosting enabled. Turn it on from a bucket's <strong>Properties</strong> tab before reassigning this domain.
         </div>
         {% endif %}
@@ -172,15 +172,15 @@
 </dialog>
 
 <dialog class="ui-dialog" id="deleteDomainDialog" aria-labelledby="deleteDomainTitle">
-  <form method="POST" id="deleteDomainForm" class="ad-dialog-form">
+  <form method="POST" id="deleteDomainForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="deleteDomainTitle">Delete domain mapping</h2>
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead">Delete the mapping for <strong class="ui-mono" id="deleteDomainName"></strong>, which points to bucket <strong id="deleteBucketName"></strong>?</p>
-      <div class="ad-note ad-note-warn">This domain will stop serving website content immediately.</div>
+      <p class="adm-lead">Delete the mapping for <strong class="ui-mono" id="deleteDomainName"></strong>, which points to bucket <strong id="deleteBucketName"></strong>?</p>
+      <div class="adm-note adm-note-warn">This domain will stop serving website content immediately.</div>
     </div>
     <div class="ui-dialog-foot">
       <button type="button" class="ui-btn" data-ui-close>Cancel</button>

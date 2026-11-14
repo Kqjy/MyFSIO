@@ -167,8 +167,8 @@
     }
 
     function note(kind, title, lines) {
-        var box = el('div', 'ad-note' + (kind ? ' ad-note-' + kind : ''));
-        if (title) box.appendChild(el('p', 'ad-note-strong', title));
+        var box = el('div', 'adm-note' + (kind ? ' adm-note-' + kind : ''));
+        if (title) box.appendChild(el('p', 'adm-note-strong', title));
         if (lines && lines.length) {
             var list = el('ul', 'st-issues');
             lines.forEach(function(line) {
@@ -189,8 +189,8 @@
 
     function factsCard(title) {
         var card = el('section', 'st-facts-card');
-        card.appendChild(el('h3', 'ad-card-title', title));
-        var list = el('dl', 'ad-facts');
+        card.appendChild(el('h3', 'adm-card-title', title));
+        var list = el('dl', 'adm-facts');
         card.appendChild(list);
         return { card: card, list: list };
     }
@@ -211,7 +211,7 @@
             if (warnings.length > 0) content.appendChild(note('warn', 'Warnings', warnings));
         }
 
-        var grid = el('div', 'ad-grid2 st-facts-grid');
+        var grid = el('div', 'adm-grid2 st-facts-grid');
         var local = factsCard('This site');
         fact(local.list, 'Site ID', data.local_site_id || 'Not configured', data.local_site_id ? '' : 'bad');
         fact(local.list, 'Endpoint', data.local_endpoint || 'Not configured', data.local_endpoint ? '' : 'bad');
@@ -249,8 +249,8 @@
             var body = el('tbody');
             data.local_bidirectional_rules.forEach(function(rule) {
                 var tr = el('tr');
-                tr.appendChild(el('td', 'ad-wrap', rule.bucket_name));
-                tr.appendChild(el('td', 'ad-wrap', rule.target_bucket));
+                tr.appendChild(el('td', 'adm-wrap', rule.bucket_name));
+                tr.appendChild(el('td', 'adm-wrap', rule.target_bucket));
                 var status = el('td');
                 status.appendChild(el('span', 'ui-badge' + (rule.enabled ? ' ui-badge-ok' : ''), rule.enabled ? 'Enabled' : 'Disabled'));
                 tr.appendChild(status);
@@ -262,8 +262,8 @@
         }
 
         if (!data.is_fully_configured) {
-            var fix = el('div', 'ad-note');
-            fix.appendChild(el('p', 'ad-note-strong', 'How to fix'));
+            var fix = el('div', 'adm-note');
+            fix.appendChild(el('p', 'adm-note-strong', 'How to fix'));
             var steps = el('ol');
             [
                 'Ensure this site has a Site ID and Endpoint URL configured',

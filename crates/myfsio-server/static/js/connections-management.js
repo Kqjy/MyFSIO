@@ -24,7 +24,7 @@ window.ConnectionsManagement = (function() {
     var el = byId('connectionTestResult');
     if (!el) return;
     el.hidden = !message;
-    el.className = 'ad-test-result' + (kind ? ' is-' + kind : '');
+    el.className = 'adm-test-result' + (kind ? ' is-' + kind : '');
     el.textContent = message || '';
   }
 

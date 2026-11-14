@@ -63,7 +63,7 @@
           <th scope="col" class="ui-hide-m">Mode</th>
           <th scope="col">Health</th>
           <th scope="col" class="ui-hide-m st-num">Pending</th>
-          <th scope="col"><span class="ad-sr">Actions</span></th>
+          <th scope="col"><span class="adm-sr">Actions</span></th>
         </tr>
       </thead>
       <tbody>
@@ -82,9 +82,9 @@
             data-has-stats="{% if item.has_connection and item.buckets_syncing > 0 %}1{% endif %}">
           <td>
             <div class="ui-name"><span class="ui-fileicon is-accent"><svg class="ic" aria-hidden="true"><use href="#i-sites"/></svg></span><span>{{ peer_label }}</span></div>
-            <div class="ui-muted ad-sub">{% if peer.display_name and peer.display_name != peer.site_id %}<span class="ui-mono">{{ peer.site_id }}</span> · {% endif %}{{ peer.region }} · priority {{ peer.priority }}</div>
+            <div class="ui-muted adm-sub">{% if peer.display_name and peer.display_name != peer.site_id %}<span class="ui-mono">{{ peer.site_id }}</span> · {% endif %}{{ peer.region }} · priority {{ peer.priority }}</div>
             {% if item.last_sync_at %}
-            <div class="ui-muted ad-sub" data-last-sync-at="{{ item.last_sync_at }}">last sync <span class="last-sync-rel">just now</span>{% if item.objects_pulled %} · {{ item.objects_pulled }} pulled{% endif %}</div>
+            <div class="ui-muted adm-sub" data-last-sync-at="{{ item.last_sync_at }}">last sync <span class="last-sync-rel">just now</span>{% if item.objects_pulled %} · {{ item.objects_pulled }} pulled{% endif %}</div>
             {% endif %}
           </td>
           <td class="ui-hide-m">
@@ -94,12 +94,12 @@
             {% if item.has_connection %}
             {% for conn in connections %}{% if conn.id == peer.connection_id %}{{ conn.name }}{% endif %}{% endfor %}
             {% else %}
-            <button type="button" class="ui-badge ui-badge-warn ad-badge-btn" data-peer-action="edit">Link a connection</button>
+            <button type="button" class="ui-badge ui-badge-warn adm-badge-btn" data-peer-action="edit">Link a connection</button>
             {% endif %}
           </td>
           <td class="ui-hide-m">
             {% if item.has_bidirectional %}
-            <button type="button" class="ui-badge ui-badge-accent ad-badge-btn" data-peer-action="bidir" data-ui-tip="Verify two-way setup">Two-way · {{ item.buckets_syncing }}</button>
+            <button type="button" class="ui-badge ui-badge-accent adm-badge-btn" data-peer-action="bidir" data-ui-tip="Verify two-way setup">Two-way · {{ item.buckets_syncing }}</button>
             {% elif item.has_connection %}
             <span class="ui-badge">One-way</span>
             {% else %}
@@ -115,7 +115,7 @@
           </td>
           <td class="ui-hide-m st-num"><span class="peer-pending ui-muted">—</span></td>
           <td>
-            <div class="ad-row-actions">
+            <div class="adm-row-actions">
               <button type="button" class="ui-btn ui-btn-sm" popovertarget="peerMenu{{ loop.index }}" aria-haspopup="menu" aria-expanded="false">Actions</button>
             </div>
             <div class="ui-menu" popover id="peerMenu{{ loop.index }}" data-ui-align-end>
@@ -205,8 +205,8 @@
     </div>
 
     <div data-peer-step="3" hidden>
-      <div class="ad-card-pad">
-        <dl class="ad-facts" id="addPeerReview"></dl>
+      <div class="adm-card-pad">
+        <dl class="adm-facts" id="addPeerReview"></dl>
       </div>
     </div>
 
@@ -223,9 +223,9 @@
   <div class="st-cardhead">
     <h2>This site</h2>
   </div>
-  <form method="POST" action="{{ url_for(endpoint="ui.update_local_site") }}" id="localSiteForm" class="ad-card-pad">
+  <form method="POST" action="{{ url_for(endpoint="ui.update_local_site") }}" id="localSiteForm" class="adm-card-pad">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
-    <div class="ad-grid2 st-grid">
+    <div class="adm-grid2 st-grid">
       <div class="ui-field">
         <label class="ui-label" for="site_id">Site ID</label>
         <input type="text" class="ui-input" id="site_id" name="site_id" required
@@ -258,7 +258,7 @@
                placeholder="US West Primary">
       </div>
     </div>
-    <div class="ad-foot-actions">
+    <div class="adm-foot-actions">
       <button type="submit" class="ui-btn ui-btn-primary">Save site</button>
     </div>
   </form>
@@ -288,7 +288,7 @@
           <th scope="col" class="ui-hide-m">Access key</th>
           <th scope="col">Status</th>
           <th scope="col" class="ui-hide-m">Created</th>
-          <th scope="col"><span class="ad-sr">Actions</span></th>
+          <th scope="col"><span class="adm-sr">Actions</span></th>
         </tr>
       </thead>
       <tbody>
@@ -296,11 +296,11 @@
         {% set ak = cred.access_keys[0] %}
         <tr>
           <td>
-            <span class="ui-mono ad-wrap">{{ cred.site_id }}</span>
+            <span class="ui-mono adm-wrap">{{ cred.site_id }}</span>
             <div class="ui-muted st-sub">{{ cred.display_name }}</div>
             <div class="ui-mono st-sub st-only-m">{{ ak.access_key }}</div>
           </td>
-          <td class="ui-hide-m"><span class="ui-mono ad-wrap">{{ ak.access_key }}</span></td>
+          <td class="ui-hide-m"><span class="ui-mono adm-wrap">{{ ak.access_key }}</span></td>
           <td>
             {% if cred.enabled %}
             <span class="ui-badge ui-badge-ok">Enabled</span>
@@ -310,7 +310,7 @@
           </td>
           <td class="ui-hide-m ui-muted">{{ ak.created_at | default(value="") }}</td>
           <td>
-            <div class="ad-row-actions">
+            <div class="adm-row-actions">
               <button type="button" class="ui-btn ui-btn-sm ui-btn-danger btn-revoke-peer-cred"
                       data-access-key="{{ ak.access_key }}"
                       data-site-id="{{ cred.site_id }}">Revoke</button>
@@ -325,14 +325,14 @@
 </div>
 
 <dialog class="ui-dialog" id="newPeerCredDialog" aria-labelledby="newPeerCredTitle">
-  <form method="post" action="/ui/peer-credentials/create" class="ad-dialog-form">
+  <form method="post" action="/ui/peer-credentials/create" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="newPeerCredTitle">Issue peer credential</h2>
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead ui-muted">The access key and secret are shown <strong>once</strong>. Hand them to the operator of the target site, who uses them in their outbound connection back to here.</p>
+      <p class="adm-lead ui-muted">The access key and secret are shown <strong>once</strong>. Hand them to the operator of the target site, who uses them in their outbound connection back to here.</p>
       <div class="ui-field">
         <label class="ui-label" for="newPeerCredSite">Site ID</label>
         <input id="newPeerCredSite" name="site_id" type="text" class="ui-input" placeholder="us-west-1" required aria-describedby="newPeerCredSiteHint">
@@ -351,15 +351,15 @@
 </dialog>
 
 <dialog class="ui-dialog" id="revokePeerCredDialog" aria-labelledby="revokePeerCredTitle">
-  <form method="post" id="revokePeerCredForm" class="ad-dialog-form">
+  <form method="post" id="revokePeerCredForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="revokePeerCredTitle">Revoke peer credential</h2>
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead">Revoke <strong class="ui-mono" id="revokePeerCredAccessKey"></strong>?</p>
-      <div class="ad-note ad-note-warn">The peer (<span class="ui-mono" id="revokePeerCredSiteId"></span>) using this credential immediately loses access to the cluster overview and relayed admin actions.</div>
+      <p class="adm-lead">Revoke <strong class="ui-mono" id="revokePeerCredAccessKey"></strong>?</p>
+      <div class="adm-note adm-note-warn">The peer (<span class="ui-mono" id="revokePeerCredSiteId"></span>) using this credential immediately loses access to the cluster overview and relayed admin actions.</div>
     </div>
     <div class="ui-dialog-foot">
       <button type="button" class="ui-btn" data-ui-close>Cancel</button>
@@ -374,24 +374,24 @@
     <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <div class="ui-dialog-body">
-    <div class="ad-note ad-note-warn ad-field-note">The <strong>secret key is shown only once</strong>. If you close this without copying it, you will need to issue a new credential.</div>
+    <div class="adm-note adm-note-warn adm-field-note">The <strong>secret key is shown only once</strong>. If you close this without copying it, you will need to issue a new credential.</div>
     <div class="ui-field">
       <label class="ui-label" for="peerCredIssuedAccessKey">Access key</label>
-      <div class="ad-input-row">
+      <div class="adm-input-row">
         <input type="text" class="ui-input ui-mono" id="peerCredIssuedAccessKey" readonly>
         <button type="button" class="ui-btn btn-copy-cred" data-copy-target="peerCredIssuedAccessKey" data-copy-label="Access key">Copy</button>
       </div>
     </div>
     <div class="ui-field">
       <label class="ui-label" for="peerCredIssuedSecretKey">Secret key</label>
-      <div class="ad-input-row">
+      <div class="adm-input-row">
         <input type="text" class="ui-input ui-mono" id="peerCredIssuedSecretKey" readonly>
         <button type="button" class="ui-btn btn-copy-cred" data-copy-target="peerCredIssuedSecretKey" data-copy-label="Secret key">Copy</button>
       </div>
     </div>
     <div class="ui-field">
       <label class="ui-label" for="peerCredIssuedSiteId">Site ID</label>
-      <div class="ad-input-row">
+      <div class="adm-input-row">
         <input type="text" class="ui-input ui-mono" id="peerCredIssuedSiteId" readonly>
         <button type="button" class="ui-btn btn-copy-cred" data-copy-target="peerCredIssuedSiteId" data-copy-label="Site ID">Copy</button>
       </div>
@@ -403,7 +403,7 @@
 </dialog>
 
 <dialog class="ui-dialog" id="editPeerDialog" aria-labelledby="editPeerTitle">
-  <form method="POST" id="editPeerForm" class="ad-dialog-form">
+  <form method="POST" id="editPeerForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="editPeerTitle">Edit peer</h2>
@@ -422,7 +422,7 @@
         <label class="ui-label" for="edit_region">Region</label>
         <input type="text" class="ui-input" id="edit_region" name="region" required>
       </div>
-      <div class="ad-grid2">
+      <div class="adm-grid2">
         <div class="ui-field">
           <label class="ui-label" for="edit_priority">Priority</label>
           <input type="number" class="ui-input" id="edit_priority" name="priority" min="0">
@@ -434,7 +434,7 @@
       </div>
       <div class="ui-field">
         <label class="ui-label" for="edit_connection_id">Connection</label>
-        <select class="ui-select ad-select-full" id="edit_connection_id" name="connection_id">
+        <select class="ui-select adm-select-full" id="edit_connection_id" name="connection_id">
           <option value="">No connection</option>
           {% for conn in connections %}
           <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
@@ -455,15 +455,15 @@
 </dialog>
 
 <dialog class="ui-dialog" id="deletePeerDialog" aria-labelledby="deletePeerTitle">
-  <form method="POST" id="deletePeerForm" class="ad-dialog-form">
+  <form method="POST" id="deletePeerForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="deletePeerTitle">Delete peer</h2>
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead">Delete <strong id="deletePeerName"></strong>?</p>
-      <div class="ad-note ad-note-warn">This removes the peer from the site registry. Site sync that relies on it may be affected.</div>
+      <p class="adm-lead">Delete <strong id="deletePeerName"></strong>?</p>
+      <div class="adm-note adm-note-warn">This removes the peer from the site registry. Site sync that relies on it may be affected.</div>
     </div>
     <div class="ui-dialog-foot">
       <button type="button" class="ui-btn" data-ui-close>Cancel</button>
@@ -478,7 +478,7 @@
     <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
   </div>
   <div class="ui-dialog-body">
-    <div id="bidirStatusContent" class="ad-stack" aria-live="polite"></div>
+    <div id="bidirStatusContent" class="adm-stack" aria-live="polite"></div>
   </div>
   <div class="ui-dialog-foot">
     <button type="button" class="ui-btn" data-ui-close>Close</button>

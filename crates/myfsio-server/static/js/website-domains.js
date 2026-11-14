@@ -94,12 +94,12 @@
     var button = row.querySelector('.dns-check-btn');
     var badge = DNS_BADGES[state] || DNS_BADGES.unknown;
     if (button) {
-      button.className = 'ui-badge ad-badge-btn dns-check-btn' + badge[0];
+      button.className = 'ui-badge adm-badge-btn dns-check-btn' + badge[0];
       button.textContent = badge[1];
       button.setAttribute('data-ui-tip', detail || message || 'Check DNS for this domain');
     }
     if (text) {
-      text.className = 'ad-sub dns-status-text' + (DNS_TEXT_TONES[state] || '');
+      text.className = 'adm-sub dns-status-text' + (DNS_TEXT_TONES[state] || '');
       text.textContent = message || '';
       text.hidden = !message;
     }
@@ -110,7 +110,7 @@
     if (!domain) return Promise.resolve();
     var button = row.querySelector('.dns-check-btn');
     if (button) {
-      button.className = 'ui-badge ad-badge-btn dns-check-btn';
+      button.className = 'ui-badge adm-badge-btn dns-check-btn';
       button.textContent = 'Checking…';
     }
     return fetch(DNS_CHECK_URL.replace('__DOMAIN__', encodeURIComponent(domain)), {

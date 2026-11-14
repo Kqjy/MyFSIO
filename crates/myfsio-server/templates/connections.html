@@ -22,7 +22,7 @@
           <th scope="col">Status</th>
           <th scope="col" class="ui-hide-m">Region</th>
           <th scope="col" class="ui-hide-m">Access key</th>
-          <th scope="col"><span class="ad-sr">Actions</span></th>
+          <th scope="col"><span class="adm-sr">Actions</span></th>
         </tr>
       </thead>
       <tbody id="connectionsBody">
@@ -39,13 +39,13 @@
             data-tuning-in-place-retries="{{ conn.tuning_in_place_retries | default(value="") }}">
           <td>
             <div class="ui-name"><span class="ui-fileicon is-accent"><svg class="ic" aria-hidden="true"><use href="#i-plug"/></svg></span><span class="conn-name">{{ conn.name }}</span></div>
-            <div class="ui-muted ad-sub conn-endpoint">{{ conn.endpoint_url }}</div>
+            <div class="ui-muted adm-sub conn-endpoint">{{ conn.endpoint_url }}</div>
           </td>
           <td><span class="ui-badge connection-status" data-status="checking">Checking</span></td>
           <td class="ui-hide-m"><span class="ui-badge ui-badge-accent conn-region">{{ conn.region }}</span></td>
           <td class="ui-hide-m"><span class="ui-mono conn-access-key">{% if conn.access_key | length > 12 %}{{ conn.access_key | slice(start=0, end=8) }}...{{ conn.access_key | slice(start=-4) }}{% else %}{{ conn.access_key }}{% endif %}</span></td>
           <td>
-            <div class="ad-row-actions">
+            <div class="adm-row-actions">
               <button type="button" class="ui-btn ui-btn-sm" data-connection-action="edit">Edit</button>
               <button type="button" class="ui-btn ui-btn-sm ui-btn-danger" data-connection-action="delete">Delete</button>
             </div>
@@ -66,13 +66,13 @@
   <tr>
     <td>
       <div class="ui-name"><span class="ui-fileicon is-accent"><svg class="ic" aria-hidden="true"><use href="#i-plug"/></svg></span><span class="conn-name"></span></div>
-      <div class="ui-muted ad-sub conn-endpoint"></div>
+      <div class="ui-muted adm-sub conn-endpoint"></div>
     </td>
     <td><span class="ui-badge connection-status" data-status="checking">Checking</span></td>
     <td class="ui-hide-m"><span class="ui-badge ui-badge-accent conn-region"></span></td>
     <td class="ui-hide-m"><span class="ui-mono conn-access-key"></span></td>
     <td>
-      <div class="ad-row-actions">
+      <div class="adm-row-actions">
         <button type="button" class="ui-btn ui-btn-sm" data-connection-action="edit">Edit</button>
         <button type="button" class="ui-btn ui-btn-sm ui-btn-danger" data-connection-action="delete">Delete</button>
       </div>
@@ -81,7 +81,7 @@
 </template>
 
 <dialog class="ui-dialog" id="connectionDialog" aria-labelledby="connectionDialogTitle">
-  <form method="POST" id="connectionForm" class="ad-dialog-form">
+  <form method="POST" id="connectionForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="connectionDialogTitle">Add connection</h2>
@@ -106,18 +106,18 @@
       </div>
       <div class="ui-field">
         <label class="ui-label" for="conn_secret_key">Secret key</label>
-        <div class="ad-input-row">
+        <div class="adm-input-row">
           <input type="password" class="ui-input ui-mono" id="conn_secret_key" name="secret_key" required autocomplete="off" aria-describedby="conn_secret_hint">
           <button class="ui-btn" type="button" id="connSecretToggle" aria-pressed="false">Show</button>
         </div>
         <div class="ui-hint" id="conn_secret_hint" hidden>Leave blank to keep the current secret.</div>
       </div>
-      <details class="ad-details">
+      <details class="adm-details">
         <summary>Transfer tuning (advanced)</summary>
         <p class="ui-hint">Pick a profile to optimize for the destination's network and storage. Numeric overrides win over the profile.</p>
         <div class="ui-field">
           <label class="ui-label" for="conn_tuning_profile">Profile</label>
-          <select class="ui-select ad-select-full" id="conn_tuning_profile" name="tuning_profile">
+          <select class="ui-select adm-select-full" id="conn_tuning_profile" name="tuning_profile">
             <option value="">Default (legacy: 8 MiB / 4 streams)</option>
             <option value="ssd_lan">SSD LAN — 8 MiB / 4 streams</option>
             <option value="ssd_wan">SSD WAN (cross-continent) — 32 MiB / 12 streams</option>
@@ -125,7 +125,7 @@
             <option value="hdd_wan">HDD WAN (cross-continent) — 64 MiB / 2 streams</option>
           </select>
         </div>
-        <div class="ad-grid2">
+        <div class="adm-grid2">
           <div class="ui-field">
             <label class="ui-label" for="conn_tuning_part_size_mb">Part size (MiB)</label>
             <input type="number" min="5" class="ui-input" id="conn_tuning_part_size_mb" name="tuning_part_size_mb" placeholder="profile">
@@ -145,10 +145,10 @@
         </div>
         <p class="ui-hint">Setting <strong>In-MPU retries &gt; 1</strong> auto-lowers the SDK transport-retry count to 1 to avoid compounding delays.</p>
       </details>
-      <div class="ad-test-result" id="connectionTestResult" role="status" hidden></div>
+      <div class="adm-test-result" id="connectionTestResult" role="status" hidden></div>
     </div>
     <div class="ui-dialog-foot">
-      <button type="button" class="ui-btn ad-foot-start" id="testConnectionBtn">Test</button>
+      <button type="button" class="ui-btn adm-foot-start" id="testConnectionBtn">Test</button>
       <button type="button" class="ui-btn" data-ui-close>Cancel</button>
       <button type="submit" class="ui-btn ui-btn-primary" id="connectionSubmitBtn">Add connection</button>
     </div>
@@ -156,15 +156,15 @@
 </dialog>
 
 <dialog class="ui-dialog" id="deleteConnectionDialog" aria-labelledby="deleteConnectionTitle">
-  <form method="POST" id="deleteConnectionForm" class="ad-dialog-form">
+  <form method="POST" id="deleteConnectionForm" class="adm-dialog-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
     <div class="ui-dialog-head">
       <h2 class="ui-dialog-title" id="deleteConnectionTitle">Delete connection</h2>
       <button type="button" class="icon-btn" data-ui-close aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div class="ui-dialog-body">
-      <p class="ad-lead">Delete <strong id="deleteConnectionName"></strong>?</p>
-      <div class="ad-note ad-note-warn">Replication rules that use this connection will stop.</div>
+      <p class="adm-lead">Delete <strong id="deleteConnectionName"></strong>?</p>
+      <div class="adm-note adm-note-warn">Replication rules that use this connection will stop.</div>
     </div>
     <div class="ui-dialog-foot">
       <button type="button" class="ui-btn" data-ui-close>Cancel</button>
