@@ -1362,6 +1362,7 @@
     btn.addEventListener('click', () => {
       setActivePolicyPreset(btn.dataset.preset);
       applyPolicyPreset(btn.dataset.preset);
+      policyTextarea?.dispatchEvent(new Event('policy-preset-applied'));
     });
   });
 
@@ -3352,30 +3353,142 @@
   const policyValidBadge = document.getElementById('policyValidBadge');
   const policyInvalidBadge = document.getElementById('policyInvalidBadge');
   const policyErrorDetail = document.getElementById('policyErrorDetail');
+  const policyErrorMessage = document.getElementById('policyErrorMessage');
+  const policyErrorJump = document.getElementById('policyErrorJump');
+  const policyErrorJumpLine = document.getElementById('policyErrorJumpLine');
+  const policyEditorWrap = document.getElementById('policyEditorWrap');
+  const policyGutter = document.getElementById('policyGutter');
+  const policyErrorLine = document.getElementById('policyErrorLine');
+  const policyErrorColumn = document.getElementById('policyErrorColumn');
+  let policyErrorLocation = null;
+  let policyGutterLineCount = 0;
+
+  const locateJsonError = (text, message) => {
+    const lineMatch = /line (\d+) column (\d+)/i.exec(message);
+    if (lineMatch) {
+      const line = Number(lineMatch[1]);
+      const column = Number(lineMatch[2]);
+      const lines = text.split('\n');
+      let offset = 0;
+      for (let i = 0; i < line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+      return { line, column, offset: offset + column - 1 };
+    }
+    const positionMatch = /position (\d+)/i.exec(message);
+    let offset = positionMatch ? Number(positionMatch[1]) : null;
+    if (offset === null && /unexpected end/i.test(message)) offset = text.length;
+    if (offset === null) return null;
+    offset = Math.min(offset, text.length);
+    const before = text.slice(0, offset);
+    const line = before.split('\n').length;
+    const column = offset - before.lastIndexOf('\n');
+    return { line, column, offset };
+  };
+
+  const policyEditorMetrics = () => {
+    const style = window.getComputedStyle(policyTextarea);
+    const canvas = policyEditorMetrics.canvas || (policyEditorMetrics.canvas = document.createElement('canvas'));
+    const ctx = canvas.getContext('2d');
+    ctx.font = `${style.fontSize} ${style.fontFamily}`;
+    return {
+      lineHeight: parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5,
+      padTop: parseFloat(style.paddingTop) || 0,
+      padLeft: parseFloat(style.paddingLeft) || 0,
+      charWidth: ctx.measureText('0').width
+    };
+  };
+
+  const renderPolicyGutter = () => {
+    if (!policyGutter || !policyTextarea) return;
+    const count = policyTextarea.value.split('\n').length;
+    const errorLine = policyErrorLocation ? policyErrorLocation.line : 0;
+    if (count !== policyGutterLineCount || policyGutter.dataset.errorLine !== String(errorLine)) {
+      const fragment = document.createDocumentFragment();
+      for (let i = 1; i <= count; i++) {
+        const span = document.createElement('span');
+        span.textContent = i;
+        if (i === errorLine) span.className = 'is-error';
+        fragment.appendChild(span);
+      }
+      policyGutter.replaceChildren(fragment);
+      policyGutter.dataset.errorLine = String(errorLine);
+      policyGutterLineCount = count;
+    }
+    policyGutter.scrollTop = policyTextarea.scrollTop;
+  };
+
+  const positionPolicyErrorMarks = () => {
+    if (!policyErrorLine || !policyErrorColumn || !policyTextarea) return;
+    const loc = policyErrorLocation;
+    policyErrorLine.classList.toggle('is-hidden', !loc);
+    policyErrorColumn.classList.toggle('is-hidden', !loc);
+    if (!loc) return;
+    const m = policyEditorMetrics();
+    const top = m.padTop + (loc.line - 1) * m.lineHeight - policyTextarea.scrollTop;
+    policyErrorLine.style.top = `${top}px`;
+    policyErrorLine.style.height = `${m.lineHeight}px`;
+    policyErrorColumn.style.top = `${top}px`;
+    policyErrorColumn.style.height = `${m.lineHeight}px`;
+    policyErrorColumn.style.width = `${Math.max(m.charWidth, 2)}px`;
+    policyErrorColumn.style.left = `${m.padLeft + (loc.column - 1) * m.charWidth - policyTextarea.scrollLeft}px`;
+  };
+
+  const syncPolicyEditor = () => {
+    renderPolicyGutter();
+    positionPolicyErrorMarks();
+  };
+
+  const setPolicyError = (location, message) => {
+    policyErrorLocation = location;
+    policyEditorWrap?.classList.toggle('is-invalid', !!message);
+    if (policyErrorDetail) policyErrorDetail.classList.toggle('is-hidden', !message);
+    if (policyErrorMessage) {
+      policyErrorMessage.textContent = location
+        ? `Line ${location.line}, column ${location.column}: ${message.replace(/\s*\(line \d+ column \d+\)\s*$/i, '').replace(/\s+(in JSON\s+)?at position \d+.*$/i, '')}`
+        : (message || '');
+    }
+    if (policyErrorJump) policyErrorJump.classList.toggle('is-hidden', !location);
+    if (policyErrorJumpLine && location) policyErrorJumpLine.textContent = location.line;
+    syncPolicyEditor();
+  };
 
   const validatePolicyJson = () => {
     if (!policyTextarea || !policyValidationStatus) return;
-    const value = policyTextarea.value.trim();
-    if (!value) {
+    const raw = policyTextarea.value;
+    if (!raw.trim()) {
       policyValidationStatus.classList.add('is-hidden');
-      policyErrorDetail?.classList.add('is-hidden');
+      setPolicyError(null, '');
       return;
     }
     policyValidationStatus.classList.remove('is-hidden');
     try {
-      JSON.parse(value);
+      JSON.parse(raw);
       policyValidBadge?.classList.remove('is-hidden');
       policyInvalidBadge?.classList.add('is-hidden');
-      policyErrorDetail?.classList.add('is-hidden');
+      setPolicyError(null, '');
     } catch (err) {
       policyValidBadge?.classList.add('is-hidden');
       policyInvalidBadge?.classList.remove('is-hidden');
-      if (policyErrorDetail) {
-        policyErrorDetail.textContent = err.message;
-        policyErrorDetail.classList.remove('is-hidden');
-      }
+      setPolicyError(locateJsonError(raw, err.message), err.message);
     }
   };
+
+  policyErrorJump?.addEventListener('click', () => {
+    if (!policyTextarea || !policyErrorLocation) return;
+    const m = policyEditorMetrics();
+    policyTextarea.focus();
+    policyTextarea.setSelectionRange(policyErrorLocation.offset, policyErrorLocation.offset);
+    policyTextarea.scrollTop = Math.max(0, (policyErrorLocation.line - 3) * m.lineHeight);
+    const columnX = m.padLeft + (policyErrorLocation.column - 1) * m.charWidth;
+    policyTextarea.scrollLeft = Math.max(0, columnX - policyTextarea.clientWidth / 2);
+    syncPolicyEditor();
+  });
+
+  policyTextarea?.addEventListener('scroll', syncPolicyEditor);
+  policyTextarea?.addEventListener('policy-preset-applied', validatePolicyJson);
+  if (policyTextarea && window.ResizeObserver) {
+    new ResizeObserver(syncPolicyEditor).observe(policyTextarea);
+  }
+  renderPolicyGutter();
 
   policyTextarea?.addEventListener('input', validatePolicyJson);
   policyTextarea?.addEventListener('blur', validatePolicyJson);

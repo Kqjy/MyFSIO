@@ -267,8 +267,15 @@
                   </span>
                   <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost" id="formatPolicyBtn" title="Format JSON">Format</button>
                 </div>
-                <textarea class="ui-input ui-mono bs-editor" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode }}' spellcheck="false">{% if bucket_policy_text %}{{ bucket_policy_text }}{% else %}{{ default_policy }}{% endif %}</textarea>
-                <div id="policyErrorDetail" class="ui-error is-hidden"></div>
+                <div class="bs-editor-wrap" id="policyEditorWrap">
+                  <div class="bs-editor-gutter" id="policyGutter" aria-hidden="true"></div>
+                  <div class="bs-editor-body">
+                    <div class="bs-editor-line-mark is-hidden" id="policyErrorLine" aria-hidden="true"></div>
+                    <div class="bs-editor-col-mark is-hidden" id="policyErrorColumn" aria-hidden="true"></div>
+                    <textarea class="ui-input ui-mono bs-editor" rows="14" wrap="off" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode }}' spellcheck="false" aria-describedby="policyErrorDetail">{% if bucket_policy_text %}{{ bucket_policy_text }}{% else %}{{ default_policy }}{% endif %}</textarea>
+                  </div>
+                </div>
+                <div id="policyErrorDetail" class="ui-error bs-editor-error is-hidden"><span id="policyErrorMessage"></span> <button type="button" class="ui-btn ui-btn-sm ui-btn-ghost is-hidden" id="policyErrorJump">Go to line <span id="policyErrorJumpLine"></span></button></div>
                 <div id="policyReadonlyHint" class="ui-hint is-hidden">This preset is read-only. Select <strong>Custom JSON</strong> to edit the policy manually.</div>
                 <div class="ui-hint">The policy is validated on save.</div>
               </div>

@@ -786,6 +786,12 @@ body {
 	border-bottom: 1px solid var(--c-line);
 	margin-bottom: 16px;
 	overflow-x: auto;
+	overflow-y: hidden;
+	scrollbar-width: none;
+}
+
+.ui-tabs::-webkit-scrollbar {
+	display: none;
 }
 
 .ui-tab {
@@ -1829,6 +1835,10 @@ body {
 	overflow: hidden;
 }
 
+#preview-placeholder {
+	text-align: center;
+}
+
 .ob-preview img,
 .ob-preview video,
 .ob-preview audio,
@@ -2201,6 +2211,7 @@ textarea.ui-input {
 
 .ob-upload-list {
 	max-height: 260px;
+	overflow-x: hidden;
 	overflow-y: auto;
 }
 
@@ -2210,6 +2221,7 @@ textarea.ui-input {
 
 .ob-upload-row {
 	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 5px;
 	padding: 10px 14px;
 	border-bottom: 1px solid var(--c-line-soft);
@@ -2782,6 +2794,97 @@ textarea.ui-input {
 	line-height: 1.5;
 	tab-size: 2;
 	resize: vertical;
+}
+
+.bs-editor-wrap {
+	display: flex;
+	border: 1px solid var(--myfsio-input-border);
+	border-radius: var(--c-radius);
+	background-color: var(--c-panel);
+	overflow: hidden;
+}
+
+.bs-editor-wrap:focus-within {
+	border-color: var(--c-accent-fill);
+	outline: 2px solid rgba(var(--c-accent-rgb), 0.25);
+}
+
+.bs-editor-wrap.is-invalid {
+	border-color: var(--c-bad);
+}
+
+.bs-editor-gutter {
+	flex: 0 0 auto;
+	display: flex;
+	flex-direction: column;
+	min-width: 40px;
+	padding: 6px 8px 32px;
+	border-right: 1px solid var(--c-line);
+	background: var(--c-bg);
+	color: var(--c-faint);
+	font-family: var(--c-mono);
+	font-size: 13px;
+	line-height: 1.5;
+	text-align: right;
+	overflow: hidden;
+	user-select: none;
+}
+
+.bs-editor-gutter .is-error {
+	color: var(--c-bad);
+	font-weight: 700;
+}
+
+.bs-editor-body {
+	position: relative;
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	overflow: hidden;
+}
+
+.bs-editor-wrap .bs-editor {
+	position: relative;
+	border: 0;
+	border-radius: 0;
+	outline: 0;
+	background: transparent;
+	white-space: pre;
+	overflow-wrap: normal;
+}
+
+.bs-editor-wrap .bs-editor.policy-editor-disabled {
+	background: transparent;
+}
+
+.bs-editor-wrap:has(.policy-editor-disabled) {
+	background: var(--c-hover);
+}
+
+.bs-editor-line-mark,
+.bs-editor-col-mark {
+	position: absolute;
+	pointer-events: none;
+}
+
+.bs-editor-line-mark {
+	left: 0;
+	right: 0;
+	background: var(--c-bad-weak);
+}
+
+.bs-editor-col-mark {
+	border-bottom: 2px solid var(--c-bad);
+	border-radius: 2px;
+	background: rgba(180, 35, 24, 0.18);
+}
+
+.bs-editor-error {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 8px;
+	overflow-wrap: anywhere;
 }
 
 .bs-editor.policy-editor-disabled {
