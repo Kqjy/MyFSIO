@@ -241,7 +241,7 @@
           <div class="ui-empty">
             <h2>Failed to load objects</h2>
             <p>${escapeHtml(message)}</p>
-            <button class="ui-btn" type="button" onclick="loadObjects()">Retry</button>
+            <button class="ui-btn" type="button" data-inline-action="reloadObjects">Retry</button>
           </div>
         </td>
       </tr>
@@ -886,7 +886,7 @@
       });
 
       row.addEventListener('click', (e) => {
-        if (e.target.closest('[data-folder-select]') || e.target.closest('button') || e.target.closest('[data-folder-link]')) return;
+        if (e.target.closest('.ob-col-check') || e.target.closest('button') || e.target.closest('[data-folder-link]')) return;
         navigateToFolder(folderPath);
       });
 
@@ -1130,7 +1130,7 @@
     tr.style.cursor = 'pointer';
 
     tr.innerHTML = `
-      <td class="ob-col-check" onclick="event.stopPropagation();">
+      <td class="ob-col-check">
         <input type="checkbox" data-folder-select="${escapeHtml(folderPath)}" aria-label="Select folder ${escapeHtml(folderName)}" />
       </td>
       <td class="object-key">
@@ -3551,13 +3551,29 @@
         <td>${abortMpu}</td>
         <td>
           <div class="bs-row-actions">
-            <button class="ui-btn ui-btn-sm" type="button" onclick="editLifecycleRule(${idx})">Edit</button>
-            <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" onclick="deleteLifecycleRule(${idx})">Delete</button>
+            <button class="ui-btn ui-btn-sm" type="button" data-inline-action="editLifecycleRule" data-inline-index="${idx}">Edit</button>
+            <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" data-inline-action="deleteLifecycleRule" data-inline-index="${idx}">Delete</button>
           </div>
         </td>
       </tr>`;
     }).join('');
   };
+
+  const inlineActions = {
+    reloadObjects: () => loadObjects(),
+    editLifecycleRule: (idx) => window.editLifecycleRule(idx),
+    deleteLifecycleRule: (idx) => window.deleteLifecycleRule(idx),
+    editCorsRule: (idx) => window.editCorsRule(idx),
+    deleteCorsRule: (idx) => window.deleteCorsRule(idx),
+    removeTagRow: (idx) => window.removeTagRow(idx)
+  };
+
+  document.addEventListener('click', (event) => {
+    const source = event.target.closest('[data-inline-action]');
+    if (!source) return;
+    const action = inlineActions[source.dataset.inlineAction];
+    if (action) action(Number(source.dataset.inlineIndex));
+  });
 
   window.editLifecycleRule = (idx) => {
     const rule = lifecycleRules[idx];
@@ -3678,8 +3694,8 @@
         <td class="is-num">${rule.MaxAgeSeconds || '<span class="ui-muted">-</span>'}</td>
         <td>
           <div class="bs-row-actions">
-            <button class="ui-btn ui-btn-sm" type="button" onclick="editCorsRule(${idx})">Edit</button>
-            <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" onclick="deleteCorsRule(${idx})">Delete</button>
+            <button class="ui-btn ui-btn-sm" type="button" data-inline-action="editCorsRule" data-inline-index="${idx}">Edit</button>
+            <button class="ui-btn ui-btn-sm ui-btn-danger" type="button" data-inline-action="deleteCorsRule" data-inline-index="${idx}">Delete</button>
           </div>
         </td>
       </tr>`;
@@ -3894,7 +3910,7 @@
       <div class="tag-editor-row">
         <input type="text" class="ui-input" aria-label="Tag key" placeholder="e.g. Environment" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
         <input type="text" class="ui-input" aria-label="Tag value" placeholder="e.g. Production" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
-        <button class="tag-editor-delete" type="button" aria-label="Remove tag" onclick="removeTagRow(${idx})">
+        <button class="tag-editor-delete" type="button" aria-label="Remove tag" data-inline-action="removeTagRow" data-inline-index="${idx}">
           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
         </button>
       </div>
