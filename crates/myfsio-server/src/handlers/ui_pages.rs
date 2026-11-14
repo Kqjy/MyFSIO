@@ -2833,16 +2833,34 @@ pub async fn replication_wizard(
     render(&state, "replication_wizard.html", &ctx)
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
+#[serde(from = "Vec<(String, String)>")]
 pub struct CreatePeerReplicationRulesForm {
-    #[serde(default)]
     pub mode: String,
-    #[serde(default)]
     pub buckets: Vec<String>,
-    #[serde(default)]
     pub csrf_token: String,
-    #[serde(flatten)]
     pub extras: HashMap<String, String>,
+}
+
+impl From<Vec<(String, String)>> for CreatePeerReplicationRulesForm {
+    fn from(fields: Vec<(String, String)>) -> Self {
+        let mut form = Self::default();
+        for (name, value) in fields {
+            match name.as_str() {
+                "mode" => form.mode = value,
+                "buckets" => {
+                    if !form.buckets.contains(&value) {
+                        form.buckets.push(value);
+                    }
+                }
+                "csrf_token" => form.csrf_token = value,
+                _ => {
+                    form.extras.insert(name, value);
+                }
+            }
+        }
+        form
+    }
 }
 
 pub async fn create_peer_replication_rules(

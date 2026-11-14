@@ -1344,6 +1344,193 @@ async fn test_create_bidirectional_rule_succeeds_when_peer_ak_set() {
     );
 }
 
+fn wizard_test_state(
+    site_id: &str,
+    connection_id: &str,
+) -> (myfsio_server::state::AppState, tempfile::TempDir) {
+    let (state, tmp) = test_ui_state();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: connection_id.to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+            tuning: None,
+        })
+        .unwrap();
+    let registry = state.site_registry.as_ref().expect("site_registry").clone();
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: site_id.to_string(),
+        endpoint: "http://peer.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "Peer Site".to_string(),
+        connection_id: Some(connection_id.to_string()),
+        peer_inbound_access_key: None,
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+    (state, tmp)
+}
+
+fn browser_form_request(uri: &str, session_id: Option<&str>, body: &str) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("content-type", "application/x-www-form-urlencoded");
+    if let Some(session_id) = session_id {
+        builder = builder.header(
+            "cookie",
+            format!(
+                "{}={}",
+                myfsio_server::session::SESSION_COOKIE_NAME,
+                session_id
+            ),
+        );
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn test_replication_wizard_creates_rule_for_single_selected_bucket() {
+    let (state, _tmp) = wizard_test_state("wizard-peer", "wizard-conn");
+    state.storage.create_bucket("review-web-one").await.unwrap();
+    state.storage.create_bucket("review-web-two").await.unwrap();
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .oneshot(browser_form_request(
+            "/ui/sites/peers/wizard-peer/replication-rules",
+            Some(&session_id),
+            &format!(
+                "csrf_token={}&mode=new_only&buckets=review-web-one&target_review-web-one=review-web-one&target_review-web-two=review-web-two",
+                csrf
+            ),
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "got {}", resp.status());
+
+    let rule = state
+        .replication
+        .get_rule("review-web-one")
+        .expect("rule created");
+    assert_eq!(rule.target_connection_id, "wizard-conn");
+    assert_eq!(rule.target_bucket, "review-web-one");
+    assert_eq!(
+        rule.mode,
+        myfsio_server::services::replication::MODE_NEW_ONLY
+    );
+    assert!(state.replication.get_rule("review-web-two").is_none());
+}
+
+#[tokio::test]
+async fn test_replication_wizard_creates_rules_for_multiple_selected_buckets() {
+    let (state, _tmp) = wizard_test_state("wizard-peer", "wizard-conn");
+    for bucket in ["multi-one", "multi-two", "multi-three"] {
+        state.storage.create_bucket(bucket).await.unwrap();
+    }
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .oneshot(browser_form_request(
+            "/ui/replication/create?site_id=wizard-peer",
+            Some(&session_id),
+            &format!(
+                "csrf_token={}&mode=new_only&buckets=multi-one&target_multi-one=remote+one&buckets=multi-two&target_multi-two=&target_multi-three=multi-three",
+                csrf
+            ),
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "got {}", resp.status());
+
+    let first = state.replication.get_rule("multi-one").expect("first rule");
+    assert_eq!(first.target_bucket, "remote one");
+    assert_eq!(first.target_connection_id, "wizard-conn");
+    let second = state
+        .replication
+        .get_rule("multi-two")
+        .expect("second rule");
+    assert_eq!(second.target_bucket, "multi-two");
+    assert!(state.replication.get_rule("multi-three").is_none());
+}
+
+#[tokio::test]
+async fn test_replication_wizard_without_selection_creates_no_rules() {
+    let (state, _tmp) = wizard_test_state("wizard-peer", "wizard-conn");
+    state.storage.create_bucket("unselected").await.unwrap();
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .oneshot(browser_form_request(
+            "/ui/sites/peers/wizard-peer/replication-rules",
+            Some(&session_id),
+            &format!(
+                "csrf_token={}&mode=new_only&target_unselected=unselected",
+                csrf
+            ),
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "got {}", resp.status());
+    assert!(state.replication.get_rule("unselected").is_none());
+}
+
+#[tokio::test]
+async fn test_replication_wizard_rejects_missing_csrf_and_anonymous_requests() {
+    let (state, _tmp) = wizard_test_state("wizard-peer", "wizard-conn");
+    state.storage.create_bucket("guarded").await.unwrap();
+    let (session_id, _csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let wrong_token = app
+        .clone()
+        .oneshot(browser_form_request(
+            "/ui/sites/peers/wizard-peer/replication-rules",
+            Some(&session_id),
+            "csrf_token=wrong&mode=new_only&buckets=guarded",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_token.status(), StatusCode::FORBIDDEN);
+    assert!(state.replication.get_rule("guarded").is_none());
+
+    let missing_token = app
+        .clone()
+        .oneshot(browser_form_request(
+            "/ui/sites/peers/wizard-peer/replication-rules",
+            Some(&session_id),
+            "mode=new_only&buckets=guarded",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_token.status(), StatusCode::FORBIDDEN);
+    assert!(state.replication.get_rule("guarded").is_none());
+
+    let anonymous = app
+        .oneshot(browser_form_request(
+            "/ui/sites/peers/wizard-peer/replication-rules",
+            None,
+            "mode=new_only&buckets=guarded",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !anonymous.status().is_success(),
+        "got {}",
+        anonymous.status()
+    );
+    assert!(state.replication.get_rule("guarded").is_none());
+}
+
 #[tokio::test]
 async fn test_create_unidirectional_rule_does_not_require_peer_ak() {
     let (state, _tmp) = test_ui_state();
