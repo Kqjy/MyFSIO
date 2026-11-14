@@ -616,17 +616,76 @@ fn render_bucket_detail_without_error_document() {
     render_or_panic("bucket_detail.html", &ctx);
 }
 
-#[test]
-fn render_login_rate_limited() {
-    let ctx = base_ctx();
-    let html = render_to_string_or_panic("login_rate_limited.html", &ctx);
-    assert!(html.contains("Too many login attempts"));
+fn signed_out_ctx() -> Context {
+    let mut ctx = base_ctx();
+    ctx.remove("principal");
+    ctx.insert("is_authenticated", &false);
+    ctx
+}
+
+fn assert_bare_page(rendered: &str) {
+    assert!(rendered.contains("<main class=\"main-content\">"));
+    assert!(rendered.contains("<h1>"));
+    assert!(!rendered.contains("id=\"appNav\""));
+    for bootstrap_class in ["d-flex", "text-muted", " btn-primary", "display-6", "col-lg-"] {
+        assert!(
+            !rendered.contains(bootstrap_class),
+            "unexpected Bootstrap class {bootstrap_class}"
+        );
+    }
 }
 
 #[test]
 fn render_login() {
-    let ctx = base_ctx();
-    render_or_panic("login.html", &ctx);
+    let mut ctx = signed_out_ctx();
+    ctx.insert("login_next", &"/ui/buckets/b1");
+    ctx.insert(
+        "flashed_messages",
+        &json!([{"category": "danger", "message": "Invalid <credentials>"}]),
+    );
+    let rendered = render_to_string_or_panic("login.html", &ctx);
+    assert_bare_page(&rendered);
+    assert!(rendered.contains("<label class=\"ui-label\" for=\"loginAccessKey\">"));
+    assert!(rendered.contains("<label class=\"ui-label\" for=\"loginSecretKey\">"));
+    assert!(rendered.contains("name=\"csrf_token\" value=\"test-csrf\""));
+    assert!(rendered.contains("name=\"next\" value=\"/ui/buckets/b1\""));
+    assert!(rendered.contains("role=\"alert\">Invalid &lt;credentials&gt;</div>"));
+    assert!(!rendered.contains("window.showToast("));
+    assert!(!rendered.contains("<style"));
+}
+
+#[test]
+fn render_login_rate_limited() {
+    let rendered = render_to_string_or_panic("login_rate_limited.html", &signed_out_ctx());
+    assert_bare_page(&rendered);
+    assert!(rendered.contains("Too many login attempts"));
+    assert!(rendered.contains("href=\"/login\""));
+}
+
+#[test]
+fn render_not_found_signed_out_and_signed_in() {
+    let rendered = render_to_string_or_panic("404.html", &signed_out_ctx());
+    assert_bare_page(&rendered);
+    assert!(rendered.contains("HTTP 404"));
+    let rendered = render_to_string_or_panic("404.html", &base_ctx());
+    assert!(rendered.contains("id=\"appNav\""));
+    assert!(rendered.contains("class=\"status-page\""));
+}
+
+#[test]
+fn render_server_error() {
+    let rendered = render_to_string_or_panic("500.html", &signed_out_ctx());
+    assert_bare_page(&rendered);
+    assert!(rendered.contains("HTTP 500"));
+}
+
+#[test]
+fn render_csrf_error() {
+    let mut ctx = signed_out_ctx();
+    ctx.insert("reason", &"Token <mismatch>");
+    let rendered = render_to_string_or_panic("csrf_error.html", &ctx);
+    assert_bare_page(&rendered);
+    assert!(rendered.contains("class=\"status-page-reason\">Token &lt;mismatch&gt;</p>"));
 }
 
 fn ad_blocker_bait_names(text: &str) -> Vec<String> {

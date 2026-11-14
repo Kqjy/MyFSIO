@@ -295,6 +295,7 @@
         });
       })();
     </script>
+    {% block flash_toasts %}
     <script>
       (function () {
 
@@ -308,6 +309,7 @@
         {% endif %}
       })();
     </script>
+    {% endblock %}
     <script src="{{ url_for(endpoint="static", filename="js/ui-core.js") }}"></script>
     <script src="{{ url_for(endpoint="static", filename="js/command-palette.js") }}"></script>
     {% block extra_scripts %}{% endblock %}
