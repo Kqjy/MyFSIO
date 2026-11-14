@@ -213,6 +213,27 @@
 	overflow-wrap: anywhere;
 }
 
+#domainTable {
+	table-layout: fixed;
+}
+
+#domainTable .ui-name > .ui-mono {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.ad-domain-col-bucket {
+	width: 24%;
+}
+
+.ad-domain-col-dns {
+	width: 130px;
+}
+
+.ad-domain-col-actions {
+	width: 150px;
+}
+
 .ad-filter {
 	flex: 1 1 200px;
 	max-width: 320px;
@@ -274,6 +295,14 @@
 	.ad-row-actions {
 		flex-direction: column;
 		align-items: stretch;
+	}
+
+	.ad-domain-col-dns {
+		width: 104px;
+	}
+
+	.ad-domain-col-actions {
+		width: 84px;
 	}
 }
 
