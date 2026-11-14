@@ -225,7 +225,7 @@ impl FsStorageBackend {
             candidates.push((archived_at, version_id, path, record));
         }
 
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
         let Some((_, version_id, manifest_path, record)) = candidates.into_iter().next() else {
             return Ok(None);
         };

@@ -1988,7 +1988,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 }
             }
 
-            versions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+            versions.sort_by_key(|v| std::cmp::Reverse(v.last_modified));
 
             Ok(versions)
         })
