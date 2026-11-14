@@ -289,7 +289,7 @@ function bootstrapHistorySection() {
   });
 
   var historyTabButton = document.getElementById('historyTabBtn');
-  historyTabButton?.addEventListener('shown.bs.tab', function() {
+  historyTabButton?.addEventListener('ui:tab', function() {
     [cpuChart, memoryChart, diskChart, storageChart, storageBucketChart].forEach(function(chart) {
       if (chart) chart.resize();
     });

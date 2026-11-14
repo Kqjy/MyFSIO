@@ -21,18 +21,18 @@
         <path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/>
       </svg>
     </button>
-    <div class="dropdown">
-      <button class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center justify-content-center" style="width: 32px; height: 32px; padding: 0;" type="button" data-bs-toggle="dropdown" title="Export metrics data">
+    <div>
+      <button class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center justify-content-center" style="width: 32px; height: 32px; padding: 0;" type="button" popovertarget="metricsExportMenu" aria-haspopup="menu" aria-expanded="false" aria-label="Export metrics data" data-ui-tip="Export metrics data" data-ui-tip-side="bottom">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
           <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
           <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
         </svg>
       </button>
-      <ul class="dropdown-menu dropdown-menu-end">
-        <li><button type="button" class="dropdown-item" id="exportSystem">System Metrics (JSON)</button></li>
-        {% if operation_metrics_enabled %}<li><button type="button" class="dropdown-item" id="exportOps">Operation Metrics (JSON)</button></li>{% endif %}
-        {% if metrics_history_enabled %}<li><button type="button" class="dropdown-item" id="exportHistory">History Data (JSON)</button></li>{% endif %}
-      </ul>
+      <div class="ui-menu" id="metricsExportMenu" popover data-ui-align-end>
+        <button type="button" class="ui-menu-item" id="exportSystem">System Metrics (JSON)</button>
+        {% if operation_metrics_enabled %}<button type="button" class="ui-menu-item" id="exportOps">Operation Metrics (JSON)</button>{% endif %}
+        {% if metrics_history_enabled %}<button type="button" class="ui-menu-item" id="exportHistory">History Data (JSON)</button>{% endif %}
+      </div>
     </div>
     <button class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center justify-content-center" style="width: 32px; height: 32px; padding: 0;" id="refreshMetricsBtn" title="Refresh now">
       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
@@ -48,7 +48,7 @@
     <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
   </svg>
   <div>Failed to fetch metrics. The API server may be unreachable.</div>
-  <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close" style="font-size: 0.65rem;"></button>
+  <button type="button" class="btn-close ms-auto" id="metricsErrorDismiss" aria-label="Dismiss" style="font-size: 0.65rem;"></button>
 </div>
 
 {% set health_count = health.issues | length %}
@@ -73,25 +73,19 @@
   </div>
 </div>
 
-<ul class="nav nav-tabs mb-4" id="metricsTabs" role="tablist">
-  <li class="nav-item" role="presentation">
-    <button class="nav-link active" id="systemTabBtn" data-bs-toggle="tab" data-bs-target="#systemTab" type="button" role="tab">System</button>
-  </li>
+<div class="ui-tabs mb-4" id="metricsTabs" data-ui-tabs aria-label="Metrics sections">
+  <button class="ui-tab" id="systemTabBtn" type="button" role="tab" aria-controls="systemTab" aria-selected="true">System</button>
   {% if operation_metrics_enabled %}
-  <li class="nav-item" role="presentation">
-    <button class="nav-link" id="opsTabBtn" data-bs-toggle="tab" data-bs-target="#operationsTab" type="button" role="tab">Operations</button>
-  </li>
+  <button class="ui-tab" id="opsTabBtn" type="button" role="tab" aria-controls="operationsTab" aria-selected="false">Operations</button>
   {% endif %}
   {% if metrics_history_enabled %}
-  <li class="nav-item" role="presentation">
-    <button class="nav-link" id="historyTabBtn" data-bs-toggle="tab" data-bs-target="#historyTab" type="button" role="tab">History</button>
-  </li>
+  <button class="ui-tab" id="historyTabBtn" type="button" role="tab" aria-controls="historyTab" aria-selected="false">History</button>
   {% endif %}
-</ul>
+</div>
 
-<div class="tab-content" id="metricsTabContent">
+<div id="metricsTabContent">
 
-<div class="tab-pane fade show active" id="systemTab" role="tabpanel">
+<div id="systemTab" role="tabpanel" aria-labelledby="systemTabBtn">
   <div class="row g-4 mb-4">
     <div class="col-md-6 col-xl-3">
       <div class="card shadow-sm h-100 border-0" style="border-top: 3px solid #3b82f6 !important;">
@@ -266,7 +260,7 @@
 </div>
 
 {% if operation_metrics_enabled %}
-<div class="tab-pane fade" id="operationsTab" role="tabpanel">
+<div id="operationsTab" role="tabpanel" aria-labelledby="opsTabBtn" hidden>
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
     <div class="btn-group btn-group-sm" role="group" aria-label="Traffic source">
       <input type="radio" class="btn-check" name="opScope" id="opScopeApi" value="api" autocomplete="off" checked>
@@ -467,7 +461,7 @@
 {% endif %}
 
 {% if metrics_history_enabled %}
-<div class="tab-pane fade" id="historyTab" role="tabpanel">
+<div id="historyTab" role="tabpanel" aria-labelledby="historyTabBtn" hidden>
   <div class="d-flex justify-content-between align-items-center mb-4">
     <div class="d-flex gap-2 align-items-center">
       <select class="form-select form-select-sm" id="historyTimeRange" style="width: auto;">

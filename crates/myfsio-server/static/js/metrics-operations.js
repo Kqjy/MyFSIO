@@ -1023,7 +1023,7 @@ function bootstrapOperationsSection() {
   });
 
   var operationsTabButton = document.getElementById('opsTabBtn');
-  operationsTabButton?.addEventListener('shown.bs.tab', function() {
+  operationsTabButton?.addEventListener('ui:tab', function() {
     [methodStatusChart, endpointChart, latencyEndpointChart, trendReqRate, trendThroughput, trendLatency, trendErrorRate, trendErrorCodes].forEach(function(chart) {
       if (chart) chart.resize();
     });

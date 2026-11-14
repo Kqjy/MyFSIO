@@ -450,6 +450,9 @@ try {
     });
   }
 })();
+document.getElementById('metricsErrorDismiss')?.addEventListener('click', function() {
+  document.getElementById('metrics-error-banner')?.classList.add('d-none');
+});
 } catch (error) {
   var metricsBanner = document.getElementById('metrics-error-banner');
   if (metricsBanner) metricsBanner.classList.remove('d-none');

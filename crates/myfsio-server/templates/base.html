@@ -149,7 +149,6 @@
       {% endif %}
     </div>
     <div class="ui-toasts" id="uiToasts" role="region" aria-label="Notifications"></div>
-    <script src="{{ url_for(endpoint="static", filename="js/vendor/bootstrap.bundle.min.js") }}"></script>
     <script src="{{ url_for(endpoint="static", filename="js/session-fetch.js") }}"></script>
     <script src="{{ url_for(endpoint="static", filename="js/ui-components.js") }}"></script>
     {% block flash_toasts %}{% if flashed_messages %}<script id="flashedMessages" type="application/json">{{ flashed_messages | json_island | safe }}</script>{% endif %}{% endblock %}
