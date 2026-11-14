@@ -2,81 +2,77 @@
 {% block title %}Audit log{% endblock %}
 
 {% block content %}
-<div class="d-flex flex-column gap-3">
-  <div class="d-flex justify-content-between align-items-end">
-    <div>
-      <small class="text-uppercase text-muted">Operations</small>
-      <h1 class="h3 mb-1">Audit log</h1>
-      <p class="text-muted mb-0 small">Append-only log of cross-site relayed admin actions. Each entry links origin and target by <code>correlation_id</code>.</p>
-    </div>
-    <a href="{{ url_for(endpoint="ui.audit_log") }}" class="btn btn-outline-secondary btn-sm">Refresh</a>
+<div class="ui-pagehead">
+  <div>
+    <h1>Audit log</h1>
+    <div class="ui-pagehead-sub">Append-only log of cross-site relayed admin actions. Each entry links origin and target by <code>correlation_id</code>.</div>
   </div>
-
-  {% if not audit_enabled %}
-  <div class="alert alert-warning">
-    Audit log is disabled. Set <code>AUDIT_LOG_ENABLED=true</code> to start recording cluster-relayed actions.
+  <div class="ui-pagehead-actions">
+    <a href="{{ url_for(endpoint="ui.audit_log") }}" class="ui-btn">Refresh</a>
   </div>
-  {% endif %}
+</div>
 
-  <div class="audit-filters" id="auditFilters" role="search">
-    <input class="form-control form-control-sm" type="search" id="auditSearch" placeholder="Filter by site, admin, action or correlation ID" aria-label="Filter audit entries" autocomplete="off" spellcheck="false">
-    <select class="form-select form-select-sm" id="auditDirection" aria-label="Direction">
+{% if not audit_enabled %}
+<div class="ad-note ad-note-warn ad-banner" role="alert">
+  Audit log is disabled. Set <code>AUDIT_LOG_ENABLED=true</code> to start recording cluster-relayed actions.
+</div>
+{% endif %}
+
+<section class="ui-card" aria-label="Audit entries">
+  <div class="ui-toolbar audit-filters" id="auditFilters" role="search">
+    <input class="ui-input" type="search" id="auditSearch" placeholder="Filter by site, admin, action or correlation ID" aria-label="Filter audit entries" autocomplete="off" spellcheck="false">
+    <select class="ui-select" id="auditDirection" aria-label="Direction">
       <option value="">Any direction</option>
       <option value="outbound">Outbound</option>
       <option value="inbound">Inbound</option>
     </select>
-    <select class="form-select form-select-sm" id="auditResult" aria-label="Result">
+    <select class="ui-select" id="auditResult" aria-label="Result">
       <option value="">Any result</option>
       <option value="ok">Succeeded</option>
       <option value="failed">Failed</option>
     </select>
-    <span class="audit-count text-muted small" id="auditCount" aria-live="polite">{{ entries | length }} entries</span>
+    <span class="audit-count ui-muted" id="auditCount" aria-live="polite">{{ entries | length }} entries</span>
   </div>
-
-  <div class="card">
-    <div class="card-body p-0">
-      <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0 audit-table" id="auditTable">
-          <thead class="table-light">
-            <tr>
-              <th class="ps-3">When</th>
-              <th>Origin</th>
-              <th>Admin</th>
-              <th>Action</th>
-              <th>Direction</th>
-              <th>Status</th>
-              <th class="pe-3">Correlation ID</th>
+  <div class="ui-table-wrap">
+    <table class="ui-table audit-table" id="auditTable">
+      <thead>
+        <tr>
+          <th scope="col">When</th>
+          <th scope="col">Origin</th>
+          <th scope="col">Admin</th>
+          <th scope="col">Action</th>
+          <th scope="col">Direction</th>
+          <th scope="col">Status</th>
+          <th scope="col">Correlation ID</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if entries | length == 0 %}
+          <tr><td colspan="7" class="ui-empty">No entries.</td></tr>
+        {% else %}
+          {% for e in entries %}
+            <tr data-audit-row data-direction="{% if e.target == "outbound" %}outbound{% else %}inbound{% endif %}" data-result="{% if e.result == 'ok' %}ok{% else %}failed{% endif %}">
+              <td class="ui-muted">{{ e.ts | format_datetime }}</td>
+              <td>{% if e.origin_site_id %}<code>{{ e.origin_site_id }}</code>{% else %}<span class="ui-muted">—</span>{% endif %}</td>
+              <td>{{ e.admin_user_id | default(value="") }}</td>
+              <td><code>{{ e.method }}</code> {{ e.path }}</td>
+              <td>
+                {% if e.target == "outbound" %}
+                  <span class="ui-badge">→ outbound</span>
+                {% else %}
+                  <span class="ui-badge ui-badge-accent">← inbound</span>
+                {% endif %}
+              </td>
+              <td><span class="ui-badge {% if e.result == 'ok' %}ui-badge-ok{% else %}ui-badge-bad{% endif %}">{{ e.status_code }} {{ e.result }}</span></td>
+              <td class="ui-muted"><code>{{ e.correlation_id }}</code></td>
             </tr>
-          </thead>
-          <tbody>
-            {% if entries | length == 0 %}
-              <tr><td colspan="7" class="text-center text-muted py-4">No entries.</td></tr>
-            {% else %}
-              {% for e in entries %}
-                <tr data-audit-row data-direction="{% if e.target == "outbound" %}outbound{% else %}inbound{% endif %}" data-result="{% if e.result == 'ok' %}ok{% else %}failed{% endif %}">
-                  <td class="ps-3 small text-muted">{{ e.ts | format_datetime }}</td>
-                  <td>{% if e.origin_site_id %}<code class="small">{{ e.origin_site_id }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</td>
-                  <td class="small">{{ e.admin_user_id | default(value="") }}</td>
-                  <td class="small"><code>{{ e.method }}</code> {{ e.path }}</td>
-                  <td>
-                    {% if e.target == "outbound" %}
-                      <span class="badge bg-info-subtle text-info">→ outbound</span>
-                    {% else %}
-                      <span class="badge bg-primary-subtle text-primary">← inbound</span>
-                    {% endif %}
-                  </td>
-                  <td class="small {% if e.result == 'ok' %}text-success{% else %}text-danger{% endif %}">{{ e.status_code }} {{ e.result }}</td>
-                  <td class="pe-3 small text-muted"><code>{{ e.correlation_id }}</code></td>
-                </tr>
-              {% endfor %}
-              <tr id="auditNoMatch" hidden><td colspan="7" class="text-center text-muted py-4">No entries match these filters.</td></tr>
-            {% endif %}
-          </tbody>
-        </table>
-      </div>
-    </div>
+          {% endfor %}
+          <tr id="auditNoMatch" hidden><td colspan="7" class="ui-empty">No entries match these filters.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
   </div>
-</div>
+</section>
 {% endblock %}
 
 {% block extra_scripts %}

@@ -3,22 +3,22 @@
 {% block content %}
 <div class="docs-head">
   <div>
-    <h1 class="h3 mb-1">Documentation</h1>
-    <p class="text-muted mb-0">Install, authenticate, use the console, and automate everything through the API.</p>
+    <h1>Documentation</h1>
+    <p class="ui-muted">Install, authenticate, use the console, and automate everything through the API.</p>
   </div>
   <div class="docs-head-api">
-    <div class="small text-uppercase text-muted">API base URL</div>
-    <code class="text-wrap">{{ api_base }}</code>
+    <div class="docs-eyebrow">API base URL</div>
+    <code>{{ api_base }}</code>
   </div>
 </div>
 <div class="docs-layout" id="docsLayout">
   <aside class="docs-index" id="docsIndex" aria-label="Documentation sections">
     <div class="docs-index-search">
-      <input class="form-control form-control-sm" type="search" id="docsSearch" placeholder="Search the docs" aria-label="Search the docs" autocomplete="off" spellcheck="false">
-      <button class="btn btn-sm btn-outline-secondary docs-index-toggle" type="button" id="docsIndexToggle" aria-expanded="false" aria-controls="docsToc">Sections</button>
+      <input class="ui-input" type="search" id="docsSearch" placeholder="Search the docs" aria-label="Search the docs" autocomplete="off" spellcheck="false">
+      <button class="ui-btn ui-btn-sm docs-index-toggle" type="button" id="docsIndexToggle" aria-expanded="false" aria-controls="docsToc">Sections</button>
     </div>
-    <p class="docs-index-status small text-muted mb-0" id="docsSearchStatus" aria-live="polite" hidden></p>
-    <ul class="list-unstyled docs-toc mb-0" id="docsToc">
+    <p class="docs-index-status docs-note" id="docsSearchStatus" aria-live="polite" hidden></p>
+    <ul class="docs-toc" id="docsToc">
     <li><a href="#setup">Set up &amp; run</a></li>
     <li><a href="#background">Running in background</a></li>
     <li><a href="#auth">Authentication &amp; IAM</a></li>
@@ -52,37 +52,37 @@
     <li><a href="#upgrading">Upgrading &amp; Updates</a></li>
     <li><a href="#api-matrix">Full API Reference</a></li>
     </ul>
-        <div class="docs-sidebar-callouts docs-index-callouts">
+        <div class="docs-index-callouts">
           <div>
-            <div class="small text-uppercase text-muted">API base</div>
-            <code class="d-block">{{ api_base }}</code>
+            <div class="docs-eyebrow">API base</div>
+            <code class="docs-code-line">{{ api_base }}</code>
           </div>
           <div>
-            <div class="small text-uppercase text-muted">Initial credentials</div>
-            <span class="text-muted small">Generated on first run (check console)</span>
+            <div class="docs-eyebrow">Initial credentials</div>
+            <span class="docs-note">Generated on first run (check console)</span>
           </div>
           <div>
-            <div class="small text-uppercase text-muted">Logs</div>
-            <span class="text-muted small">stdout, journald, or container logs</span>
+            <div class="docs-eyebrow">Logs</div>
+            <span class="docs-note">stdout, journald, or container logs</span>
           </div>
         </div>
   </aside>
   <div class="docs-body" id="docsBody">
-    <article id="setup" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="setup" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">01</span>
-          <h2 class="h4 mb-0">Set up &amp; run locally</h2>
+          <h2>Set up &amp; run locally</h2>
         </div>
-        <p class="text-muted">Build or run the Rust server and launch the API plus web UI from a single process.</p>
-        <div class="alert alert-light border small mb-3">
+        <p class="ui-muted">Build or run the Rust server and launch the API plus web UI from a single process.</p>
+        <div class="ad-note">
           Runtime note: the repository root is the Cargo workspace. For the verified runtime configuration list, use the repository <code>docs.md</code>.
         </div>
         <ol class="docs-steps">
           <li>Install a current Rust toolchain.</li>
           <li>From the repository root, start the server with <code>cargo run -p myfsio-server --</code>.</li>
         </ol>
-<pre class="mb-3"><code class="language-bash"># Run API + UI
+<pre><code class="language-bash"># Run API + UI
 cargo run -p myfsio-server --
 
 # Show resolved configuration
@@ -98,15 +98,15 @@ UI_ENABLED=false cargo run -p myfsio-server --
 cargo build --release -p myfsio-server
 ./target/release/myfsio-server
 </code></pre>
-        <h3 class="h6 mt-4 mb-2">Configuration</h3>
-        <p class="text-muted small">Configuration is driven by the Rust server environment. See <code>docs.md</code> for the authoritative runtime variables.</p>
-        <div class="table-responsive">
-          <table class="table table-sm table-bordered small mb-0">
-            <thead class="table-light">
+        <h3 class="docs-minor">Configuration</h3>
+        <p class="docs-note">Configuration is driven by the Rust server environment. See <code>docs.md</code> for the authoritative runtime variables.</p>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
-                <th style="min-width: 180px;">Variable</th>
-                <th style="min-width: 120px;">Default</th>
-                <th class="text-wrap" style="min-width: 250px;">Description</th>
+                <th class="docs-col-key">Variable</th>
+                <th class="docs-col-default">Default</th>
+                <th class="docs-col-text">Description</th>
               </tr>
             </thead>
             <tbody>
@@ -205,8 +205,8 @@ cargo build --release -p myfsio-server
                 <td><code>1048576</code></td>
                 <td>Default streaming chunk size for routes that opt into configured chunking (1&nbsp;MiB).</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">CORS Settings</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">CORS Settings</td>
               </tr>
               <tr>
                 <td><code>CORS_ORIGINS</code></td>
@@ -228,8 +228,8 @@ cargo build --release -p myfsio-server
                 <td><code>*</code></td>
                 <td>Response headers visible to browsers (e.g., <code>ETag</code>).</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Rate Limiting</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Rate Limiting</td>
               </tr>
               <tr>
                 <td><code>RATE_LIMIT_DEFAULT</code></td>
@@ -276,8 +276,8 @@ cargo build --release -p myfsio-server
                 <td>(none)</td>
                 <td>Custom secret key for the admin user on first run or credential reset. Random if unset.</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Feature Toggles</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Feature Toggles</td>
               </tr>
               <tr>
                 <td><code>ENCRYPTION_ENABLED</code></td>
@@ -314,8 +314,8 @@ cargo build --release -p myfsio-server
                 <td><code>false</code></td>
                 <td>Start the bi-directional site sync worker.</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Metrics History Settings</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Metrics History Settings</td>
               </tr>
               <tr>
                 <td><code>METRICS_HISTORY_ENABLED</code></td>
@@ -352,8 +352,8 @@ cargo build --release -p myfsio-server
                 <td><code>24</code></td>
                 <td>Operation metrics retention window; minimum <code>1</code>.</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Site Sync Settings (Bidirectional Replication)</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Site Sync Settings (Bidirectional Replication)</td>
               </tr>
               <tr>
                 <td><code>SITE_SYNC_ENABLED</code></td>
@@ -390,8 +390,8 @@ cargo build --release -p myfsio-server
                 <td><code>1.0</code></td>
                 <td>Clock skew tolerance for conflict resolution.</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Replication Settings</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Replication Settings</td>
               </tr>
               <tr>
                 <td><code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code></td>
@@ -438,8 +438,8 @@ cargo build --release -p myfsio-server
                 <td><code>0</code></td>
                 <td>Optional full object-listing and sidecar consistency pass interval in hours. The default <code>0</code> disables it.</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Security & Auth Settings</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Security & Auth Settings</td>
               </tr>
               <tr>
                 <td><code>SIGV4_TIMESTAMP_TOLERANCE_SECONDS</code></td>
@@ -461,8 +461,8 @@ cargo build --release -p myfsio-server
                 <td><code>604800</code></td>
                 <td>Maximum presigned URL expiry time (7 days). The UI reports when a preset is clamped to this bound.</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Proxy &amp; Network Settings</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Proxy &amp; Network Settings</td>
               </tr>
               <tr>
                 <td><code>NUM_TRUSTED_PROXIES</code></td>
@@ -479,8 +479,8 @@ cargo build --release -p myfsio-server
                 <td><code>false</code></td>
                 <td>Allow connections to internal/private IPs (webhooks, replication).</td>
               </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Storage Limits</td>
+              <tr class="docs-table-group">
+                <td colspan="3" class="docs-strong">Storage Limits</td>
               </tr>
               <tr>
                 <td><code>OBJECT_KEY_MAX_LENGTH_BYTES</code></td>
@@ -525,22 +525,22 @@ cargo build --release -p myfsio-server
             </tbody>
           </table>
         </div>
-        <div class="alert alert-warning mt-3 mb-0 small">
+        <div class="ad-note ad-note-warn">
           <strong>Production Checklist:</strong> Set <code>SECRET_KEY</code> (also enables IAM config encryption at rest), restrict <code>CORS_ORIGINS</code>, configure <code>API_BASE_URL</code>, enable HTTPS via a reverse proxy, run <code>myfsio-server --check-config</code> before starting, and set credential expiry on non-admin users.
         </div>
       </div>
     </article>
-    <article id="background" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="background" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">02</span>
-          <h2 class="h4 mb-0">Running in background</h2>
+          <h2>Running in background</h2>
         </div>
-        <p class="text-muted">For production or server deployments, run MyFSIO as a background service so it persists after you close the terminal.</p>
+        <p class="ui-muted">For production or server deployments, run MyFSIO as a background service so it persists after you close the terminal.</p>
         
-        <h3 class="h6 text-uppercase text-muted mt-4">Quick Start (nohup)</h3>
-        <p class="text-muted small">Simplest way to run in background—survives terminal close:</p>
-<pre class="mb-3"><code class="language-bash"># From the repository
+        <h3 class="docs-sub">Quick Start (nohup)</h3>
+        <p class="docs-note">Simplest way to run in background—survives terminal close:</p>
+<pre><code class="language-bash"># From the repository
 nohup cargo run -p myfsio-server -- > /dev/null 2>&1 &
 
 # Using a compiled binary
@@ -549,9 +549,9 @@ nohup ./myfsio-server > /dev/null 2>&1 &
 # Check if running
 ps aux | grep myfsio-server</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Screen / Tmux</h3>
-        <p class="text-muted small">Attach/detach from a persistent session:</p>
-<pre class="mb-3"><code class="language-bash"># Start in a detached screen session
+        <h3 class="docs-sub">Screen / Tmux</h3>
+        <p class="docs-note">Attach/detach from a persistent session:</p>
+<pre><code class="language-bash"># Start in a detached screen session
 screen -dmS myfsio ./myfsio-server
 
 # Attach to view logs
@@ -559,9 +559,9 @@ screen -r myfsio
 
 # Detach: press Ctrl+A, then D</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Systemd (Recommended for Production)</h3>
-        <p class="text-muted small">Create <code>/etc/systemd/system/myfsio.service</code>:</p>
-<pre class="mb-3"><code class="language-ini">[Unit]
+        <h3 class="docs-sub">Systemd (Recommended for Production)</h3>
+        <p class="docs-note">Create <code>/etc/systemd/system/myfsio.service</code>:</p>
+<pre><code class="language-ini">[Unit]
 Description=MyFSIO S3-Compatible Storage
 After=network.target
 
@@ -577,8 +577,8 @@ Environment=API_BASE_URL=https://s3.example.com
 
 [Install]
 WantedBy=multi-user.target</code></pre>
-        <p class="text-muted small">Then enable and start:</p>
-<pre class="mb-0"><code class="language-bash">sudo systemctl daemon-reload
+        <p class="docs-note">Then enable and start:</p>
+<pre><code class="language-bash">sudo systemctl daemon-reload
 sudo systemctl enable myfsio
 sudo systemctl start myfsio
 
@@ -587,15 +587,15 @@ sudo systemctl status myfsio
 sudo journalctl -u myfsio -f   # View logs</code></pre>
       </div>
     </article>
-    <article id="auth" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="auth" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">03</span>
-          <h2 class="h4 mb-0">Authenticate &amp; manage IAM</h2>
+          <h2>Authenticate &amp; manage IAM</h2>
         </div>
-        <p class="text-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Set <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> for custom credentials. When <code>SECRET_KEY</code> is configured, the IAM config is encrypted at rest. To reset credentials, run <code>cargo run -p myfsio-server -- --reset-cred</code> or the installed binary with <code>--reset-cred</code>.</p>
-        <div class="docs-highlight mb-3">
-          <ol class="mb-0">
+        <p class="ui-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Set <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> for custom credentials. When <code>SECRET_KEY</code> is configured, the IAM config is encrypted at rest. To reset credentials, run <code>cargo run -p myfsio-server -- --reset-cred</code> or the installed binary with <code>--reset-cred</code>.</p>
+        <div class="docs-highlight">
+          <ol>
             <li>Check the console output for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/login</code>.</li>
             <li>Create additional users with descriptive display names, AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>), and optional credential expiry dates. Use <code>{"bucket": "*", "actions": ["*"]}</code> to grant full administrator access — this is the only policy shape that satisfies <code>require_admin</code> on routes such as <code>/myfsio/admin/cluster/overview</code>. <code>iam:*</code> grants only IAM-management actions and is <strong>not</strong> a substitute for <code>"*"</code> on admin routes.</li>
             <li>Set credential expiry on users to grant time-limited access. The UI shows expiry badges and provides preset durations (1h, 24h, 7d, 30d, 90d). Expired credentials are rejected at authentication.</li>
@@ -603,34 +603,34 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
           </ol>
         </div>
-        <p class="mb-2 text-muted">S3 API calls use SigV4 by default. The legacy <code>X-Access-Key</code> and <code>X-Secret-Key</code> header pair works only when <code>ALLOW_LEGACY_HEADER_AUTH=true</code>, and peer credentials are always SigV4-only. The UI stores credentials in the server-managed session after you log in.</p>
-        <p class="mb-0 text-muted">PutObject, UploadPart, POST policy uploads, and SSE-C variants stream-verify <code>Content-MD5</code> plus SHA-256, SHA-1, CRC32, CRC32C, and CRC64NVME checksums. Aws-chunked checksum trailers and signed SigV4 chunk/trailer chains are verified before commit. GET and HEAD expose stored checksum headers only with <code>x-amz-checksum-mode: ENABLED</code>.</p>
+        <p class="ui-muted">S3 API calls use SigV4 by default. The legacy <code>X-Access-Key</code> and <code>X-Secret-Key</code> header pair works only when <code>ALLOW_LEGACY_HEADER_AUTH=true</code>, and peer credentials are always SigV4-only. The UI stores credentials in the server-managed session after you log in.</p>
+        <p class="ui-muted">PutObject, UploadPart, POST policy uploads, and SSE-C variants stream-verify <code>Content-MD5</code> plus SHA-256, SHA-1, CRC32, CRC32C, and CRC64NVME checksums. Aws-chunked checksum trailers and signed SigV4 chunk/trailer chains are verified before commit. GET and HEAD expose stored checksum headers only with <code>x-amz-checksum-mode: ENABLED</code>.</p>
       </div>
     </article>
-    <article id="console" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="console" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">04</span>
-          <h2 class="h4 mb-0">Use the console effectively</h2>
+          <h2>Use the console effectively</h2>
         </div>
-        <p class="text-muted">Each workspace models an S3 workflow so you can administer buckets end-to-end.</p>
+        <p class="ui-muted">Each workspace models an S3 workflow so you can administer buckets end-to-end.</p>
         <div class="docs-pill-list">
           <div>
-            <h3 class="h6 text-uppercase text-muted">Buckets</h3>
+            <h3 class="docs-sub">Buckets</h3>
             <ul>
               <li>Create/delete buckets from the overview. Badges reveal IAM-only, public-read, or custom-policy states.</li>
               <li>Summary stats show live object counts and total capacity; click through for inventories.</li>
             </ul>
           </div>
           <div>
-            <h3 class="h6 text-uppercase text-muted">Uploads</h3>
+            <h3 class="docs-sub">Uploads</h3>
             <ul>
               <li>Drag and drop folders or files into the upload modal. Objects above 8&nbsp;MB switch to multipart automatically.</li>
               <li>Progress rows highlight retries, throughput, and completion even if you close the modal.</li>
             </ul>
           </div>
           <div>
-            <h3 class="h6 text-uppercase text-muted">Object browser</h3>
+            <h3 class="docs-sub">Object browser</h3>
             <ul>
               <li>Navigate folder hierarchies using breadcrumbs. Objects with <code>/</code> in keys display as folders.</li>
               <li>Infinite scroll loads more objects automatically.</li>
@@ -639,7 +639,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             </ul>
           </div>
           <div>
-            <h3 class="h6 text-uppercase text-muted">Object details</h3>
+            <h3 class="docs-sub">Object details</h3>
             <ul>
               <li>Selecting an object opens the preview card with metadata, inline viewers, presign generator, and version history.</li>
               <li>Storage sizes use 1024-byte binary units labeled KiB, MiB, GiB, TiB, and PiB.</li>
@@ -648,7 +648,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             </ul>
           </div>
           <div>
-            <h3 class="h6 text-uppercase text-muted">Policies &amp; versioning</h3>
+            <h3 class="docs-sub">Policies &amp; versioning</h3>
             <ul>
               <li>Toggle versioning (requires admin). Archived-only keys are flagged so you can restore them quickly.</li>
               <li>The policy editor saves each bucket policy in that bucket's <code>.bucket.json</code>; legacy <code>data/.myfsio.sys/config/bucket_policies.json</code> entries are still read as a fallback.</li>
@@ -657,16 +657,16 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
         </div>
       </div>
     </article>
-    <article id="automation" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="automation" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">05</span>
-          <h2 class="h4 mb-0">Automate with CLI &amp; tools</h2>
+          <h2>Automate with CLI &amp; tools</h2>
         </div>
-        <p class="text-muted">Point standard S3 clients at {{ api_base }} and reuse the same IAM credentials.</p>
-        <div class="mb-4">
-          <h3 class="h6 text-uppercase text-muted">AWS CLI</h3>
-<pre class="mb-3"><code class="language-bash">aws configure set aws_access_key_id &lt;access_key&gt;
+        <p class="ui-muted">Point standard S3 clients at {{ api_base }} and reuse the same IAM credentials.</p>
+        <div class="docs-block">
+          <h3 class="docs-sub">AWS CLI</h3>
+<pre><code class="language-bash">aws configure set aws_access_key_id &lt;access_key&gt;
 aws configure set aws_secret_access_key &lt;secret_key&gt;
 aws configure set default.region us-east-1
 
@@ -675,9 +675,9 @@ aws --endpoint-url {{ api_base }} s3api create-bucket --bucket demo
 aws --endpoint-url {{ api_base }} s3 cp ./sample.txt s3://demo/sample.txt
 </code></pre>
         </div>
-        <div class="mb-4">
-          <h3 class="h6 text-uppercase text-muted">s3cmd</h3>
-<pre class="mb-3"><code class="language-bash">cat &gt; ~/.s3cfg-myfsio &lt;&lt;'EOF'
+        <div class="docs-block">
+          <h3 class="docs-sub">s3cmd</h3>
+<pre><code class="language-bash">cat &gt; ~/.s3cfg-myfsio &lt;&lt;'EOF'
 host_base = {{ api_host }}
 host_bucket = %(bucket)s.{{ api_host }}
 access_key = &lt;access_key&gt;
@@ -691,8 +691,8 @@ s3cmd --config ~/.s3cfg-myfsio put notes.txt s3://demo/notes.txt
 </code></pre>
         </div>
         <div>
-          <h3 class="h6 text-uppercase text-muted">curl / HTTPie</h3>
-<pre class="mb-0"><code class="language-bash">curl {{ api_base }}/ \
+          <h3 class="docs-sub">curl / HTTPie</h3>
+<pre><code class="language-bash">curl {{ api_base }}/ \
   -H "X-Access-Key: &lt;access_key&gt;" \
   -H "X-Secret-Key: &lt;secret_key&gt;"
 
@@ -707,14 +707,14 @@ curl -X PUT {{ api_base }}/demo/notes.txt \
         </div>
       </div>
     </article>
-    <article id="api" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="api" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">06</span>
-          <h2 class="h4 mb-0">Key REST endpoints</h2>
+          <h2>Key REST endpoints</h2>
         </div>
-        <div class="table-responsive">
-          <table class="table table-sm table-borderless align-middle docs-table mb-0">
+        <div class="ui-table-wrap">
+          <table class="docs-table docs-table-plain">
             <thead>
               <tr>
                 <th scope="col">Method</th>
@@ -826,19 +826,19 @@ curl -X PUT {{ api_base }}/demo/notes.txt \
             </tbody>
           </table>
         </div>
-        <p class="small text-muted mt-3 mb-0">All responses include <code>X-Request-Id</code> for tracing. See the <a href="#api-matrix">Full API Reference</a> for the complete endpoint list. When running the Rust server, logs go to stdout and whatever service manager or container runtime is supervising the process.</p>
+        <p class="docs-note docs-note-gap">All responses include <code>X-Request-Id</code> for tracing. See the <a href="#api-matrix">Full API Reference</a> for the complete endpoint list. When running the Rust server, logs go to stdout and whatever service manager or container runtime is supervising the process.</p>
       </div>
     </article>
-    <article id="examples" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="examples" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">07</span>
-          <h2 class="h4 mb-0">API Examples</h2>
+          <h2>API Examples</h2>
         </div>
-        <p class="text-muted">Common operations using popular SDKs and tools.</p>
+        <p class="ui-muted">Common operations using popular SDKs and tools.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Python (boto3)</h3>
-<pre class="mb-4"><code class="language-python">import boto3
+        <h3 class="docs-sub">Python (boto3)</h3>
+<pre><code class="language-python">import boto3
 
 s3 = boto3.client(
     's3',
@@ -866,8 +866,8 @@ url = s3.generate_presigned_url(
     ExpiresIn=3600
 )</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">JavaScript (AWS SDK v3)</h3>
-<pre class="mb-4"><code class="language-javascript">import { S3Client, ListBucketsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+        <h3 class="docs-sub">JavaScript (AWS SDK v3)</h3>
+<pre><code class="language-javascript">import { S3Client, ListBucketsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const s3 = new S3Client({
   endpoint: '{{ api_base }}',
@@ -889,8 +889,8 @@ await s3.send(new PutObjectCommand({
   Body: 'Hello, World!'
 }));</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Multipart Upload (Python)</h3>
-<pre class="mb-4"><code class="language-python">import boto3
+        <h3 class="docs-sub">Multipart Upload (Python)</h3>
+<pre><code class="language-python">import boto3
 
 s3 = boto3.client('s3', endpoint_url='{{ api_base }}')
 
@@ -918,10 +918,10 @@ s3.complete_multipart_upload(
     UploadId=upload_id,
     MultipartUpload={'Parts': parts}
 )</code></pre>
-        <p class="small text-muted">CompleteMultipartUpload returns the completed object's version in the <code>x-amz-version-id</code> response header when versioning is active.</p>
+        <p class="docs-note">CompleteMultipartUpload returns the completed object's version in the <code>x-amz-version-id</code> response header when versioning is active.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Presigned URLs for Sharing</h3>
-<pre class="mb-0"><code class="language-text"># Generate presigned URLs via the UI:
+        <h3 class="docs-sub">Presigned URLs for Sharing</h3>
+<pre><code class="language-text"># Generate presigned URLs via the UI:
 # 1. Navigate to your bucket in the object browser
 # 2. Select the object you want to share
 # 3. Click the "Presign" button
@@ -933,17 +933,17 @@ s3.complete_multipart_upload(
 # - Expiration: 1 second to 7 days (604800 seconds)</code></pre>
       </div>
     </article>
-    <article id="replication" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="replication" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">08</span>
-          <h2 class="h4 mb-0">Site Replication &amp; Sync</h2>
+          <h2>Site Replication &amp; Sync</h2>
         </div>
-        <p class="text-muted">Replicate objects to another MyFSIO instance or S3-compatible service. Supports one-way replication for backup and bi-directional sync for geo-distributed deployments.</p>
-        <p class="small text-muted">Pending puts, deletes, and delete markers are fsynced to <code>data/.myfsio.sys/buckets/&lt;bucket&gt;/replication/pending.journal.jsonl</code> before enqueue and compacted into <code>pending.snapshot.json</code>. Startup replays this ledger without listing objects or reading metadata sidecars. Pre-ledger buckets migrate once; unreadable or oversized ledger state triggers a recovery scan. Normal healer passes use only the ledger and persisted failure records unless <code>REPLICATION_FULL_RECONCILE_INTERVAL_HOURS</code> enables a low-frequency consistency scan.</p>
+        <p class="ui-muted">Replicate objects to another MyFSIO instance or S3-compatible service. Supports one-way replication for backup and bi-directional sync for geo-distributed deployments.</p>
+        <p class="docs-note">Pending puts, deletes, and delete markers are fsynced to <code>data/.myfsio.sys/buckets/&lt;bucket&gt;/replication/pending.journal.jsonl</code> before enqueue and compacted into <code>pending.snapshot.json</code>. Startup replays this ledger without listing objects or reading metadata sidecars. Pre-ledger buckets migrate once; unreadable or oversized ledger state triggers a recovery scan. Normal healer passes use only the ledger and persisted failure records unless <code>REPLICATION_FULL_RECONCILE_INTERVAL_HOURS</code> enables a low-frequency consistency scan.</p>
         
-        <h3 class="h6 text-uppercase text-muted mt-4">Setup Guide</h3>
-        <ol class="docs-steps mb-3">
+        <h3 class="docs-sub">Setup Guide</h3>
+        <ol class="docs-steps">
             <li>
                 <strong>Prepare Target:</strong> On the destination server, create a bucket (e.g., <code>backup-bucket</code>) and an IAM user with write permissions.
             </li>
@@ -955,23 +955,23 @@ s3.complete_multipart_upload(
             </li>
         </ol>
 
-        <div class="alert alert-light border mb-3">
-            <div class="d-flex gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+            <div class="docs-aside">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
                   <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
                   <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
                 </svg>
                 <div>
                     <strong>Headless Target Setup</strong>
-                    <p class="small text-muted mb-0">If your target server has no UI, start it with <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> set so the first-run bootstrap installs deterministic credentials, then create the destination bucket via the AWS CLI: <code>aws --endpoint-url &lt;target&gt; s3api create-bucket --bucket backup-bucket</code>. Use the admin API at <code>/myfsio/admin/iam/users</code> (or <code>--reset-cred</code>) to manage credentials remotely.</p>
+                    <p class="docs-note">If your target server has no UI, start it with <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> set so the first-run bootstrap installs deterministic credentials, then create the destination bucket via the AWS CLI: <code>aws --endpoint-url &lt;target&gt; s3api create-bucket --bucket backup-bucket</code>. Use the admin API at <code>/myfsio/admin/iam/users</code> (or <code>--reset-cred</code>) to manage credentials remotely.</p>
                 </div>
             </div>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Replication Modes</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Replication Modes</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Mode</th>
                 <th>Description</th>
@@ -994,12 +994,12 @@ s3.complete_multipart_upload(
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Bidirectional Site Replication</h3>
-        <p class="small text-muted">For true two-way synchronization with automatic conflict resolution, use the <code>bidirectional</code> mode. Both sites must be configured to sync with each other.</p>
+        <h3 class="docs-sub">Bidirectional Site Replication</h3>
+        <p class="docs-note">For true two-way synchronization with automatic conflict resolution, use the <code>bidirectional</code> mode. Both sites must be configured to sync with each other.</p>
 
-        <div class="alert alert-info border small mb-3">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-info mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -1009,17 +1009,17 @@ s3.complete_multipart_upload(
           </div>
         </div>
 
-        <h4 class="h6 mt-4 mb-2">Step 1: Enable Site Sync on Both Sites</h4>
-        <p class="small text-muted">Set these environment variables on <strong>both</strong> Site A and Site B:</p>
-<pre class="mb-3"><code class="language-bash">SITE_SYNC_ENABLED=true
+        <h4 class="docs-minor">Step 1: Enable Site Sync on Both Sites</h4>
+        <p class="docs-note">Set these environment variables on <strong>both</strong> Site A and Site B:</p>
+<pre><code class="language-bash">SITE_SYNC_ENABLED=true
 SITE_SYNC_INTERVAL_SECONDS=60   # How often to pull changes
 SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
 
-        <h4 class="h6 mt-4 mb-2">Step 2: Create IAM Users for Cross-Site Access</h4>
-        <p class="small text-muted">On each site, create an IAM user that the other site will use to connect:</p>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h4 class="docs-minor">Step 2: Create IAM Users for Cross-Site Access</h4>
+        <p class="docs-note">On each site, create an IAM user that the other site will use to connect:</p>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Site</th>
                 <th>Create User For</th>
@@ -1041,27 +1041,27 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
           </table>
         </div>
 
-        <h4 class="h6 mt-4 mb-2">Step 3: Create Connections</h4>
-        <p class="small text-muted">On each site, add a connection pointing to the other:</p>
-        <div class="row g-3 mb-3">
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On Site A</strong></div>
-              <div class="card-body small">
-                <p class="mb-1">Go to <strong>Connections</strong> and add:</p>
-                <ul class="mb-0 ps-3">
+        <h4 class="docs-minor">Step 3: Create Connections</h4>
+        <p class="docs-note">On each site, add a connection pointing to the other:</p>
+        <div class="docs-cols">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>On Site A</strong></div>
+              <div class="docs-box-body">
+                <p>Go to <strong>Connections</strong> and add:</p>
+                <ul>
                   <li>Endpoint: <code>https://site-b.example.com</code></li>
                   <li>Credentials: Site B's IAM user</li>
                 </ul>
               </div>
             </div>
           </div>
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On Site B</strong></div>
-              <div class="card-body small">
-                <p class="mb-1">Go to <strong>Connections</strong> and add:</p>
-                <ul class="mb-0 ps-3">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>On Site B</strong></div>
+              <div class="docs-box-body">
+                <p>Go to <strong>Connections</strong> and add:</p>
+                <ul>
                   <li>Endpoint: <code>https://site-a.example.com</code></li>
                   <li>Credentials: Site A's IAM user</li>
                 </ul>
@@ -1070,14 +1070,14 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
           </div>
         </div>
 
-        <h4 class="h6 mt-4 mb-2">Step 4: Enable Bidirectional Replication</h4>
-        <p class="small text-muted">On each site, go to the bucket's <strong>Replication</strong> tab and enable with mode <code>bidirectional</code>:</p>
-        <div class="row g-3 mb-3">
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On Site A</strong></div>
-              <div class="card-body small">
-                <ul class="mb-0 ps-3">
+        <h4 class="docs-minor">Step 4: Enable Bidirectional Replication</h4>
+        <p class="docs-note">On each site, go to the bucket's <strong>Replication</strong> tab and enable with mode <code>bidirectional</code>:</p>
+        <div class="docs-cols">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>On Site A</strong></div>
+              <div class="docs-box-body">
+                <ul>
                   <li>Source bucket: <code>my-bucket</code></li>
                   <li>Target: Site B connection</li>
                   <li>Target bucket: <code>my-bucket</code></li>
@@ -1086,11 +1086,11 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
               </div>
             </div>
           </div>
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On Site B</strong></div>
-              <div class="card-body small">
-                <ul class="mb-0 ps-3">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>On Site B</strong></div>
+              <div class="docs-box-body">
+                <ul>
                   <li>Source bucket: <code>my-bucket</code></li>
                   <li>Target: Site A connection</li>
                   <li>Target bucket: <code>my-bucket</code></li>
@@ -1101,8 +1101,8 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
           </div>
         </div>
 
-        <h4 class="h6 mt-4 mb-2">How It Works</h4>
-        <ul class="small text-muted mb-3">
+        <h4 class="docs-minor">How It Works</h4>
+        <ul class="docs-note">
             <li><strong>PUSH:</strong> Local changes replicate to remote immediately on write/delete</li>
             <li><strong>PULL:</strong> Background worker fetches remote changes every <code>SITE_SYNC_INTERVAL_SECONDS</code></li>
             <li><strong>Conflict Resolution:</strong> Last-Write-Wins based on <code>last_modified</code> timestamps (1-second clock skew tolerance)</li>
@@ -1110,11 +1110,11 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
             <li><strong>Loop Prevention:</strong> peer-credential requests are marked as <code>ReplicationPeerRequest</code>, and ETag/size checks short-circuit already-synced objects</li>
         </ul>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Error Handling &amp; Rate Limits</h3>
-        <p class="small text-muted mb-3">The replication system handles transient failures automatically:</p>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Error Handling &amp; Rate Limits</h3>
+        <p class="docs-note">The replication system handles transient failures automatically:</p>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Behavior</th>
                 <th>Details</th>
@@ -1136,9 +1136,9 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
             </tbody>
           </table>
         </div>
-        <div class="alert alert-warning border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle text-warning mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note ad-note-warn">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
               <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
             </svg>
@@ -1149,23 +1149,23 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
         </div>
       </div>
     </article>
-    <article id="site-registry" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="site-registry" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">09</span>
-          <h2 class="h4 mb-0">Site Registry</h2>
+          <h2>Site Registry</h2>
         </div>
-        <p class="text-muted">Track cluster membership and site identity for geo-distributed deployments. The site registry stores local site identity and peer site information.</p>
+        <p class="ui-muted">Track cluster membership and site identity for geo-distributed deployments. The site registry stores local site identity and peer site information.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Connections vs Sites</h3>
-        <p class="small text-muted mb-3">Understanding the difference between Connections and Sites is key to configuring geo-distribution:</p>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Connections vs Sites</h3>
+        <p class="docs-note">Understanding the difference between Connections and Sites is key to configuring geo-distribution:</p>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
-                <th style="width: 20%;">Aspect</th>
-                <th style="width: 40%;">Connections</th>
-                <th style="width: 40%;">Sites</th>
+                <th class="docs-col-fifth">Aspect</th>
+                <th>Connections</th>
+                <th>Sites</th>
               </tr>
             </thead>
             <tbody>
@@ -1192,13 +1192,13 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
             </tbody>
           </table>
         </div>
-        <p class="small text-muted">Sites can optionally link to a Connection (via <code>connection_id</code>) to perform health checks against peer sites.</p>
+        <p class="docs-note">Sites can optionally link to a Connection (via <code>connection_id</code>) to perform health checks against peer sites.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
-        <p class="small text-muted">Set environment variables to bootstrap local site identity on startup:</p>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Configuration</h3>
+        <p class="docs-note">Set environment variables to bootstrap local site identity on startup:</p>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Variable</th>
                 <th>Default</th>
@@ -1229,21 +1229,21 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
             </tbody>
           </table>
         </div>
-<pre class="mb-3"><code class="language-bash"># Example: Configure site identity
+<pre><code class="language-bash"># Example: Configure site identity
 export SITE_ID=us-west-1
 export SITE_ENDPOINT=https://s3.us-west-1.example.com
 export SITE_REGION=us-west-1
 export SITE_PRIORITY=100
 cargo run -p myfsio-server --</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Using the Sites UI</h3>
-        <p class="small text-muted">Navigate to <a href="{{ url_for(endpoint="ui.sites_dashboard") }}">Sites</a> in the sidebar to manage site configuration:</p>
-        <div class="row g-3 mb-3">
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">Local Site Identity</strong></div>
-              <div class="card-body small">
-                <ul class="mb-0 ps-3">
+        <h3 class="docs-sub">Using the Sites UI</h3>
+        <p class="docs-note">Navigate to <a href="{{ url_for(endpoint="ui.sites_dashboard") }}">Sites</a> in the sidebar to manage site configuration:</p>
+        <div class="docs-cols">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>Local Site Identity</strong></div>
+              <div class="docs-box-body">
+                <ul>
                   <li>Configure this site's ID, endpoint, region, and priority</li>
                   <li>Display name for easier identification</li>
                   <li>Changes persist to <code>site_registry.json</code></li>
@@ -1251,11 +1251,11 @@ cargo run -p myfsio-server --</code></pre>
               </div>
             </div>
           </div>
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">Peer Sites</strong></div>
-              <div class="card-body small">
-                <ul class="mb-0 ps-3">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>Peer Sites</strong></div>
+              <div class="docs-box-body">
+                <ul>
                   <li>Register remote sites in your cluster</li>
                   <li>Link to a Connection for health checks</li>
                   <li>View health status (green/red/unknown)</li>
@@ -1266,16 +1266,16 @@ cargo run -p myfsio-server --</code></pre>
           </div>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Cross-site authentication (Peer Credentials)</h3>
-        <p class="small text-muted">When the Cluster dashboard asks one site to render a peer card, the local server signs a SigV4 call to <code>/myfsio/admin/cluster/overview</code> on the peer. That endpoint accepts a request when <strong>either</strong>:</p>
-        <ol class="small text-muted mb-3">
+        <h3 class="docs-sub">Cross-site authentication (Peer Credentials)</h3>
+        <p class="docs-note">When the Cluster dashboard asks one site to render a peer card, the local server signs a SigV4 call to <code>/myfsio/admin/cluster/overview</code> on the peer. That endpoint accepts a request when <strong>either</strong>:</p>
+        <ol class="docs-note">
           <li>The signing principal is a full admin on the receiving site (policy <code>{"bucket":"*","actions":["*"]}</code>), <strong>or</strong></li>
           <li>The signing principal is a <strong>peer credential</strong> issued on the receiving site (an IAM record with the internal <code>peer_site_id</code> flag set; new peer access keys conventionally start with <code>PEERAK…</code>).</li>
         </ol>
-        <p class="small text-muted">Peer credentials are scoped: they can call <code>/myfsio/admin/cluster/overview</code> and the <code>/myfsio/admin/peer/*</code> relay surface (any S3 path returns <code>403</code>), they refuse the legacy <code>x-access-key</code>/<code>x-secret-key</code> header pair (peer creds are SigV4-only), and they do not appear in the user-management endpoints. Their requests run under a stricter 60-second clock-skew window with in-memory replay-detection LRU.</p>
+        <p class="docs-note">Peer credentials are scoped: they can call <code>/myfsio/admin/cluster/overview</code> and the <code>/myfsio/admin/peer/*</code> relay surface (any S3 path returns <code>403</code>), they refuse the legacy <code>x-access-key</code>/<code>x-secret-key</code> header pair (peer creds are SigV4-only), and they do not appear in the user-management endpoints. Their requests run under a stricter 60-second clock-skew window with in-memory replay-detection LRU.</p>
 
-        <h4 class="h6 mt-3 mb-2">Issuing a peer credential</h4>
-<pre class="mb-3"><code class="language-bash">curl -X POST {{ api_base }}/myfsio/admin/peer-credentials \
+        <h4 class="docs-minor">Issuing a peer credential</h4>
+<pre><code class="language-bash">curl -X POST {{ api_base }}/myfsio/admin/peer-credentials \
      -H 'content-type: application/json' \
      -d '{"site_id":"us-west-1","display_name":"peer:us-west-1"}'
 # → { "user_id": "peer-…", "access_key": "PEERAK…", "secret_key": "PEERSK…", "site_id": "us-west-1" }
@@ -1286,54 +1286,54 @@ curl {{ api_base }}/myfsio/admin/peer-credentials
 # Revoke
 curl -X DELETE {{ api_base }}/myfsio/admin/peer-credentials/PEERAK…</code></pre>
 
-        <h4 class="h6 mt-3 mb-2">Worked example (two sites: <code>us-east-1</code> and <code>us-west-1</code>)</h4>
-        <p class="small text-muted">Issue one peer credential on each site, hand the resulting access key/secret to the <em>other</em> site's outbound Connection:</p>
-        <div class="row g-3 mb-3">
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On us-east-1</strong></div>
-              <div class="card-body small">
-                <ul class="mb-0 ps-3">
+        <h4 class="docs-minor">Worked example (two sites: <code>us-east-1</code> and <code>us-west-1</code>)</h4>
+        <p class="docs-note">Issue one peer credential on each site, hand the resulting access key/secret to the <em>other</em> site's outbound Connection:</p>
+        <div class="docs-cols">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>On us-east-1</strong></div>
+              <div class="docs-box-body">
+                <ul>
                   <li><code>POST /myfsio/admin/peer-credentials {"site_id":"us-west-1"}</code></li>
                   <li>Returns <code>(PEERAK_E, PEERSK_E)</code></li>
-                  <li class="text-muted">Hand to us-west-1 — its outbound Connection to us-east-1 signs with these.</li>
+                  <li class="ui-muted">Hand to us-west-1 — its outbound Connection to us-east-1 signs with these.</li>
                 </ul>
               </div>
             </div>
           </div>
-          <div class="col-md-6">
-            <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On us-west-1</strong></div>
-              <div class="card-body small">
-                <ul class="mb-0 ps-3">
+          <div>
+            <div class="docs-box">
+              <div class="docs-box-head"><strong>On us-west-1</strong></div>
+              <div class="docs-box-body">
+                <ul>
                   <li><code>POST /myfsio/admin/peer-credentials {"site_id":"us-east-1"}</code></li>
                   <li>Returns <code>(PEERAK_W, PEERSK_W)</code></li>
-                  <li class="text-muted">Hand to us-east-1 — its outbound Connection to us-west-1 signs with these.</li>
+                  <li class="ui-muted">Hand to us-east-1 — its outbound Connection to us-west-1 signs with these.</li>
                 </ul>
               </div>
             </div>
           </div>
         </div>
-        <p class="small text-muted">Putting an admin key into your own peer entry does nothing — the inbound caller is the peer, not you. Once both sides have peer creds, the cluster dashboard on either side renders both cards.</p>
+        <p class="docs-note">Putting an admin key into your own peer entry does nothing — the inbound caller is the peer, not you. Once both sides have peer creds, the cluster dashboard on either side renders both cards.</p>
 
-        <h4 class="h6 mt-3 mb-2">Migrating a pre-existing deployment</h4>
-        <p class="small text-muted">Releases prior to peer-credential namespacing reused regular IAM users for the <strong>Peer Inbound Access Key</strong> field. Run <code>myfsio-server --migrate-peer-creds</code> once on each site to retag those access keys. The migration:</p>
-        <ul class="small text-muted mb-3">
+        <h4 class="docs-minor">Migrating a pre-existing deployment</h4>
+        <p class="docs-note">Releases prior to peer-credential namespacing reused regular IAM users for the <strong>Peer Inbound Access Key</strong> field. Run <code>myfsio-server --migrate-peer-creds</code> once on each site to retag those access keys. The migration:</p>
+        <ul class="docs-note">
           <li>Refuses any access key that shares an IAM user with other access keys (it would clear that user's policies and convert all of its keys to peer credentials). Move the AK to a dedicated user before retrying.</li>
           <li>Errors with exit code <code>1</code> when the registry references an AK that is not present in IAM, instead of silently treating it as already-migrated.</li>
           <li>Clears the migrated user's policies. <strong>If you used the same AK as a site-sync credential, reissue separate IAM users for site-sync</strong> — the migrated AK is now restricted to <code>/myfsio/admin/cluster/overview</code> and <code>/myfsio/admin/peer/*</code>.</li>
         </ul>
 
-        <h4 class="h6 mt-3 mb-2">Other relevant settings</h4>
-        <ul class="small text-muted mb-3">
+        <h4 class="docs-minor">Other relevant settings</h4>
+        <ul class="docs-note">
           <li><code>ALLOW_LEGACY_HEADER_AUTH=false</code> (default) rejects the old <code>x-access-key</code>/<code>x-secret-key</code> header pair. Set to <code>true</code> only for development clients that don't sign SigV4. Peer credentials remain SigV4-only either way.</li>
           <li><code>PEER_REQUIRE_HTTPS=false</code> (default). When <code>true</code>, peer endpoint registration rejects <code>http://</code> URLs; otherwise the server logs a startup warning if any registered peer uses <code>http://</code>.</li>
           <li><code>PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS=60</code> stricter skew window for peer SigV4. <code>PEER_NONCE_CACHE_SIZE=10000</code> sizes the in-memory replay LRU.</li>
         </ul>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Admin API Endpoints</h3>
-        <p class="small text-muted">The <code>/myfsio/admin</code> API provides programmatic access to site registry:</p>
-<pre class="mb-3"><code class="language-bash"># Get local site configuration
+        <h3 class="docs-sub">Admin API Endpoints</h3>
+        <p class="docs-note">The <code>/myfsio/admin</code> API provides programmatic access to site registry:</p>
+<pre><code class="language-bash"># Get local site configuration
 curl {{ api_base }}/myfsio/admin/site \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
@@ -1361,13 +1361,13 @@ curl {{ api_base }}/myfsio/admin/sites/us-east-1/health \
 curl {{ api_base }}/myfsio/admin/topology \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
-        <p class="small text-muted mb-3">Site registry data is stored at:</p>
-        <code class="d-block mb-3">data/.myfsio.sys/config/site_registry.json</code>
+        <h3 class="docs-sub">Storage Location</h3>
+        <p class="docs-note">Site registry data is stored at:</p>
+        <code class="docs-code-line">data/.myfsio.sys/config/site_registry.json</code>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -1378,25 +1378,25 @@ curl {{ api_base }}/myfsio/admin/topology \
         </div>
       </div>
     </article>
-    <article id="versioning" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="versioning" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">10</span>
-          <h2 class="h4 mb-0">Object Versioning</h2>
+          <h2>Object Versioning</h2>
         </div>
-        <p class="text-muted">Keep multiple versions of objects to protect against accidental deletions and overwrites. Restore previous versions at any time.</p>
+        <p class="ui-muted">Keep multiple versions of objects to protect against accidental deletions and overwrites. Restore previous versions at any time.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Versioning</h3>
-        <ol class="docs-steps mb-3">
+        <h3 class="docs-sub">Enabling Versioning</h3>
+        <ol class="docs-steps">
           <li>Navigate to your bucket's <strong>Properties</strong> tab.</li>
           <li>Find the <strong>Versioning</strong> card and click <strong>Enable</strong>.</li>
           <li>All subsequent uploads will create new versions instead of overwriting.</li>
         </ol>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Version Operations</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Version Operations</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Operation</th>
                 <th>Description</th>
@@ -1423,11 +1423,11 @@ curl {{ api_base }}/myfsio/admin/topology \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Archived Objects</h3>
-        <p class="small text-muted mb-3">When you delete a versioned object, it becomes "archived" - the current version is removed but historical versions remain. The <strong>Archived</strong> tab shows these objects so you can restore them.</p>
+        <h3 class="docs-sub">Archived Objects</h3>
+        <p class="docs-note">When you delete a versioned object, it becomes "archived" - the current version is removed but historical versions remain. The <strong>Archived</strong> tab shows these objects so you can restore them.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
-<pre class="mb-3"><code class="language-bash"># Enable versioning
+        <h3 class="docs-sub">API Usage</h3>
+<pre><code class="language-bash"># Enable versioning
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?versioning" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -1445,9 +1445,9 @@ curl "{{ api_base }}/&lt;bucket&gt;?versions" \
 curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -1458,19 +1458,19 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
         </div>
       </div>
     </article>
-    <article id="quotas" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="quotas" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">11</span>
-          <h2 class="h4 mb-0">Bucket Quotas</h2>
+          <h2>Bucket Quotas</h2>
         </div>
-        <p class="text-muted">Limit how much data a bucket can hold using storage quotas. Quotas are enforced on uploads and multipart completions.</p>
-        <p class="small text-muted">When the persistent listing index and its counters are live, quota checks and bucket statistics are O(1). If the index is disabled, unavailable, dirty, or rebuilding, MyFSIO uses the recursive statistics walk with its 60-second cache.</p>
+        <p class="ui-muted">Limit how much data a bucket can hold using storage quotas. Quotas are enforced on uploads and multipart completions.</p>
+        <p class="docs-note">When the persistent listing index and its counters are live, quota checks and bucket statistics are O(1). If the index is disabled, unavailable, dirty, or rebuilding, MyFSIO uses the recursive statistics walk with its 60-second cache.</p>
         
-        <h3 class="h6 text-uppercase text-muted mt-4">Quota Types</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Quota Types</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Limit</th>
                 <th>Description</th>
@@ -1489,16 +1489,16 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Managing Quotas (Admin Only)</h3>
-        <p class="small text-muted">Quota management is restricted to administrators — users whose policy is <code>{"bucket": "*", "actions": ["*"]}</code>.</p>
-        <ol class="docs-steps mb-3">
+        <h3 class="docs-sub">Managing Quotas (Admin Only)</h3>
+        <p class="docs-note">Quota management is restricted to administrators — users whose policy is <code>{"bucket": "*", "actions": ["*"]}</code>.</p>
+        <ol class="docs-steps">
           <li>Navigate to your bucket → <strong>Properties</strong> tab → <strong>Storage Quota</strong> card.</li>
           <li>Enter limits: <strong>Max Size (MB)</strong> and/or <strong>Max Objects</strong>. Leave empty for unlimited.</li>
           <li>Click <strong>Update Quota</strong> to save, or <strong>Remove Quota</strong> to clear limits.</li>
         </ol>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
-<pre class="mb-3"><code class="language-bash"># Set quota (max 100MB, max 1000 objects)
+        <h3 class="docs-sub">API Usage</h3>
+<pre><code class="language-bash"># Set quota (max 100MB, max 1000 objects)
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?quota" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -1512,9 +1512,9 @@ curl "{{ api_base }}/&lt;bucket&gt;?quota" \
 curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?quota" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -1525,18 +1525,18 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?quota" \
         </div>
       </div>
     </article>
-    <article id="encryption" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="encryption" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">12</span>
-          <h2 class="h4 mb-0">Encryption</h2>
+          <h2>Encryption</h2>
         </div>
-        <p class="text-muted">Protect data at rest with server-side encryption using AES-256-GCM. Objects are encrypted before being written to disk and decrypted transparently on read.</p>
+        <p class="ui-muted">Protect data at rest with server-side encryption using AES-256-GCM. Objects are encrypted before being written to disk and decrypted transparently on read.</p>
         
-        <h3 class="h6 text-uppercase text-muted mt-4">Encryption Types</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Encryption Types</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Type</th>
                 <th>Description</th>
@@ -1559,11 +1559,11 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?quota" \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Encryption</h3>
-        <ol class="docs-steps mb-3">
+        <h3 class="docs-sub">Enabling Encryption</h3>
+        <ol class="docs-steps">
           <li>
             <strong>Set environment variables:</strong>
-<pre class="mb-2"><code class="language-bash"># PowerShell
+<pre><code class="language-bash"># PowerShell
 $env:ENCRYPTION_ENABLED = "true"
 $env:KMS_ENABLED = "true"  # Optional
 cargo run -p myfsio-server --
@@ -1581,9 +1581,9 @@ cargo run -p myfsio-server --</code></pre>
           </li>
         </ol>
 
-        <div class="alert alert-warning border-warning bg-warning-subtle mb-3">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle mt-1" viewBox="0 0 16 16">
+        <div class="ad-note ad-note-warn">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
               <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
             </svg>
@@ -1593,9 +1593,9 @@ cargo run -p myfsio-server --</code></pre>
           </div>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">KMS Key Management</h3>
-        <p class="small text-muted">When <code>KMS_ENABLED=true</code>, manage encryption keys via the API:</p>
-<pre class="mb-3"><code class="language-bash"># Create a new KMS key
+        <h3 class="docs-sub">KMS Key Management</h3>
+        <p class="docs-note">When <code>KMS_ENABLED=true</code>, manage encryption keys via the API:</p>
+<pre><code class="language-bash"># Create a new KMS key
 curl -X POST {{ api_base }}/myfsio/kms/keys \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -1623,16 +1623,16 @@ curl -X POST {{ api_base }}/myfsio/kms/generate-data-key \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '{"KeyId": "&lt;key-id&gt;", "NumberOfBytes": 32}'</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">How It Works</h3>
-        <p class="small text-muted mb-0">
+        <h3 class="docs-sub">How It Works</h3>
+        <p class="docs-note">
           <strong>Envelope Encryption:</strong> Each object is encrypted with a unique Data Encryption Key (DEK). The DEK is then encrypted (wrapped) by the master key or KMS key and stored alongside the ciphertext. On read, the DEK is unwrapped and used to decrypt the object transparently.
         </p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">SSE-C (Customer-Provided Keys)</h3>
-        <p class="small text-muted">With SSE-C, you supply your own 256-bit AES key with each request. The server encrypts/decrypts using your key but never stores it. You must provide the same key for both upload and download.</p>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">SSE-C (Customer-Provided Keys)</h3>
+        <p class="docs-note">With SSE-C, you supply your own 256-bit AES key with each request. The server encrypts/decrypts using your key but never stores it. You must provide the same key for both upload and download.</p>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Header</th>
                 <th>Value</th>
@@ -1654,7 +1654,7 @@ curl -X POST {{ api_base }}/myfsio/kms/generate-data-key \
             </tbody>
           </table>
         </div>
-<pre class="mb-3"><code class="language-bash"># Generate a 256-bit key
+<pre><code class="language-bash"># Generate a 256-bit key
 KEY=$(openssl rand -base64 32)
 KEY_MD5=$(echo -n "$KEY" | base64 -d | openssl dgst -md5 -binary | base64)
 
@@ -1672,29 +1672,29 @@ curl "{{ api_base }}/my-bucket/secret.txt" \
   -H "x-amz-server-side-encryption-customer-algorithm: AES256" \
   -H "x-amz-server-side-encryption-customer-key: $KEY" \
   -H "x-amz-server-side-encryption-customer-key-MD5: $KEY_MD5"</code></pre>
-        <div class="alert alert-light border mb-0 small">
+        <div class="ad-note">
           <strong>Note:</strong> SSE-C does not require <code>ENCRYPTION_ENABLED</code> or <code>KMS_ENABLED</code>. If you lose your key, the data is irrecoverable.
         </div>
       </div>
     </article>
-    <article id="lifecycle" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="lifecycle" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">13</span>
-          <h2 class="h4 mb-0">Lifecycle Rules</h2>
+          <h2>Lifecycle Rules</h2>
         </div>
-        <p class="text-muted">Automatically delete expired objects, clean up old versions, and abort incomplete multipart uploads using time-based lifecycle rules.</p>
+        <p class="ui-muted">Automatically delete expired objects, clean up old versions, and abort incomplete multipart uploads using time-based lifecycle rules.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">How It Works</h3>
-        <p class="small text-muted mb-3">
+        <h3 class="docs-sub">How It Works</h3>
+        <p class="docs-note">
           Lifecycle rules run in a Tokio background task, not a system cronjob. The enforcement cycle triggers every <strong>3600 seconds (1 hour)</strong> by default. Each cycle scans all buckets with lifecycle configurations and applies matching rules.
         </p>
-        <p class="small text-muted mb-3">Set <code>LIFECYCLE_ENABLED=true</code> before startup; configured lifecycle rules are stored even when the worker is disabled.</p>
+        <p class="docs-note">Set <code>LIFECYCLE_ENABLED=true</code> before startup; configured lifecycle rules are stored even when the worker is disabled.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Expiration Types</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Expiration Types</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Type</th>
                 <th>Description</th>
@@ -1721,8 +1721,8 @@ curl "{{ api_base }}/my-bucket/secret.txt" \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
-<pre class="mb-3"><code class="language-bash"># Set lifecycle rule (delete objects older than 30 days)
+        <h3 class="docs-sub">API Usage</h3>
+<pre><code class="language-bash"># Set lifecycle rule (delete objects older than 30 days)
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -1747,9 +1747,9 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
 curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -1760,22 +1760,22 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
         </div>
       </div>
     </article>
-    <article id="garbage-collection" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="garbage-collection" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">14</span>
-          <h2 class="h4 mb-0">Garbage Collection</h2>
+          <h2>Garbage Collection</h2>
         </div>
-        <p class="text-muted">Automatically clean up stale temp files, abandoned multipart uploads, stale lock files, quarantined files, orphaned segment directories, and empty internal directories.</p>
+        <p class="ui-muted">Automatically clean up stale temp files, abandoned multipart uploads, stale lock files, quarantined files, orphaned segment directories, and empty internal directories.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Enabling GC</h3>
-        <p class="small text-muted">Disabled by default. Enable via environment variable:</p>
-<pre class="mb-3"><code class="language-bash">GC_ENABLED=true cargo run -p myfsio-server --</code></pre>
+        <h3 class="docs-sub">Enabling GC</h3>
+        <p class="docs-note">Disabled by default. Enable via environment variable:</p>
+<pre><code class="language-bash">GC_ENABLED=true cargo run -p myfsio-server --</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Configuration</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Variable</th>
                 <th>Default</th>
@@ -1794,10 +1794,10 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">What Gets Cleaned</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">What Gets Cleaned</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Type</th>
                 <th>Location</th>
@@ -1815,10 +1815,10 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Admin API</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Admin API</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Method</th>
                 <th>Route</th>
@@ -1833,7 +1833,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
           </table>
         </div>
 
-<pre class="mb-3"><code class="language-bash"># Trigger a dry run (preview what would be cleaned)
+<pre><code class="language-bash"># Trigger a dry run (preview what would be cleaned)
 curl -X POST "{{ api_base }}/myfsio/admin/gc/run" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "Content-Type: application/json" \
@@ -1851,9 +1851,9 @@ curl "{{ api_base }}/myfsio/admin/gc/status" \
 curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -1864,22 +1864,22 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
         </div>
       </div>
     </article>
-    <article id="integrity" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="integrity" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">15</span>
-          <h2 class="h4 mb-0">Integrity Scanner</h2>
+          <h2>Integrity Scanner</h2>
         </div>
-        <p class="text-muted">Detect and optionally auto-repair data inconsistencies: corrupted objects, orphaned files, phantom metadata, stale versions, and ETag cache drift.</p>
+        <p class="ui-muted">Detect and optionally auto-repair data inconsistencies: corrupted objects, orphaned files, phantom metadata, stale versions, and ETag cache drift.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Integrity Scanner</h3>
-        <p class="small text-muted">Disabled by default. Enable via environment variable:</p>
-<pre class="mb-3"><code class="language-bash">INTEGRITY_ENABLED=true cargo run -p myfsio-server --</code></pre>
+        <h3 class="docs-sub">Enabling Integrity Scanner</h3>
+        <p class="docs-note">Disabled by default. Enable via environment variable:</p>
+<pre><code class="language-bash">INTEGRITY_ENABLED=true cargo run -p myfsio-server --</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Configuration</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Variable</th>
                 <th>Default</th>
@@ -1899,12 +1899,12 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
             </tbody>
           </table>
         </div>
-        <p class="small text-muted mb-3">Use the admin API below to trigger a one-off scan with <code>auto_heal</code> or <code>dry_run</code> overrides.</p>
+        <p class="docs-note">Use the admin API below to trigger a one-off scan with <code>auto_heal</code> or <code>dry_run</code> overrides.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">What Gets Checked</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">What Gets Checked</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Check</th>
                 <th>Detection</th>
@@ -1920,12 +1920,12 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
             </tbody>
           </table>
         </div>
-        <p class="small text-muted mb-3">Encrypted objects are counted as content-unverifiable because proactive verification does not have the request-time key material required for every encryption mode. Multipart objects completed before the part-size manifest existed are counted as unverifiable rather than corrupted, because their composite ETag cannot be recomputed. Version checks currently verify manifest/data pairing, not historical object checksums. These limitations are reported explicitly in scan results.</p>
+        <p class="docs-note">Encrypted objects are counted as content-unverifiable because proactive verification does not have the request-time key material required for every encryption mode. Multipart objects completed before the part-size manifest existed are counted as unverifiable rather than corrupted, because their composite ETag cannot be recomputed. Version checks currently verify manifest/data pairing, not historical object checksums. These limitations are reported explicitly in scan results.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Admin API</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Admin API</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Method</th>
                 <th>Route</th>
@@ -1940,7 +1940,7 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
           </table>
         </div>
 
-<pre class="mb-3"><code class="language-bash"># Trigger a dry run with auto-heal preview
+<pre><code class="language-bash"># Trigger a dry run with auto-heal preview
 curl -X POST "{{ api_base }}/myfsio/admin/integrity/run" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "Content-Type: application/json" \
@@ -1960,9 +1960,9 @@ curl "{{ api_base }}/myfsio/admin/integrity/status" \
 curl "{{ api_base }}/myfsio/admin/integrity/history?limit=10" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -1973,17 +1973,17 @@ curl "{{ api_base }}/myfsio/admin/integrity/history?limit=10" \
         </div>
       </div>
     </article>
-    <article id="metrics" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="metrics" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">16</span>
-          <h2 class="h4 mb-0">Metrics History</h2>
+          <h2>Metrics History</h2>
         </div>
-        <p class="text-muted">Track CPU, memory, and disk usage over time with optional metrics history. Disabled by default to minimize overhead.</p>
+        <p class="ui-muted">Track CPU, memory, and disk usage over time with optional metrics history. Disabled by default to minimize overhead.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Metrics History</h3>
-        <p class="small text-muted">Set the environment variable to opt-in:</p>
-<pre class="mb-3"><code class="language-bash"># PowerShell
+        <h3 class="docs-sub">Enabling Metrics History</h3>
+        <p class="docs-note">Set the environment variable to opt-in:</p>
+<pre><code class="language-bash"># PowerShell
 $env:METRICS_HISTORY_ENABLED = "true"
 cargo run -p myfsio-server --
 
@@ -1991,10 +1991,10 @@ cargo run -p myfsio-server --
 export METRICS_HISTORY_ENABLED=true
 cargo run -p myfsio-server --</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Configuration Options</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Configuration Options</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Variable</th>
                 <th>Default</th>
@@ -2026,8 +2026,8 @@ cargo run -p myfsio-server --</code></pre>
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">API Endpoints</h3>
-<pre class="mb-3"><code class="language-bash"># Get metrics history (last 24 hours by default)
+        <h3 class="docs-sub">API Endpoints</h3>
+<pre><code class="language-bash"># Get metrics history (last 24 hours by default)
 curl "http://localhost:5100/ui/metrics/history" \
   --cookie "session=..."
 
@@ -2044,16 +2044,16 @@ curl -X PUT "http://localhost:5100/ui/metrics/settings" \
   -H "Content-Type: application/json" \
   --cookie "session=..." \
   -d '{"enabled": true, "retention_hours": 48, "interval_minutes": 10}'</code></pre>
-        <p class="small text-muted">These endpoints are on the UI listener and require an admin UI session. <code>PUT /ui/metrics/settings</code> updates an in-memory display snapshot only; it does not change the snapshot cadence fixed at startup and returns <code>409 CONFLICT</code> if history was disabled at boot.</p>
+        <p class="docs-note">These endpoints are on the UI listener and require an admin UI session. <code>PUT /ui/metrics/settings</code> updates an in-memory display snapshot only; it does not change the snapshot cadence fixed at startup and returns <code>409 CONFLICT</code> if history was disabled at boot.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
-        <p class="small text-muted mb-3">History data is stored at:</p>
-        <code class="d-block mb-3">data/.myfsio.sys/config/metrics_history.json</code>
-        <p class="small text-muted mb-3">Writes use atomic temp-file replacement. Corrupt files are renamed with a <code>.corrupt-&lt;ts&gt;</code> suffix, one startup snapshot is recorded when enabled, and storage-size walks are cached according to <code>METRICS_STORAGE_REFRESH_MINUTES</code>.</p>
+        <h3 class="docs-sub">Storage Location</h3>
+        <p class="docs-note">History data is stored at:</p>
+        <code class="docs-code-line">data/.myfsio.sys/config/metrics_history.json</code>
+        <p class="docs-note">Writes use atomic temp-file replacement. Corrupt files are renamed with a <code>.corrupt-&lt;ts&gt;</code> suffix, one startup snapshot is recorded when enabled, and storage-size walks are cached according to <code>METRICS_STORAGE_REFRESH_MINUTES</code>.</p>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -2064,17 +2064,17 @@ curl -X PUT "http://localhost:5100/ui/metrics/settings" \
         </div>
       </div>
     </article>
-    <article id="operation-metrics" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="operation-metrics" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">17</span>
-          <h2 class="h4 mb-0">Operation Metrics</h2>
+          <h2>Operation Metrics</h2>
         </div>
-        <p class="text-muted">Track API request statistics including request counts, latency, error rates, and bandwidth usage. Provides real-time visibility into API operations.</p>
+        <p class="ui-muted">Track API request statistics including request counts, latency, error rates, and bandwidth usage. Provides real-time visibility into API operations.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Operation Metrics</h3>
-        <p class="small text-muted">Set the environment variable to opt-in:</p>
-<pre class="mb-3"><code class="language-bash"># PowerShell
+        <h3 class="docs-sub">Enabling Operation Metrics</h3>
+        <p class="docs-note">Set the environment variable to opt-in:</p>
+<pre><code class="language-bash"># PowerShell
 $env:OPERATION_METRICS_ENABLED = "true"
 cargo run -p myfsio-server --
 
@@ -2082,10 +2082,10 @@ cargo run -p myfsio-server --
 export OPERATION_METRICS_ENABLED=true
 cargo run -p myfsio-server --</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Configuration Options</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Configuration Options</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Variable</th>
                 <th>Default</th>
@@ -2112,12 +2112,12 @@ cargo run -p myfsio-server --</code></pre>
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">What's Tracked</h3>
-        <div class="row g-3 mb-4">
-          <div class="col-md-6">
-            <div class="bg-light rounded p-3 h-100">
-              <h6 class="small fw-bold mb-2">Request Statistics</h6>
-              <ul class="small text-muted mb-0 ps-3">
+        <h3 class="docs-sub">What's Tracked</h3>
+        <div class="docs-cols">
+          <div>
+            <div class="docs-tile">
+              <h6 class="docs-minor">Request Statistics</h6>
+              <ul class="docs-note">
                 <li>Request counts by HTTP method (GET, PUT, POST, DELETE)</li>
                 <li>Response status codes (2xx, 3xx, 4xx, 5xx)</li>
                 <li>Average, min, max latency</li>
@@ -2125,10 +2125,10 @@ cargo run -p myfsio-server --</code></pre>
               </ul>
             </div>
           </div>
-          <div class="col-md-6">
-            <div class="bg-light rounded p-3 h-100">
-              <h6 class="small fw-bold mb-2">Endpoint Breakdown</h6>
-              <ul class="small text-muted mb-0 ps-3">
+          <div>
+            <div class="docs-tile">
+              <h6 class="docs-minor">Endpoint Breakdown</h6>
+              <ul class="docs-note">
                 <li>API classes: <code>list_buckets</code>, <code>bucket</code>, <code>bucket_versioning</code>, <code>bucket_lifecycle</code>, <code>bucket_policy</code>, <code>bucket_website</code>, <code>bucket_encryption</code>, <code>bucket_replication</code>, <code>list_multipart_uploads</code>, <code>multipart_init</code>, <code>multipart_part</code>, <code>object_tagging</code>, <code>object_acl</code>, <code>object</code>, <code>other</code></li>
                 <li>UI classes use <code>ui_*</code> names from the UI endpoint classifier.</li>
               </ul>
@@ -2136,11 +2136,11 @@ cargo run -p myfsio-server --</code></pre>
           </div>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">S3 Error Codes</h3>
-        <p class="small text-muted">The dashboard tracks S3 API-specific error codes like <code>NoSuchKey</code>, <code>AccessDenied</code>, and <code>NoSuchBucket</code>. The recorder reads <code>x-amz-error-code</code> first and falls back to a status-derived S3 label. UI 4xx/5xx responses are tagged <code>UIError</code> in recent errors only and are excluded from the S3 error-code map.</p>
+        <h3 class="docs-sub">S3 Error Codes</h3>
+        <p class="docs-note">The dashboard tracks S3 API-specific error codes like <code>NoSuchKey</code>, <code>AccessDenied</code>, and <code>NoSuchBucket</code>. The recorder reads <code>x-amz-error-code</code> first and falls back to a status-derived S3 label. UI 4xx/5xx responses are tagged <code>UIError</code> in recent errors only and are excluded from the S3 error-code map.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">API Endpoints</h3>
-<pre class="mb-3"><code class="language-bash"># Get current operation metrics
+        <h3 class="docs-sub">API Endpoints</h3>
+<pre><code class="language-bash"># Get current operation metrics
 curl "http://localhost:5100/ui/metrics/operations" \
   --cookie "session=..."
 
@@ -2160,14 +2160,14 @@ curl "http://localhost:5100/ui/metrics/operations/error-summary?hours=1" \
 curl "http://localhost:5100/ui/metrics/operations/errors?limit=100&amp;code=NoSuchKey&amp;bucket=demo" \
   --cookie "session=..."</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
-        <p class="small text-muted mb-3">Operation metrics data is stored at:</p>
-        <code class="d-block mb-3">data/.myfsio.sys/config/operation_metrics.json</code>
-        <p class="small text-muted mb-3">Error-code summaries for 1h/6h/24h merge persisted snapshots with the live window, survive rollover and restarts, and include per-bucket attribution capped at 50 buckets plus <code>(other)</code>. Recent errors are a 256-entry in-memory ring buffer with request IDs. Error-code-over-time charts zero-fill empty buckets. Writes are atomic; corrupt files are quarantined with <code>.corrupt-&lt;ts&gt;</code>. Shutdown flushes non-empty windows, and empty windows do not write.</p>
+        <h3 class="docs-sub">Storage Location</h3>
+        <p class="docs-note">Operation metrics data is stored at:</p>
+        <code class="docs-code-line">data/.myfsio.sys/config/operation_metrics.json</code>
+        <p class="docs-note">Error-code summaries for 1h/6h/24h merge persisted snapshots with the live window, survive rollover and restarts, and include per-bucket attribution capped at 50 buckets plus <code>(other)</code>. Recent errors are a 256-entry in-memory ring buffer with request IDs. Error-code-over-time charts zero-fill empty buckets. Writes are atomic; corrupt files are quarantined with <code>.corrupt-&lt;ts&gt;</code>. Shutdown flushes non-empty windows, and empty windows do not write.</p>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -2178,14 +2178,14 @@ curl "http://localhost:5100/ui/metrics/operations/errors?limit=100&amp;code=NoSu
         </div>
       </div>
     </article>
-    <article id="troubleshooting" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="troubleshooting" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">18</span>
-          <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
+          <h2>Troubleshooting &amp; tips</h2>
         </div>
-        <div class="table-responsive">
-          <table class="table table-sm align-middle docs-table mb-0">
+        <div class="ui-table-wrap">
+          <table class="docs-table docs-table-plain">
             <thead>
               <tr>
                 <th scope="col">Symptom</th>
@@ -2229,40 +2229,40 @@ curl "http://localhost:5100/ui/metrics/operations/errors?limit=100&amp;code=NoSu
         </div>
       </div>
     </article>
-    <article id="health-check" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="health-check" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">19</span>
-          <h2 class="h4 mb-0">Health Check Endpoint</h2>
+          <h2>Health Check Endpoint</h2>
         </div>
-        <p class="text-muted">The API exposes a health check endpoint for monitoring and load balancer integration.</p>
+        <p class="ui-muted">The API exposes a health check endpoint for monitoring and load balancer integration.</p>
 
-<pre class="mb-3"><code class="language-bash"># Check API health
+<pre><code class="language-bash"># Check API health
 curl {{ api_base }}/myfsio/health
 
 # Response
 {"status": "ok", "version": "x.x.x"}</code></pre>
 
-        <p class="small text-muted mb-3">Use this endpoint for:</p>
-        <ul class="small text-muted mb-0">
+        <p class="docs-note">Use this endpoint for:</p>
+        <ul class="docs-note">
           <li>Load balancer health checks</li>
           <li>Kubernetes liveness/readiness probes</li>
           <li>Monitoring system integration (Prometheus, Datadog, etc.)</li>
         </ul>
       </div>
     </article>
-    <article id="object-lock" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="object-lock" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">20</span>
-          <h2 class="h4 mb-0">Object Lock &amp; Retention</h2>
+          <h2>Object Lock &amp; Retention</h2>
         </div>
-        <p class="text-muted">Object Lock prevents objects from being deleted or overwritten for a specified retention period.</p>
+        <p class="ui-muted">Object Lock prevents objects from being deleted or overwritten for a specified retention period.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Retention Modes</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Retention Modes</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Mode</th>
                 <th>Description</th>
@@ -2281,8 +2281,8 @@ curl {{ api_base }}/myfsio/health
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
-<pre class="mb-3"><code class="language-bash"># Set object retention
+        <h3 class="docs-sub">API Usage</h3>
+<pre><code class="language-bash"># Set object retention
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?retention" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2298,9 +2298,9 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
 curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="alert alert-light border mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+        <div class="ad-note">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
@@ -2311,15 +2311,15 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
         </div>
       </div>
     </article>
-    <article id="access-logging" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="access-logging" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">21</span>
-          <h2 class="h4 mb-0">Access Logging</h2>
+          <h2>Access Logging</h2>
         </div>
-        <p class="text-muted">Enable S3-style access logging to track all requests to your buckets for audit and analysis.</p>
+        <p class="ui-muted">Enable S3-style access logging to track all requests to your buckets for audit and analysis.</p>
 
-<pre class="mb-3"><code class="language-bash"># Enable access logging
+<pre><code class="language-bash"># Enable access logging
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?logging" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2329,22 +2329,22 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?logging" \
 curl "{{ api_base }}/&lt;bucket&gt;?logging" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Log Contents</h3>
-        <p class="small text-muted mb-0">Access logging is configuration-only in this server: the S3 logging configuration is stored and returned, but no access log records are generated or delivered.</p>
+        <h3 class="docs-sub">Log Contents</h3>
+        <p class="docs-note">Access logging is configuration-only in this server: the S3 logging configuration is stored and returned, but no access log records are generated or delivered.</p>
       </div>
     </article>
-    <article id="notifications" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="notifications" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">22</span>
-          <h2 class="h4 mb-0">Notifications &amp; Webhooks</h2>
+          <h2>Notifications &amp; Webhooks</h2>
         </div>
-        <p class="text-muted">Configure event notifications to trigger webhooks when objects are created or deleted.</p>
+        <p class="ui-muted">Configure event notifications to trigger webhooks when objects are created or deleted.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Supported Events</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Supported Events</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Event Type</th>
                 <th>Description</th>
@@ -2363,7 +2363,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?logging" \
           </table>
         </div>
 
-<pre class="mb-3"><code class="language-bash"># Set notification configuration
+<pre><code class="language-bash"># Set notification configuration
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2379,9 +2379,9 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
     &lt;/WebhookConfiguration&gt;
   &lt;/NotificationConfiguration&gt;'</code></pre>
 
-        <div class="alert alert-warning border-warning bg-warning-subtle mb-0">
-          <div class="d-flex gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle mt-1" viewBox="0 0 16 16">
+        <div class="ad-note ad-note-warn">
+          <div class="docs-aside">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
               <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
             </svg>
@@ -2392,19 +2392,19 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
         </div>
       </div>
     </article>
-    <article id="select-content" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="select-content" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">23</span>
-          <h2 class="h4 mb-0">SelectObjectContent (SQL)</h2>
+          <h2>SelectObjectContent (SQL)</h2>
         </div>
-        <p class="text-muted">Query CSV, JSON, or Parquet files directly using SQL without downloading the entire object.</p>
+        <p class="ui-muted">Query CSV, JSON, or Parquet files directly using SQL without downloading the entire object.</p>
 
-        <div class="alert alert-info border small mb-3">
+        <div class="ad-note">
           <strong>Note:</strong> DuckDB is bundled into the Rust server binary &mdash; no separate install is required.
         </div>
 
-<pre class="mb-3"><code class="language-bash"># Query a CSV file
+<pre><code class="language-bash"># Query a CSV file
 curl -X POST "{{ api_base }}/&lt;bucket&gt;/data.csv?select" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2415,36 +2415,36 @@ curl -X POST "{{ api_base }}/&lt;bucket&gt;/data.csv?select" \
     &lt;OutputSerialization&gt;&lt;JSON /&gt;&lt;/OutputSerialization&gt;
   &lt;/SelectObjectContentRequest&gt;'</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Supported Formats</h3>
-        <div class="row g-2 mb-0">
-          <div class="col-md-4">
-            <div class="bg-light rounded p-2 small text-center">
-              <strong>CSV</strong><br><span class="text-muted">Headers, delimiters</span>
+        <h3 class="docs-sub">Supported Formats</h3>
+        <div class="docs-cols">
+          <div>
+            <div class="docs-tile docs-tile-center">
+              <strong>CSV</strong><br><span class="ui-muted">Headers, delimiters</span>
             </div>
           </div>
-          <div class="col-md-4">
-            <div class="bg-light rounded p-2 small text-center">
-              <strong>JSON</strong><br><span class="text-muted">Document or lines</span>
+          <div>
+            <div class="docs-tile docs-tile-center">
+              <strong>JSON</strong><br><span class="ui-muted">Document or lines</span>
             </div>
           </div>
-          <div class="col-md-4">
-            <div class="bg-light rounded p-2 small text-center">
-              <strong>Parquet</strong><br><span class="text-muted">Auto schema</span>
+          <div>
+            <div class="docs-tile docs-tile-center">
+              <strong>Parquet</strong><br><span class="ui-muted">Auto schema</span>
             </div>
           </div>
         </div>
       </div>
     </article>
-    <article id="advanced-ops" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="advanced-ops" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">24</span>
-          <h2 class="h4 mb-0">Advanced S3 Operations</h2>
+          <h2>Advanced S3 Operations</h2>
         </div>
-        <p class="text-muted">Copy, move, and partially download objects using advanced S3 operations.</p>
+        <p class="ui-muted">Copy, move, and partially download objects using advanced S3 operations.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">CopyObject</h3>
-<pre class="mb-3"><code class="language-bash"># Copy within same bucket
+        <h3 class="docs-sub">CopyObject</h3>
+<pre><code class="language-bash"># Copy within same bucket
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/copy-of-file.txt" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "x-amz-copy-source: /&lt;bucket&gt;/original-file.txt"
@@ -2456,23 +2456,23 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/file.txt" \
   -H "x-amz-metadata-directive: REPLACE" \
   -H "x-amz-meta-newkey: newvalue"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">MoveObject (UI)</h3>
-        <p class="small text-muted">Move an object to a different key or bucket via the UI. Performs a copy then deletes the source. Requires <code>read</code>+<code>delete</code> on source and <code>write</code> on destination.</p>
-<pre class="mb-3"><code class="language-bash"># Move via UI API (session-authenticated)
+        <h3 class="docs-sub">MoveObject (UI)</h3>
+        <p class="docs-note">Move an object to a different key or bucket via the UI. Performs a copy then deletes the source. Requires <code>read</code>+<code>delete</code> on source and <code>write</code> on destination.</p>
+<pre><code class="language-bash"># Move via UI API (session-authenticated)
 curl -X POST "http://localhost:5100/ui/buckets/&lt;bucket&gt;/objects/&lt;key&gt;/move" \
   -H "Content-Type: application/json" --cookie "session=..." \
   -d '{"dest_bucket": "other-bucket", "dest_key": "new-path/file.txt"}'</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">UploadPartCopy</h3>
-        <p class="small text-muted">Copy data from an existing object into a multipart upload part:</p>
-<pre class="mb-3"><code class="language-bash"># Copy bytes 0-10485759 from source as part 1
+        <h3 class="docs-sub">UploadPartCopy</h3>
+        <p class="docs-note">Copy data from an existing object into a multipart upload part:</p>
+<pre><code class="language-bash"># Copy bytes 0-10485759 from source as part 1
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?uploadId=X&partNumber=1" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "x-amz-copy-source: /source-bucket/source-file.bin" \
   -H "x-amz-copy-source-range: bytes=0-10485759"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Range Requests</h3>
-<pre class="mb-3"><code class="language-bash"># Get first 1000 bytes
+        <h3 class="docs-sub">Range Requests</h3>
+<pre><code class="language-bash"># Get first 1000 bytes
 curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "Range: bytes=0-999"
@@ -2482,10 +2482,10 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "Range: bytes=-500"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Conditional Requests</h3>
-        <div class="table-responsive mb-0">
-          <table class="table table-sm table-bordered small mb-0">
-            <thead class="table-light">
+        <h3 class="docs-sub">Conditional Requests</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Header</th>
                 <th>Behavior</th>
@@ -2509,18 +2509,18 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
         </div>
       </div>
     </article>
-    <article id="acls" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="acls" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">25</span>
-          <h2 class="h4 mb-0">Access Control Lists (ACLs)</h2>
+          <h2>Access Control Lists (ACLs)</h2>
         </div>
-        <p class="text-muted">ACLs provide legacy-style permission management for buckets and objects.</p>
+        <p class="ui-muted">ACLs provide legacy-style permission management for buckets and objects.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Canned ACLs</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Canned ACLs</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>ACL</th>
                 <th>Description</th>
@@ -2547,7 +2547,7 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
           </table>
         </div>
 
-<pre class="mb-3"><code class="language-bash"># Set bucket ACL
+<pre><code class="language-bash"># Set bucket ACL
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?acl" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2559,21 +2559,21 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
   -H "x-amz-acl: private" \
   --data-binary @file.txt</code></pre>
 
-        <div class="alert alert-light border mb-0">
+        <div class="ad-note">
           <strong>Recommendation:</strong> For most use cases, prefer bucket policies over ACLs for more flexible access control.
         </div>
       </div>
     </article>
-    <article id="tagging" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="tagging" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">26</span>
-          <h2 class="h4 mb-0">Object &amp; Bucket Tagging</h2>
+          <h2>Object &amp; Bucket Tagging</h2>
         </div>
-        <p class="text-muted">Add metadata tags to buckets and objects for organization, cost allocation, or lifecycle rule filtering.</p>
+        <p class="ui-muted">Add metadata tags to buckets and objects for organization, cost allocation, or lifecycle rule filtering.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Object Tagging</h3>
-<pre class="mb-3"><code class="language-bash"># Set object tags
+        <h3 class="docs-sub">Object Tagging</h3>
+<pre><code class="language-bash"># Set object tags
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?tagging" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2589,23 +2589,23 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
   -H "x-amz-tagging: Environment=Staging&Team=QA" \
   --data-binary @file.txt</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Bucket Tagging</h3>
-<pre class="mb-3"><code class="language-bash"># Set bucket tags
+        <h3 class="docs-sub">Bucket Tagging</h3>
+<pre><code class="language-bash"># Set bucket tags
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '&lt;Tagging&gt;&lt;TagSet&gt;&lt;Tag&gt;&lt;Key&gt;Environment&lt;/Key&gt;&lt;Value&gt;Production&lt;/Value&gt;&lt;/Tag&gt;&lt;Tag&gt;&lt;Key&gt;Team&lt;/Key&gt;&lt;Value&gt;Engineering&lt;/Value&gt;&lt;/Tag&gt;&lt;/TagSet&gt;&lt;/Tagging&gt;'</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Use Cases</h3>
-        <div class="row g-2 mb-0">
-          <div class="col-md-6">
-            <ul class="small text-muted mb-0 ps-3">
+        <h3 class="docs-sub">Use Cases</h3>
+        <div class="docs-cols">
+          <div>
+            <ul class="docs-note">
               <li>Filter objects for lifecycle expiration by tag</li>
               <li>Filter internal reports by project or owner tags</li>
             </ul>
           </div>
-          <div class="col-md-6">
-            <ul class="small text-muted mb-0 ps-3">
+          <div>
+            <ul class="docs-note">
               <li>Group objects by project or department</li>
               <li>Trigger automation based on object tags</li>
             </ul>
@@ -2613,20 +2613,20 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
         </div>
       </div>
     </article>
-    <article id="website-hosting" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="website-hosting" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">27</span>
-          <h2 class="h4 mb-0">Static Website Hosting</h2>
+          <h2>Static Website Hosting</h2>
         </div>
-        <p class="text-muted">Host static websites directly from S3 buckets with custom index and error pages, served via custom domain mapping.</p>
+        <p class="ui-muted">Host static websites directly from S3 buckets with custom index and error pages, served via custom domain mapping.</p>
 
-        <div class="alert alert-info small mb-3">
+        <div class="ad-note">
           <strong>Prerequisite:</strong> Set <code>WEBSITE_HOSTING_ENABLED=true</code> to enable this feature.
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">1. Configure bucket for website hosting</h3>
-<pre class="mb-3"><code class="language-bash"># Enable website hosting with index and error documents
+        <h3 class="docs-sub">1. Configure bucket for website hosting</h3>
+<pre><code class="language-bash"># Enable website hosting with index and error documents
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?website" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2643,8 +2643,8 @@ curl "{{ api_base }}/&lt;bucket&gt;?website" \
 curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?website" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">2. Map a custom domain to the bucket</h3>
-<pre class="mb-3"><code class="language-bash"># Create domain mapping (admin only)
+        <h3 class="docs-sub">2. Map a custom domain to the bucket</h3>
+<pre><code class="language-bash"># Create domain mapping (admin only)
 curl -X POST "{{ api_base }}/myfsio/admin/website-domains" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2664,15 +2664,15 @@ curl -X PUT "{{ api_base }}/myfsio/admin/website-domains/example.com" \
 curl -X DELETE "{{ api_base }}/myfsio/admin/website-domains/example.com" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">3. Point your domain</h3>
-        <p class="small text-muted">MyFSIO handles domain routing natively via the <code>Host</code> header &mdash; no path-based proxy rules needed. Just point your domain to the MyFSIO API server.</p>
+        <h3 class="docs-sub">3. Point your domain</h3>
+        <p class="docs-note">MyFSIO handles domain routing natively via the <code>Host</code> header &mdash; no path-based proxy rules needed. Just point your domain to the MyFSIO API server.</p>
 
-        <div class="alert alert-secondary small mb-3">
+        <div class="ad-note">
           <strong>Direct access (HTTP only):</strong> Point your domain's DNS (A or CNAME) directly to the MyFSIO server on port 5000.
         </div>
 
-        <p class="small text-muted mb-2">For <strong>HTTPS</strong>, place a reverse proxy in front. The proxy only needs to forward traffic &mdash; MyFSIO handles the domain-to-bucket routing:</p>
-<pre class="mb-3"><code class="language-nginx"># nginx example
+        <p class="docs-note">For <strong>HTTPS</strong>, place a reverse proxy in front. The proxy only needs to forward traffic &mdash; MyFSIO handles the domain-to-bucket routing:</p>
+<pre><code class="language-nginx"># nginx example
 server {
     server_name example.com;
     location / {
@@ -2682,21 +2682,21 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }</code></pre>
-        <div class="alert alert-warning small mb-3">
+        <div class="ad-note ad-note-warn">
           <strong>Important:</strong> The <code>proxy_set_header Host $host;</code> directive is required. MyFSIO matches the incoming <code>Host</code> header against domain mappings to determine which bucket to serve.
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">How it works</h3>
-        <div class="row g-2 mb-0">
-          <div class="col-md-6">
-            <ul class="small text-muted mb-0 ps-3">
+        <h3 class="docs-sub">How it works</h3>
+        <div class="docs-cols">
+          <div>
+            <ul class="docs-note">
               <li><code>/</code> serves the configured index document</li>
               <li><code>/about/</code> serves <code>about/index.html</code></li>
               <li>Objects served with correct Content-Type</li>
             </ul>
           </div>
-          <div class="col-md-6">
-            <ul class="small text-muted mb-0 ps-3">
+          <div>
+            <ul class="docs-note">
               <li>Missing objects return the error document with 404</li>
               <li>Website endpoints are public (no auth required)</li>
               <li>Normal S3 API with auth continues to work</li>
@@ -2705,16 +2705,16 @@ server {
         </div>
       </div>
     </article>
-    <article id="cors-config" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="cors-config" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">28</span>
-          <h2 class="h4 mb-0">CORS Configuration</h2>
+          <h2>CORS Configuration</h2>
         </div>
-        <p class="text-muted">Configure per-bucket Cross-Origin Resource Sharing rules to control which origins can access your bucket from a browser.</p>
+        <p class="ui-muted">Configure per-bucket Cross-Origin Resource Sharing rules to control which origins can access your bucket from a browser.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Setting CORS Rules</h3>
-<pre class="mb-3"><code class="language-bash"># Set CORS configuration
+        <h3 class="docs-sub">Setting CORS Rules</h3>
+<pre><code class="language-bash"># Set CORS configuration
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?cors" \
   -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
@@ -2737,10 +2737,10 @@ curl "{{ api_base }}/&lt;bucket&gt;?cors" \
 curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?cors" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Rule Fields</h3>
-        <div class="table-responsive mb-0">
-          <table class="table table-sm table-bordered small mb-0">
-            <thead class="table-light">
+        <h3 class="docs-sub">Rule Fields</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Field</th>
                 <th>Description</th>
@@ -2772,18 +2772,18 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?cors" \
         </div>
       </div>
     </article>
-    <article id="post-object" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="post-object" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">29</span>
-          <h2 class="h4 mb-0">PostObject (HTML Form Upload)</h2>
+          <h2>PostObject (HTML Form Upload)</h2>
         </div>
-        <p class="text-muted">Upload objects directly from an HTML form using browser-based POST uploads with policy-based authorization.</p>
+        <p class="ui-muted">Upload objects directly from an HTML form using browser-based POST uploads with policy-based authorization.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Form Fields</h3>
-        <div class="table-responsive mb-3">
-          <table class="table table-sm table-bordered small">
-            <thead class="table-light">
+        <h3 class="docs-sub">Form Fields</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Field</th>
                 <th>Description</th>
@@ -2803,20 +2803,20 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?cors" \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Signed Upload (With Policy)</h3>
-        <p class="small text-muted mb-0">For authenticated uploads, include a base64-encoded policy and SigV4 signature fields. The policy constrains allowed keys, content types, and size limits. See <code>docs.md</code> §14/§15 for testing notes and route references.</p>
+        <h3 class="docs-sub">Signed Upload (With Policy)</h3>
+        <p class="docs-note">For authenticated uploads, include a base64-encoded policy and SigV4 signature fields. The policy constrains allowed keys, content types, and size limits. See <code>docs.md</code> §14/§15 for testing notes and route references.</p>
       </div>
     </article>
-    <article id="list-objects-v2" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="list-objects-v2" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">30</span>
-          <h2 class="h4 mb-0">List Objects API v2</h2>
+          <h2>List Objects API v2</h2>
         </div>
-        <p class="text-muted">Use the v2 list API for improved pagination with continuation tokens instead of markers.</p>
+        <p class="ui-muted">Use the v2 list API for improved pagination with continuation tokens instead of markers.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Usage</h3>
-<pre class="mb-3"><code class="language-bash"># List with v2 API
+        <h3 class="docs-sub">Usage</h3>
+<pre><code class="language-bash"># List with v2 API
 curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;prefix=logs/&amp;delimiter=/&amp;max-keys=100" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
@@ -2828,10 +2828,10 @@ curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;continuation-token=&lt;token
 curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;start-after=photos/2025/" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Query Parameters</h3>
-        <div class="table-responsive mb-0">
-          <table class="table table-sm table-bordered small mb-0">
-            <thead class="table-light">
+        <h3 class="docs-sub">Query Parameters</h3>
+        <div class="ui-table-wrap">
+          <table class="docs-table">
+            <thead>
               <tr>
                 <th>Parameter</th>
                 <th>Description</th>
@@ -2851,17 +2851,17 @@ curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;start-after=photos/2025/" \
         </div>
       </div>
     </article>
-    <article id="upgrading" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="upgrading" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">31</span>
-          <h2 class="h4 mb-0">Upgrading &amp; Updates</h2>
+          <h2>Upgrading &amp; Updates</h2>
         </div>
-        <p class="text-muted">How to safely update MyFSIO to a new version.</p>
+        <p class="ui-muted">How to safely update MyFSIO to a new version.</p>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Pre-Update Backup</h3>
-        <p class="small text-muted">Always back up before updating:</p>
-<pre class="mb-3"><code class="language-bash"># Back up configuration
+        <h3 class="docs-sub">Pre-Update Backup</h3>
+        <p class="docs-note">Always back up before updating:</p>
+<pre><code class="language-bash"># Back up configuration
 cp -r data/.myfsio.sys/config/ config-backup/
 
 # Back up data (optional, for critical deployments)
@@ -2870,8 +2870,8 @@ tar czf myfsio-backup-$(date +%Y%m%d).tar.gz data/
 # Back up logs
 cp -r logs/ logs-backup/</code></pre>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Update Procedure</h3>
-        <ol class="docs-steps mb-3">
+        <h3 class="docs-sub">Update Procedure</h3>
+        <ol class="docs-steps">
           <li><strong>Stop the service:</strong> <code>sudo systemctl stop myfsio</code> (or kill the process)</li>
           <li><strong>Pull new version:</strong> <code>git pull origin main</code> or download the new binary</li>
           <li><strong>Build or install the new Rust binary:</strong> <code>cargo build --release -p myfsio-server</code></li>
@@ -2880,18 +2880,18 @@ cp -r logs/ logs-backup/</code></pre>
           <li><strong>Verify:</strong> <code>curl http://localhost:5000/myfsio/health</code></li>
         </ol>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Rollback</h3>
-        <p class="small text-muted mb-0">If something goes wrong, stop the service, restore the backed-up config and data directories, then restart with the previous binary or code version. See <code>docs.md</code> Section 12 for the rollback flow.</p>
+        <h3 class="docs-sub">Rollback</h3>
+        <p class="docs-note">If something goes wrong, stop the service, restore the backed-up config and data directories, then restart with the previous binary or code version. See <code>docs.md</code> Section 12 for the rollback flow.</p>
       </div>
     </article>
-    <article id="api-matrix" class="card shadow-sm docs-section">
-      <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+    <article id="api-matrix" class="ui-card docs-section">
+      <div class="docs-section-body">
+        <div class="docs-section-head">
           <span class="docs-section-kicker">32</span>
-          <h2 class="h4 mb-0">Full API Reference</h2>
+          <h2>Full API Reference</h2>
         </div>
-        <p class="text-muted">Complete list of all S3-compatible, admin, and KMS endpoints.</p>
-<pre class="mb-0"><code class="language-text"># Service
+        <p class="ui-muted">Complete list of all S3-compatible, admin, and KMS endpoints.</p>
+<pre><code class="language-text"># Service
 GET    /myfsio/health                   # Health check
 
 # Bucket Operations
