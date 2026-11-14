@@ -402,6 +402,9 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         ))
         .with_state(state)
         .merge(static_router)
+        .layer(axum::middleware::from_fn(
+            middleware::ui_content_security_policy,
+        ))
         .layer(axum::middleware::from_fn(middleware::server_header))
         .layer(tower_http::compression::CompressionLayer::new())
 }

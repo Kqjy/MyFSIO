@@ -34,6 +34,33 @@ pub async fn server_header(req: Request, next: Next) -> Response {
     resp
 }
 
+pub const UI_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'";
+
+pub async fn ui_content_security_policy(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let is_html = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/html")
+        });
+    if is_html
+        && !resp
+            .headers()
+            .contains_key(axum::http::header::CONTENT_SECURITY_POLICY)
+    {
+        resp.headers_mut().insert(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static(UI_CONTENT_SECURITY_POLICY),
+        );
+    }
+    resp
+}
+
 fn redact_sensitive_query(uri: &axum::http::Uri) -> String {
     match uri.query() {
         None => uri.path().to_string(),

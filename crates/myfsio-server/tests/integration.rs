@@ -18028,3 +18028,40 @@ async fn test_ui_restore_archives_replaced_object_without_delete_marker() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&bytes[..], b"first---");
 }
+
+#[tokio::test]
+async fn test_ui_html_pages_send_content_security_policy_without_inline_scripts() {
+    let (state, _tmp) = test_ui_state();
+    let (session_id, _csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    for uri in ["/ui/buckets", "/ui/metrics", "/ui/missing-page"] {
+        let response = app
+            .clone()
+            .oneshot(ui_request(Method::GET, uri, &session_id, None))
+            .await
+            .unwrap();
+        let policy = response
+            .headers()
+            .get("content-security-policy")
+            .unwrap_or_else(|| panic!("{uri} has no content-security-policy header"))
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(policy.contains("script-src 'self';"), "{uri}: {policy}");
+        assert!(policy.contains("object-src 'none'"), "{uri}: {policy}");
+        assert!(policy.contains("frame-ancestors 'self'"), "{uri}: {policy}");
+    }
+
+    let asset = app
+        .oneshot(ui_request(
+            Method::GET,
+            "/static/js/shell.js",
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert!(asset.headers().get("content-security-policy").is_none());
+}
