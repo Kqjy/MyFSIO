@@ -1449,34 +1449,6 @@
 <script src="{{ url_for(endpoint="static", filename="js/bucket-detail-utils.js") }}"></script>
 <script src="{{ url_for(endpoint="static", filename="js/bucket-detail-upload.js") }}"></script>
 <script src="{{ url_for(endpoint="static", filename="js/bucket-detail-main.js") }}"></script>
-<script>
-window.BucketDetailConfig = {
-  endpoints: {
-    versioning: "{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}",
-    bucketsOverview: "{{ url_for(endpoint="ui.buckets_overview") }}",
-    archivedObjects: "{{ url_for(endpoint="ui.archived_objects", bucket_name=bucket_name) }}"
-  }
-};
-
-(function() {
-  const bidirWarning = document.getElementById('bidirWarningBucket');
-  const modeRadios = document.querySelectorAll('input[name="replication_mode"]');
-
-  function updateBidirWarning() {
-    if (!bidirWarning) return;
-    const selected = document.querySelector('input[name="replication_mode"]:checked');
-    if (selected && selected.value === 'bidirectional') {
-      bidirWarning.classList.remove('is-hidden');
-    } else {
-      bidirWarning.classList.add('is-hidden');
-    }
-  }
-
-  modeRadios.forEach(function(radio) {
-    radio.addEventListener('change', updateBidirWarning);
-  });
-
-  updateBidirWarning();
-})();
-</script>
+<div id="bucketDetailEndpoints" hidden data-versioning="{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}" data-buckets-overview="{{ url_for(endpoint="ui.buckets_overview") }}" data-archived-objects="{{ url_for(endpoint="ui.archived_objects", bucket_name=bucket_name) }}"></div>
+<script src="{{ url_for(endpoint="static", filename="js/bucket-detail-config.js") }}"></script>
 {% endblock %}

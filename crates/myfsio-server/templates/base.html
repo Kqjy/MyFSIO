@@ -8,16 +8,7 @@
     <link rel="icon" type="image/png" href="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" />
     <link rel="icon" type="image/x-icon" href="{{ url_for(endpoint="static", filename="images/MyFSIO.ico") }}" />
     <link rel="stylesheet" href="{{ url_for(endpoint="static", filename="css/vendor/bootstrap.min.css") }}" />
-    <script>
-      (function () {
-        let theme = 'light';
-        try {
-          theme = localStorage.getItem('myfsio-theme') === 'dark' ? 'dark' : 'light';
-        } catch (err) {}
-        document.documentElement.dataset.bsTheme = theme;
-        document.documentElement.dataset.theme = theme;
-      })();
-    </script>
+    <script src="{{ url_for(endpoint="static", filename="js/theme-init.js") }}"></script>
     <link rel="stylesheet" href="{{ url_for(endpoint="static", filename="css/main.css") }}" />
     <link rel="stylesheet" href="{{ url_for(endpoint="static", filename="css/console.css") }}" />
     <link rel="stylesheet" href="{{ url_for(endpoint="static", filename="css/console-admin.css") }}" />
@@ -159,157 +150,10 @@
     </div>
     <div class="ui-toasts" id="uiToasts" role="region" aria-label="Notifications"></div>
     <script src="{{ url_for(endpoint="static", filename="js/vendor/bootstrap.bundle.min.js") }}"></script>
-    <script>
-      window.myfsioCsrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-      window.getCsrfToken = () => window.myfsioCsrfToken;
-      (function () {
-        const originalFetch = window.fetch;
-        let sessionRedirecting = false;
-        window.fetch = function (input, init) {
-          init = init || {};
-          const method = (init.method || 'GET').toUpperCase();
-          if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-            const headers = new Headers(init.headers || {});
-            if (window.myfsioCsrfToken) {
-              headers.set('X-CSRFToken', window.myfsioCsrfToken);
-            }
-            init.headers = headers;
-          }
-          return originalFetch.call(this, input, init).then(async response => {
-            let sameOrigin = false;
-            try {
-              const requestUrl = input instanceof Request ? input.url : String(input);
-              sameOrigin = new URL(requestUrl, window.location.href).origin === window.location.origin;
-            } catch (error) {}
-            if (!sameOrigin || sessionRedirecting) {
-              return response;
-            }
-            let expired = response.status === 401;
-            if (!expired && (response.headers.get('content-type') || '').includes('application/json')) {
-              try {
-                const data = await response.clone().json();
-                expired = data && data.error === 'Your session is no longer valid.';
-              } catch (error) {}
-            }
-            if (expired && window.location.pathname !== '/login') {
-              sessionRedirecting = true;
-              const next = window.location.pathname + window.location.search;
-              window.location.assign('/login?next=' + encodeURIComponent(next));
-            }
-            return response;
-          });
-        };
-      })();
-    </script>
+    <script src="{{ url_for(endpoint="static", filename="js/session-fetch.js") }}"></script>
     <script src="{{ url_for(endpoint="static", filename="js/ui-components.js") }}"></script>
-    <script>
-      (function () {
-        const storageKey = 'myfsio-theme';
-        const toggle = document.getElementById('themeToggle');
-
-        const applyTheme = (theme) => {
-          document.documentElement.dataset.bsTheme = theme;
-          document.documentElement.dataset.theme = theme;
-          try {
-            localStorage.setItem(storageKey, theme);
-          } catch (err) {}
-          if (toggle) {
-            const label = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
-            toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
-            toggle.setAttribute('aria-label', label);
-            toggle.setAttribute('data-ui-tip', label);
-          }
-        };
-
-        applyTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
-        toggle?.addEventListener('click', () => {
-          applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-          window.UI.tooltip.hide();
-        });
-      })();
-    </script>
-    <script>
-      (function () {
-        const nav = document.getElementById('appNav');
-        const scrim = document.getElementById('appScrim');
-        if (!nav || !scrim) return;
-        const openers = [document.getElementById('appMenuBtn'), document.getElementById('appTabMore')].filter(Boolean);
-        let lastOpener = null;
-
-        const background = Array.from(document.querySelectorAll('.app-main, .app-tabbar'));
-        const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-        const isOpen = () => nav.classList.contains('is-open');
-        const focusableItems = () => Array.from(nav.querySelectorAll(focusableSelector)).filter(el => el.getClientRects().length > 0);
-
-        const setOpen = (open) => {
-          nav.classList.toggle('is-open', open);
-          scrim.classList.toggle('is-open', open);
-          document.documentElement.classList.toggle('app-nav-locked', open);
-          background.forEach(el => { el.inert = open; });
-          openers.forEach(btn => btn.setAttribute('aria-expanded', open ? 'true' : 'false'));
-          if (open) {
-            nav.querySelector('[aria-current="page"], .app-nav-link')?.focus();
-          } else if (lastOpener) {
-            lastOpener.focus();
-            lastOpener = null;
-          }
-        };
-
-        openers.forEach(btn => btn.addEventListener('click', () => {
-          lastOpener = btn;
-          setOpen(!isOpen());
-        }));
-        scrim.addEventListener('click', () => setOpen(false));
-        document.getElementById('appNavClose')?.addEventListener('click', (event) => {
-          event.preventDefault();
-          setOpen(false);
-        });
-        document.addEventListener('keydown', (event) => {
-          if (!isOpen()) return;
-          if (event.key === 'Escape') {
-            setOpen(false);
-            return;
-          }
-          if (event.key !== 'Tab') return;
-          const items = focusableItems();
-          if (!items.length) return;
-          const first = items[0];
-          const last = items[items.length - 1];
-          const active = document.activeElement;
-          if (!nav.contains(active)) {
-            event.preventDefault();
-            (event.shiftKey ? last : first).focus();
-          } else if (event.shiftKey && active === first) {
-            event.preventDefault();
-            last.focus();
-          } else if (!event.shiftKey && active === last) {
-            event.preventDefault();
-            first.focus();
-          }
-        });
-        window.matchMedia('(min-width: 992px)').addEventListener('change', (event) => {
-          if (event.matches && isOpen()) setOpen(false);
-        });
-        window.addEventListener('pageshow', (event) => {
-          if (event.persisted && isOpen()) setOpen(false);
-        });
-      })();
-    </script>
-    {% block flash_toasts %}
-    <script>
-      (function () {
-
-        {% if flashed_messages %}
-          {% for flash in flashed_messages %}
-            var type = "{{ flash.category }}";
-            if (type === "danger") type = "error";
-            var title = type === "error" ? "Error" : "Notification";
-            window.showToast({{ flash.message | json_island | safe }}, title, type);
-          {% endfor %}
-        {% endif %}
-      })();
-    </script>
-    {% endblock %}
+    {% block flash_toasts %}{% if flashed_messages %}<script id="flashedMessages" type="application/json">{{ flashed_messages | json_island | safe }}</script>{% endif %}{% endblock %}
+    <script src="{{ url_for(endpoint="static", filename="js/shell.js") }}"></script>
     <script src="{{ url_for(endpoint="static", filename="js/ui-core.js") }}"></script>
     <script src="{{ url_for(endpoint="static", filename="js/command-palette.js") }}"></script>
     {% block extra_scripts %}{% endblock %}

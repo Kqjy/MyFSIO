@@ -57,10 +57,23 @@ fn format_err(e: tera::Error) -> String {
     out
 }
 
+fn assert_no_inline_script(tmpl: &str, rendered: &str) {
+    for (index, _) in rendered.match_indices("<script") {
+        let tag_end = rendered[index..]
+            .find('>')
+            .map_or(rendered.len(), |end| index + end);
+        let tag = &rendered[index..tag_end];
+        assert!(
+            tag.contains(" src=\"") || tag.contains(" type=\"application/json\""),
+            "{tmpl} has an inline script: {tag}"
+        );
+    }
+}
+
 fn render_or_panic(tmpl: &str, ctx: &Context) {
     let e = engine();
     match e.render(tmpl, ctx) {
-        Ok(_) => {}
+        Ok(rendered) => assert_no_inline_script(tmpl, &rendered),
         Err(err) => panic!("{} failed:\n{}", tmpl, format_err(err)),
     }
 }
@@ -68,7 +81,10 @@ fn render_or_panic(tmpl: &str, ctx: &Context) {
 fn render_to_string_or_panic(tmpl: &str, ctx: &Context) -> String {
     let e = engine();
     match e.render(tmpl, ctx) {
-        Ok(rendered) => rendered,
+        Ok(rendered) => {
+            assert_no_inline_script(tmpl, &rendered);
+            rendered
+        }
         Err(err) => panic!("{} failed:\n{}", tmpl, format_err(err)),
     }
 }
@@ -627,7 +643,13 @@ fn assert_bare_page(rendered: &str) {
     assert!(rendered.contains("<main class=\"main-content\">"));
     assert!(rendered.contains("<h1>"));
     assert!(!rendered.contains("id=\"appNav\""));
-    for bootstrap_class in ["d-flex", "text-muted", " btn-primary", "display-6", "col-lg-"] {
+    for bootstrap_class in [
+        "d-flex",
+        "text-muted",
+        " btn-primary",
+        "display-6",
+        "col-lg-",
+    ] {
         assert!(
             !rendered.contains(bootstrap_class),
             "unexpected Bootstrap class {bootstrap_class}"
