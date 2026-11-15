@@ -33,6 +33,7 @@ window.UI = (function() {
       if (!el || el.open) return el;
       el._uiOpener = opener || document.activeElement;
       el.showModal();
+      placeToastRegion();
       el.dispatchEvent(new CustomEvent('ui:open'));
       return el;
     },
@@ -68,6 +69,7 @@ window.UI = (function() {
   document.addEventListener('close', function(event) {
     var el = event.target;
     if (!(el instanceof HTMLDialogElement)) return;
+    placeToastRegion();
     var opener = el._uiOpener;
     el._uiOpener = null;
     if (opener && document.contains(opener) && typeof opener.focus === 'function') opener.focus();
@@ -185,6 +187,18 @@ window.UI = (function() {
     return region;
   }
 
+  function toastHost() {
+    var modals = document.querySelectorAll('dialog:modal');
+    return modals.length ? modals[modals.length - 1] : document.body;
+  }
+
+  function placeToastRegion() {
+    var region = document.getElementById('uiToasts');
+    if (!region) return;
+    var host = toastHost();
+    if (region.parentNode !== host) host.appendChild(region);
+  }
+
   function dismissToast(el) {
     if (!el || el._uiLeaving) return;
     el._uiLeaving = true;
@@ -224,6 +238,14 @@ window.UI = (function() {
     el.appendChild(body);
 
     var region = toastRegion();
+    placeToastRegion();
+    el._uiKey = type + '\n' + title.textContent + '\n' + body.textContent;
+    Array.prototype.forEach.call(region.children, function(existing) {
+      if (existing._uiKey === el._uiKey) {
+        clearTimeout(existing._uiTimer);
+        existing.remove();
+      }
+    });
     region.appendChild(el);
     while (region.children.length > 4) region.firstElementChild.remove();
 
