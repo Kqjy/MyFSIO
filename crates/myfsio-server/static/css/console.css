@@ -3437,32 +3437,70 @@ textarea.ui-input {
 	.login {
 		grid-template-columns: minmax(0, 1fr);
 		grid-template-rows: auto 1fr;
+		min-height: 100dvh;
+		background: var(--c-nav);
 	}
 
 	.login-art {
-		flex-direction: row;
 		align-items: center;
-		gap: 14px;
-		padding: 24px 20px;
+		gap: 10px;
+		padding: 44px 24px 56px;
+		text-align: center;
 	}
 
 	.login-art img {
-		width: 48px;
-		height: 48px;
-		border-radius: 12px;
+		width: 76px;
+		height: 76px;
+		margin-bottom: 6px;
+		border-radius: 18px;
 	}
 
 	.login-art-title {
-		font-size: 17px;
+		max-width: 300px;
+		font-size: 21px;
+		line-height: 1.2;
 	}
 
 	.login-art-text {
-		display: none;
+		max-width: 300px;
+		font-size: 14px;
 	}
 
 	.login-form {
 		align-items: flex-start;
-		padding: 24px 20px;
+		margin-top: -20px;
+		padding: 30px 20px 32px;
+		border-top: 1px solid var(--c-nav-line);
+		border-radius: 20px 20px 0 0;
+		background: var(--c-bg);
+	}
+
+	.login-box {
+		max-width: 420px;
+	}
+
+	.login-box h1 {
+		font-size: 24px;
+	}
+
+	.login-sub {
+		margin-bottom: 24px;
+	}
+
+	.login-input {
+		min-height: 48px;
+		font-size: 16px;
+	}
+
+	.login-reveal {
+		right: 8px;
+		min-height: 36px;
+	}
+
+	.login-submit {
+		min-height: 48px;
+		margin-top: 8px;
+		font-size: 16px;
 	}
 }
 
