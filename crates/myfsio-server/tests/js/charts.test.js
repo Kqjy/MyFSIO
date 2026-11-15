@@ -18,6 +18,7 @@ function element() {
     appendChild(child) { this.children.push(child); },
     addEventListener() {},
     getAttribute() { return null; },
+    querySelectorAll() { return []; },
     querySelector() { return this.hover; },
     getBoundingClientRect() { return { left: 0, top: 0, width: 600, height: 240 }; }
   };
