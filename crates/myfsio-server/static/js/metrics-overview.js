@@ -383,6 +383,7 @@ try {
       playIcon.classList.toggle('is-hidden', !paused);
       if (liveDot) liveDot.style.animationPlayState = paused ? 'paused' : 'running';
       pauseBtn.title = paused ? 'Resume auto-refresh' : 'Pause auto-refresh';
+      pauseBtn.setAttribute('aria-label', pauseBtn.title);
       if (!paused) { updateMetrics(); countdown = 5; }
     });
   }

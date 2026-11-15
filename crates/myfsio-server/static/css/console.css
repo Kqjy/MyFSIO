@@ -83,7 +83,7 @@ html {
 	-webkit-text-size-adjust: 100%;
 }
 
-[data-theme='dark'] html {
+html[data-theme='dark'] {
 	color-scheme: dark;
 }
 
@@ -2041,6 +2041,20 @@ summary {
 
 #preview-placeholder {
 	text-align: center;
+}
+
+#preview-text {
+	padding: 1rem 1.125rem;
+	height: 100%;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--c-mono);
+	font-size: 0.8rem;
+	line-height: 1.6;
+	tab-size: 4;
+	color: var(--c-text);
+	background: transparent;
 }
 
 .ob-preview img,
