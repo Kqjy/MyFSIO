@@ -391,7 +391,7 @@ mod tests {
             )
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(peer.clone());
+        req.extensions_mut().insert(peer);
         assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
 
         let mut req = Request::builder()
@@ -402,7 +402,7 @@ mod tests {
             .header("x-forwarded-for", "203.0.113.7")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(peer.clone());
+        req.extensions_mut().insert(peer);
         assert_eq!(client_ip(&req, 1), parsed_ip("203.0.113.7"));
 
         let mut req = Request::builder()

@@ -814,7 +814,7 @@ async fn upload_part_copy_range_from_middle_of_segmented_source() {
         .unwrap()
         .to_string();
     let mut etags = Vec::new();
-    for (idx, fill) in [b'A', b'B', b'C'].iter().enumerate() {
+    for (idx, fill) in b"ABC".iter().enumerate() {
         let resp = app
             .clone()
             .oneshot(request(

@@ -141,8 +141,8 @@ impl DiskLimiter {
                 recent.timeouts += bucket.timeouts;
             }
         }
-        if recent.waits > 0 {
-            recent.wait_ms_avg = recent_wait_total / recent.waits;
+        if let Some(wait_ms_avg) = recent_wait_total.checked_div(recent.waits) {
+            recent.wait_ms_avg = wait_ms_avg;
         }
         let series = (0..PRESSURE_HISTORY_BUCKETS as u64)
             .map(|index| {
@@ -240,7 +240,7 @@ impl DiskLimiter {
             queue_timeouts: self.queue_timeouts.load(Ordering::Relaxed),
             queue_waits: waits,
             queue_wait_ms_total: wait_total,
-            queue_wait_ms_avg: if waits > 0 { wait_total / waits } else { 0 },
+            queue_wait_ms_avg: wait_total.checked_div(waits).unwrap_or(0),
             upload_spool_bytes: self.upload_spool_bytes.load(Ordering::Relaxed),
             recent,
             history,

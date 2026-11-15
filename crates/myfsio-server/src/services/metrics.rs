@@ -845,7 +845,7 @@ impl MetricsService {
                 items.extend(ring.iter().rev());
             }
         }
-        items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        items.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
         let errors: Vec<RecentError> = items
             .into_iter()
             .filter(|item| cutoff.is_none_or(|value| item.timestamp >= value))

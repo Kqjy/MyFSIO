@@ -1159,7 +1159,7 @@ fn prune_iam_backups(iam_path: &std::path::Path, keep: usize) {
             Some((ts, path))
         })
         .collect();
-    backups.sort_by(|a, b| b.0.cmp(&a.0));
+    backups.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     for (_, path) in backups.into_iter().skip(keep) {
         if let Err(err) = std::fs::remove_file(&path) {

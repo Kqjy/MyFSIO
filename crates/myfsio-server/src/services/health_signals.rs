@@ -208,7 +208,7 @@ pub fn assess(inputs: &HealthInputs) -> HealthAssessment {
         );
     }
 
-    issues.sort_by(|a, b| b.severity.cmp(&a.severity));
+    issues.sort_by_key(|a| std::cmp::Reverse(a.severity));
     let status = issues
         .iter()
         .map(|issue| issue.severity)
