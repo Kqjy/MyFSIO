@@ -110,7 +110,7 @@
           </tr>
         </tbody>
       </table>
-      <div id="scroll-sentinel" style="height: 1px;"></div>
+      <div id="scroll-sentinel" class="ob-scroll-sentinel"></div>
     </div>
     <div id="pagination-controls" class="ui-card-foot">
       <div id="load-more-container" class="ob-foot-status">
@@ -373,7 +373,7 @@
                   <div data-usage-bytes-limit>
                   {% if has_max_bytes %}
                   {% if max_bytes > 0 %}{% set bytes_pct = total_bytes / max_bytes * 100 | int %}{% else %}{% set bytes_pct = 0 %}{% endif %}
-                  <div class="ui-bar bs-usage-bar {% if bytes_pct >= 90 %}is-bad{% elif bytes_pct >= 75 %}is-warn{% else %}is-ok{% endif %}"><i style="width: {% if bytes_pct > 100 %}100{% else %}{{ bytes_pct }}{% endif %}%"></i></div>
+                  <div class="ui-bar bs-usage-bar {% if bytes_pct >= 90 %}is-bad{% elif bytes_pct >= 75 %}is-warn{% else %}is-ok{% endif %}"><i data-bar-width="{% if bytes_pct > 100 %}100{% else %}{{ bytes_pct }}{% endif %}"></i></div>
                   <div class="ui-stat-note">{{ bytes_pct }}% of {{ max_bytes | filesizeformat }} limit</div>
                   {% else %}
                   <div class="ui-stat-note">No limit</div>
@@ -387,7 +387,7 @@
               <div data-usage-objects-limit>
               {% if has_max_objects %}
               {% if max_objects > 0 %}{% set obj_pct = total_objects / max_objects * 100 | int %}{% else %}{% set obj_pct = 0 %}{% endif %}
-              <div class="ui-bar bs-usage-bar {% if obj_pct >= 90 %}is-bad{% elif obj_pct >= 75 %}is-warn{% else %}is-ok{% endif %}"><i style="width: {% if obj_pct > 100 %}100{% else %}{{ obj_pct }}{% endif %}%"></i></div>
+              <div class="ui-bar bs-usage-bar {% if obj_pct >= 90 %}is-bad{% elif obj_pct >= 75 %}is-warn{% else %}is-ok{% endif %}"><i data-bar-width="{% if obj_pct > 100 %}100{% else %}{{ obj_pct }}{% endif %}"></i></div>
               <div class="ui-stat-note">{{ obj_pct }}% of {{ max_objects }} stored-copy limit</div>
               {% else %}
               <div class="ui-stat-note">No stored-copy limit</div>
@@ -696,13 +696,13 @@
               </div>
             </div>
 
-            <p class="ui-hint" id="replication-last-sync" style="display: none;">
+            <p class="is-hidden ui-hint" id="replication-last-sync">
               <strong>Last sync:</strong>
               <span data-stat="last-sync-time"></span>
               <span data-stat="last-sync-key"></span>
             </p>
 
-            <div class="ui-card bs-repl-run" id="replication-current-run-card" style="display: none;">
+            <div class="is-hidden ui-card bs-repl-run" id="replication-current-run-card">
               <div class="bs-repl-run-head">
                 <span class="ui-spinner" role="status" id="current-run-spinner"></span>
                 <strong id="current-run-title">Replication run</strong>
@@ -710,24 +710,24 @@
                 <span class="ui-hint" id="current-run-elapsed"></span>
               </div>
               <div class="ui-hint" id="current-run-summary">Starting...</div>
-              <div class="ui-bar is-ok"><i id="current-run-progress" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></i></div>
+              <div class="ui-bar is-ok"><i id="current-run-progress" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></i></div>
               <div class="bs-repl-run-foot ui-hint">
                 <span><span id="current-run-in-flight">0</span> in-flight &middot; <span class="ui-error" id="current-run-failed">0</span> failed</span>
                 <code class="ui-mono" id="current-run-last-object" title=""></code>
               </div>
             </div>
 
-            <p class="ui-hint" id="replication-last-run-card" style="display: none;">
+            <p class="is-hidden ui-hint" id="replication-last-run-card">
               <strong>Last run:</strong> <span id="last-run-summary"></span>
             </p>
 
-            <p class="ui-hint" id="replication-ambient-strip" style="display: none;">
+            <p class="is-hidden ui-hint" id="replication-ambient-strip">
               <span><strong>Live:</strong> <span id="live-in-flight">0</span> in-flight &middot; <span id="live-replicated">0</span> replicated &middot; <span id="live-failed" class="ui-error">0</span> failed</span>
               <span><strong>Healer:</strong> <span id="healer-status">idle</span></span>
             </p>
           </div>
 
-          <div class="bs-panel-section" id="replication-failures-card" style="display: none;"
+          <div class="is-hidden bs-panel-section" id="replication-failures-card"
                data-failures-endpoint="{{ url_for(endpoint="ui.get_replication_failures", bucket_name=bucket_name) }}"
                data-retry-endpoint="{{ url_for(endpoint="ui.retry_replication_failure", bucket_name=bucket_name, object_key="__KEY__") }}"
                data-retry-all-endpoint="{{ url_for(endpoint="ui.retry_all_replication_failures", bucket_name=bucket_name) }}"
@@ -756,7 +756,7 @@
                 </tbody>
               </table>
             </div>
-            <div class="bs-panel-body" id="replication-failures-pagination" style="display: none;">
+            <div class="is-hidden bs-panel-body" id="replication-failures-pagination">
               <button class="ui-btn ui-btn-sm ui-btn-ghost" type="button" id="show-more-failures">Show more...</button>
               <span class="ui-hint" id="failures-shown-count"></span>
             </div>

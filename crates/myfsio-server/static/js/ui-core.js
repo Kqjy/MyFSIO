@@ -323,6 +323,15 @@ window.UICore.setupJsonAutoIndent = function(textarea) {
   });
 };
 
+window.UICore.applyBarWidths = function(root) {
+  (root || document).querySelectorAll('[data-bar-width]').forEach(function(bar) {
+    var pct = Math.max(0, Math.min(100, Number(bar.dataset.barWidth) || 0));
+    bar.style.width = pct + '%';
+  });
+};
+
+window.UICore.applyBarWidths(document);
+
 document.addEventListener('DOMContentLoaded', function() {
   var flashMessage = sessionStorage.getItem('flashMessage');
   if (flashMessage) {

@@ -7,6 +7,12 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  function paintSwatches(root) {
+    root.querySelectorAll('[data-swatch]').forEach(function(swatch) {
+      swatch.style.background = swatch.dataset.swatch;
+    });
+  }
+
   function num(value) {
     var parsed = Number(value);
     return isFinite(parsed) ? parsed : 0;
@@ -161,8 +167,9 @@
     this.legendEl.hidden = false;
     this.legendEl.innerHTML = datasets.map(function(dataset) {
       var color = dataset.borderColor || colorAt(dataset.backgroundColor, 0);
-      return '<span class="svg-chart-key"><i style="background:' + esc(color) + '"></i>' + esc(dataset.label) + '</span>';
+      return '<span class="svg-chart-key"><i data-swatch="' + esc(color) + '"></i>' + esc(dataset.label) + '</span>';
     }).join('');
+    paintSwatches(this.legendEl);
   };
 
   SvgChart.prototype.render = function() {
@@ -465,7 +472,7 @@
         text = (item.dataset.label ? item.dataset.label + ': ' : '') + axis.scale.formatValue(item.entry.values[index]);
       }
       (Array.isArray(text) ? text : [text]).forEach(function(line, lineIndex) {
-        rows.push('<div class="svg-chart-tip-row">' + (lineIndex === 0 ? '<i style="background:' + esc(color) + '"></i>' : '<i></i>') + esc(line) + '</div>');
+        rows.push('<div class="svg-chart-tip-row">' + (lineIndex === 0 ? '<i data-swatch="' + esc(color) + '"></i>' : '<i></i>') + esc(line) + '</div>');
       });
     });
     if (!covering.length) return '';
@@ -510,6 +517,7 @@
     var group = this.plotEl.querySelector('.svg-chart-hover');
     if (group) group.innerHTML = marks.join('');
     this.tipEl.innerHTML = html;
+    paintSwatches(this.tipEl);
     this.tipEl.hidden = false;
     var hostBounds = this.host.getBoundingClientRect();
     var tipWidth = this.tipEl.offsetWidth;

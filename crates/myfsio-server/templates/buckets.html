@@ -86,7 +86,7 @@
             {% if bucket.quota %}
             <div class="ui-quota">
               <div class="ui-quota-text"><span>{{ bucket.summary.human_size }}</span><span class="ui-muted">of {{ bucket.quota.human_limit }}</span></div>
-              <div class="ui-bar is-{{ bucket.quota.tone }}" role="progressbar" aria-label="Quota used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ bucket.quota.percent }}"><i style="width: {{ bucket.quota.percent }}%"></i></div>
+              <div class="ui-bar is-{{ bucket.quota.tone }}" role="progressbar" aria-label="Quota used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ bucket.quota.percent }}"><i data-bar-width="{{ bucket.quota.percent }}"></i></div>
             </div>
             {% else %}
             <div class="ui-quota-text"><span>{{ bucket.summary.human_size }}</span><span class="ui-faint ui-hide-m">no quota</span></div>

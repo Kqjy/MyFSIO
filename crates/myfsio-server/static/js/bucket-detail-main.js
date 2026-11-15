@@ -264,7 +264,7 @@
     if (limit && limit > 0) {
       const pct = Math.min(100, Math.floor(used / limit * 100));
       const tone = pct >= 90 ? 'is-bad' : pct >= 75 ? 'is-warn' : 'is-ok';
-      return '<div class="ui-bar bs-usage-bar ' + tone + '"><i style="width: ' + pct + '%"></i></div>' +
+      return '<div class="ui-bar bs-usage-bar ' + tone + '"><i data-bar-width="' + pct + '"></i></div>' +
         '<div class="ui-stat-note">' + pct + '% of ' + limitLabel + '</div>';
     }
     return '<div class="ui-stat-note">' + emptyLabel + '</div>';
@@ -293,6 +293,7 @@
       const maxBytes = maxBytesRaw ? parseInt(maxBytesRaw, 10) : 0;
       bytesLimit.innerHTML = renderBytesLimit(totalBytes, maxBytes);
     }
+    window.UICore.applyBarWidths(document);
   };
 
   const refreshBucketUsage = async () => {
@@ -332,12 +333,12 @@
     if (!topSpacer) {
       topSpacer = document.createElement('tr');
       topSpacer.id = 'virtual-top-spacer';
-      topSpacer.innerHTML = '<td colspan="5" style="padding: 0; border: none;"></td>';
+      topSpacer.innerHTML = '<td colspan="5" class="ob-virtual-spacer"></td>';
     }
     if (!bottomSpacer) {
       bottomSpacer = document.createElement('tr');
       bottomSpacer.id = 'virtual-bottom-spacer';
-      bottomSpacer.innerHTML = '<td colspan="5" style="padding: 0; border: none;"></td>';
+      bottomSpacer.innerHTML = '<td colspan="5" class="ob-virtual-spacer"></td>';
     }
   };
 
@@ -2869,12 +2870,12 @@
       if (!card) return;
       if (!run) {
         if (!optimisticRunActive) {
-          card.style.display = 'none';
+          card.classList.add('is-hidden');
         }
         return;
       }
       optimisticRunActive = false;
-      card.style.display = '';
+      card.classList.remove('is-hidden');
 
       const titleEl = document.getElementById('current-run-title');
       const kindEl = document.getElementById('current-run-kind');
@@ -2932,7 +2933,7 @@
       const summaryEl = document.getElementById('last-run-summary');
       if (!card || !summaryEl) return;
       if (currentRun || !lastRun) {
-        card.style.display = 'none';
+        card.classList.add('is-hidden');
         return;
       }
       const total = lastRun.total_queued || 0;
@@ -2943,7 +2944,7 @@
         : '';
       const kind = lastRun.kind === 'retry_all' ? 'Retry-all' : 'Resume-all';
       summaryEl.textContent = `${kind} — ${completed.toLocaleString()}/${total.toLocaleString()} synced, ${failed.toLocaleString()} failed${elapsed ? ` in ${elapsed}` : ''}`;
-      card.style.display = '';
+      card.classList.remove('is-hidden');
     };
 
     const renderAmbientStrip = (data) => {
@@ -2957,10 +2958,10 @@
         || healer.running
         || healer.last_pass_at;
       if (!showAny) {
-        strip.style.display = 'none';
+        strip.classList.add('is-hidden');
         return;
       }
-      strip.style.display = '';
+      strip.classList.remove('is-hidden');
       const liveInFlightEl = document.getElementById('live-in-flight');
       const liveReplicatedEl = document.getElementById('live-replicated');
       const liveFailedEl = document.getElementById('live-failed');
@@ -3022,7 +3023,7 @@
         if (bytesEl) bytesEl.textContent = formatBytes(data.bytes_synced);
 
         if (data.last_sync_at && lastSyncEl) {
-          lastSyncEl.style.display = '';
+          lastSyncEl.classList.remove('is-hidden');
           const date = new Date(data.last_sync_at * 1000);
           if (lastSyncTimeEl) lastSyncTimeEl.textContent = date.toLocaleString();
           if (lastSyncKeyEl && data.last_sync_key) {
@@ -3046,9 +3047,9 @@
     const showOptimisticRun = (kind) => {
       optimisticRunActive = true;
       const card = document.getElementById('replication-current-run-card');
-      if (card) card.style.display = '';
+      if (card) card.classList.remove('is-hidden');
       const lastRunCard = document.getElementById('replication-last-run-card');
-      if (lastRunCard) lastRunCard.style.display = 'none';
+      if (lastRunCard) lastRunCard.classList.add('is-hidden');
       const titleEl = document.getElementById('current-run-title');
       const kindEl = document.getElementById('current-run-kind');
       const summaryEl = document.getElementById('current-run-summary');
@@ -3119,20 +3120,20 @@
         const total = data.total;
 
         if (total > 0) {
-          failuresCard.style.display = '';
+          failuresCard.classList.remove('is-hidden');
           failureCountBadge.textContent = total;
           renderFailures(currentFailures);
 
           if (total > 5 && !failuresExpanded) {
-            failuresPagination.style.display = '';
+            failuresPagination.classList.remove('is-hidden');
             failuresShownCount.textContent = `Showing ${Math.min(5, total)} of ${total}`;
           } 
           else {
-            failuresPagination.style.display = 'none';
+            failuresPagination.classList.add('is-hidden');
           }
         } 
         else {
-          failuresCard.style.display = 'none';
+          failuresCard.classList.add('is-hidden');
         }
       } catch (err) {
         console.error('Failed to load replication failures:', err);

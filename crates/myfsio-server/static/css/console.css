@@ -385,6 +385,24 @@ summary {
 	display: none !important;
 }
 
+.ic-sprite {
+	position: absolute;
+}
+
+.ob-scroll-sentinel {
+	height: 1px;
+}
+
+.ob-virtual-spacer {
+	padding: 0 !important;
+	border: none !important;
+}
+
+.ui-bar > i[data-bar-width],
+#current-run-progress {
+	width: 0;
+}
+
 .ic {
 	width: 16px;
 	height: 16px;
