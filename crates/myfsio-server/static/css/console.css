@@ -899,7 +899,7 @@ summary {
 .ui-toasts {
 	position: fixed;
 	right: 16px;
-	bottom: 16px;
+	bottom: calc(16px + var(--ui-toast-lift, 0px));
 	z-index: 1090;
 	display: flex;
 	flex-direction: column;
@@ -2390,7 +2390,7 @@ summary {
 		left: 0;
 		right: 0;
 		bottom: 0;
-		z-index: 1040;
+		z-index: 1034;
 		max-height: 78vh;
 		border-radius: var(--c-radius-lg) var(--c-radius-lg) 0 0;
 		box-shadow: var(--c-shadow-pop);
@@ -2659,11 +2659,16 @@ textarea.ui-input {
 	display: none !important;
 }
 
+@media (max-width: 991.98px) {
+	.app:not(.app-bare) ~ .ui-toasts {
+		bottom: calc(var(--c-tabbar-height) + env(safe-area-inset-bottom, 0px) + 12px + var(--ui-toast-lift, 0px));
+	}
+}
+
 @media (max-width: 575.98px) {
 	.ui-toasts {
 		right: 12px;
 		left: 12px;
-		bottom: calc(var(--c-tabbar-height) + 12px);
 		width: auto;
 	}
 }

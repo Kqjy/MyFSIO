@@ -197,7 +197,32 @@ window.UI = (function() {
     if (!region) return;
     var host = toastHost();
     if (region.parentNode !== host) host.appendChild(region);
+    liftToastRegion();
   }
+
+  function liftToastRegion() {
+    var region = document.getElementById('uiToasts');
+    if (!region) return;
+    region.style.removeProperty('--ui-toast-lift');
+    if (region.parentNode !== document.body) return;
+    var box = region.getBoundingClientRect();
+    var lift = 0;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-ui-toast-avoid]'), function(obstacle) {
+      var rect = obstacle.getBoundingClientRect();
+      if (!rect.height || rect.right <= box.left || rect.left >= box.right || rect.bottom <= box.top) return;
+      lift = Math.max(lift, box.bottom - rect.top + 8);
+    });
+    if (lift > 0) region.style.setProperty('--ui-toast-lift', Math.round(lift) + 'px');
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    if (typeof ResizeObserver === 'undefined') return;
+    var observer = new ResizeObserver(liftToastRegion);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-ui-toast-avoid]'), function(obstacle) {
+      observer.observe(obstacle);
+    });
+  });
+  window.addEventListener('resize', liftToastRegion);
 
   function dismissToast(el) {
     if (!el || el._uiLeaving) return;
@@ -248,6 +273,7 @@ window.UI = (function() {
     });
     region.appendChild(el);
     while (region.children.length > 4) region.firstElementChild.remove();
+    liftToastRegion();
 
     var duration = options.duration !== undefined ? options.duration : (type === 'error' ? 8000 : 5000);
     function arm() {
