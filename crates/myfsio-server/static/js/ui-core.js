@@ -45,7 +45,7 @@ window.UICore = (function() {
     try {
       if (submitBtn) {
         submitBtn.disabled = true;
-        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving...';
+        submitBtn.innerHTML = '<span class="ui-spinner" aria-hidden="true"></span> Saving...';
       }
 
       var formAction = form.getAttribute('action') || form.action;
@@ -239,7 +239,7 @@ window.UICore.setButtonLoading = function(button, isLoading, loadingText) {
     button._originalHtml = button.innerHTML;
     button._originalDisabled = button.disabled;
     button.disabled = true;
-    button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' + (loadingText || 'Loading...');
+    button.innerHTML = '<span class="ui-spinner" aria-hidden="true"></span> ' + (loadingText || 'Loading...');
   } else {
     button.disabled = button._originalDisabled || false;
     button.innerHTML = button._originalHtml || button.innerHTML;
