@@ -31,11 +31,6 @@
     return minutes + 'm ' + pad(remainingSeconds) + 's';
   }
 
-  var _gcHistoryIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">' +
-    '<path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>' +
-    '<path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>' +
-    '<path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 8V3.5a.5.5 0 0 1 .5-.5z"/></svg>';
-
   function _gcRefreshHistory() {
     fetch(pageConfig.gcHistoryUrl + '?limit=10', {
       headers: {'X-CSRFToken': csrfToken},
@@ -47,15 +42,14 @@
       if (!container) return;
       var execs = hist.executions || [];
       if (execs.length === 0) {
-        container.innerHTML = '<div class="text-center py-2"><p class="text-muted small mb-0">No executions recorded yet.</p></div>';
+        container.innerHTML = '<p class="ui-muted mt-none">No executions recorded yet.</p>';
         return;
       }
-      var html = '<h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">' +
-        _gcHistoryIcon + ' Recent Executions</h6>' +
-        '<div class="table-responsive"><table class="table table-sm small mb-0">' +
-        '<thead class="table-light"><tr><th>Time</th><th class="text-center">Cleaned</th>' +
-        '<th class="text-center">Freed</th><th class="text-center">Duration</th>' +
-        '<th class="text-center">Mode</th></tr></thead><tbody>';
+      var html = '<h3 class="mt-subhead">Recent executions</h3>' +
+        '<div class="ui-table-wrap"><table class="ui-table mt-history">' +
+        '<thead><tr><th scope="col">Time</th><th scope="col" class="st-num">Cleaned</th>' +
+        '<th scope="col" class="st-num">Freed</th><th scope="col" class="st-num">Duration</th>' +
+        '<th scope="col">Mode</th></tr></thead><tbody>';
       execs.forEach(function (exec) {
         var r = exec.result || {};
         var cleaned = (r.temp_files_deleted || 0) + (r.multipart_uploads_deleted || 0) +
@@ -66,13 +60,13 @@
           (r.temp_bytes_freed || 0) + (r.quarantine_bytes_freed || 0) +
           (r.multipart_bytes_freed || 0) + (r.orphaned_version_bytes_freed || 0);
         var mode = exec.dry_run
-          ? '<span class="badge bg-warning bg-opacity-10 text-warning">Dry run</span>'
-          : '<span class="badge bg-primary bg-opacity-10 text-primary">Live</span>';
-        html += '<tr><td class="text-nowrap">' + formatTimestamp(exec.timestamp) + '</td>' +
-          '<td class="text-center">' + cleaned + '</td>' +
-          '<td class="text-center">' + formatBytes(freed) + '</td>' +
-          '<td class="text-center text-nowrap">' + formatDuration(r.execution_time_seconds) + '</td>' +
-          '<td class="text-center">' + mode + '</td></tr>';
+          ? '<span class="ui-badge ui-badge-warn">Dry run</span>'
+          : '<span class="ui-badge ui-badge-accent">Live</span>';
+        html += '<tr><td class="mt-when">' + formatTimestamp(exec.timestamp) + '</td>' +
+          '<td class="st-num">' + cleaned + '</td>' +
+          '<td class="st-num">' + formatBytes(freed) + '</td>' +
+          '<td class="st-num">' + formatDuration(r.execution_time_seconds) + '</td>' +
+          '<td>' + mode + '</td></tr>';
       });
       html += '</tbody></table></div>';
       container.innerHTML = html;
@@ -91,16 +85,15 @@
       if (!container) return;
       var execs = hist.executions || [];
       if (execs.length === 0) {
-        container.innerHTML = '<div class="text-center py-2"><p class="text-muted small mb-0">No scans recorded yet.</p></div>';
+        container.innerHTML = '<p class="ui-muted mt-none">No scans recorded yet.</p>';
         return;
       }
-      var html = '<h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">' +
-        _gcHistoryIcon + ' Recent Scans</h6>' +
-        '<div class="table-responsive"><table class="table table-sm small mb-0">' +
-        '<thead class="table-light"><tr><th>Time</th><th class="text-center">Scanned</th>' +
-        '<th class="text-center">Issues</th><th class="text-center">Healed</th>' +
-        '<th class="text-center">Duration</th>' +
-        '<th class="text-center">Mode</th></tr></thead><tbody>';
+      var html = '<h3 class="mt-subhead">Recent scans</h3>' +
+        '<div class="ui-table-wrap"><table class="ui-table mt-history">' +
+        '<thead><tr><th scope="col">Time</th><th scope="col" class="st-num">Scanned</th>' +
+        '<th scope="col" class="st-num">Issues</th><th scope="col" class="st-num">Healed</th>' +
+        '<th scope="col" class="st-num">Duration</th>' +
+        '<th scope="col">Mode</th></tr></thead><tbody>';
       execs.forEach(function (exec) {
         var r = exec.result || {};
         var issues = (r.corrupted_objects || 0) + (r.orphaned_objects || 0) +
@@ -108,19 +101,19 @@
           (r.legacy_metadata_drifts || 0) +
           (r.poisoned_objects || 0) + (r.invalid_metadata_keys || 0);
         var issueHtml = issues > 0
-          ? '<span class="text-danger fw-medium">' + issues + '</span>'
-          : '<span class="text-success">0</span>';
+          ? '<strong class="st-bad">' + issues + '</strong>'
+          : '<span class="st-ok">0</span>';
         var mode = exec.dry_run
-          ? '<span class="badge bg-warning bg-opacity-10 text-warning">Dry</span>'
+          ? '<span class="ui-badge ui-badge-warn">Dry</span>'
           : (exec.auto_heal
-            ? '<span class="badge bg-success bg-opacity-10 text-success">Heal</span>'
-            : '<span class="badge bg-primary bg-opacity-10 text-primary">Scan</span>');
-        html += '<tr><td class="text-nowrap">' + formatTimestamp(exec.timestamp) + '</td>' +
-          '<td class="text-center">' + (r.objects_scanned || 0) + '</td>' +
-          '<td class="text-center">' + issueHtml + '</td>' +
-          '<td class="text-center">' + (r.issues_healed || 0) + '</td>' +
-          '<td class="text-center text-nowrap">' + formatDuration(r.execution_time_seconds) + '</td>' +
-          '<td class="text-center">' + mode + '</td></tr>';
+            ? '<span class="ui-badge ui-badge-ok">Heal</span>'
+            : '<span class="ui-badge ui-badge-accent">Scan</span>');
+        html += '<tr><td class="mt-when">' + formatTimestamp(exec.timestamp) + '</td>' +
+          '<td class="st-num">' + (r.objects_scanned || 0) + '</td>' +
+          '<td class="st-num">' + issueHtml + '</td>' +
+          '<td class="st-num">' + (r.issues_healed || 0) + '</td>' +
+          '<td class="st-num">' + formatDuration(r.execution_time_seconds) + '</td>' +
+          '<td>' + mode + '</td></tr>';
       });
       html += '</tbody></table></div>';
       container.innerHTML = html;
@@ -176,13 +169,13 @@
     var banner = document.getElementById('gcScanningBanner');
     var btns = ['gcRunBtn', 'gcDryRunBtn'];
     if (scanning) {
-      banner.classList.remove('d-none');
+      banner.classList.remove('is-hidden');
       btns.forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.disabled = true;
       });
     } else {
-      banner.classList.add('d-none');
+      banner.classList.add('is-hidden');
       document.getElementById('gcScanElapsed').textContent = '';
       btns.forEach(function (id) {
         var el = document.getElementById(id);
@@ -196,7 +189,7 @@
     var alert = document.getElementById('gcResultAlert');
     var title = document.getElementById('gcResultTitle');
     var body = document.getElementById('gcResultBody');
-    container.classList.remove('d-none');
+    container.classList.remove('is-hidden');
 
     var totalItems = (data.temp_files_deleted || 0) + (data.multipart_uploads_deleted || 0) +
                       (data.lock_files_deleted || 0) + (data.orphaned_metadata_deleted || 0) +
@@ -206,7 +199,7 @@
                      (data.temp_bytes_freed || 0) + (data.quarantine_bytes_freed || 0) +
                      (data.multipart_bytes_freed || 0) + (data.orphaned_version_bytes_freed || 0);
 
-    alert.className = totalItems > 0 ? 'alert alert-success mb-0 small' : 'alert alert-info mb-0 small';
+    alert.className = totalItems > 0 ? 'adm-note adm-note-ok' : 'adm-note';
     title.textContent = (dryRun ? '[Dry Run] ' : '') + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
 
     var lines = [];
@@ -247,7 +240,7 @@
   });
 
   function runGC(dryRun) {
-    document.getElementById('gcResult').classList.add('d-none');
+    document.getElementById('gcResult').classList.add('is-hidden');
     _gcSetScanning(true);
 
     fetch(pageConfig.gcRunUrl, {
@@ -263,8 +256,8 @@
         var alert = document.getElementById('gcResultAlert');
         var title = document.getElementById('gcResultTitle');
         var body = document.getElementById('gcResultBody');
-        container.classList.remove('d-none');
-        alert.className = 'alert alert-danger mb-0 small';
+        container.classList.remove('is-hidden');
+        alert.className = 'adm-note adm-note-bad';
         title.textContent = 'Error';
         body.textContent = data.error;
         return;
@@ -283,8 +276,8 @@
       var alert = document.getElementById('gcResultAlert');
       var title = document.getElementById('gcResultTitle');
       var body = document.getElementById('gcResultBody');
-      container.classList.remove('d-none');
-      alert.className = 'alert alert-danger mb-0 small';
+      container.classList.remove('is-hidden');
+      alert.className = 'adm-note adm-note-bad';
       title.textContent = 'Error';
       body.textContent = err.message;
     });
@@ -299,13 +292,13 @@
     var banner = document.getElementById('integrityScanningBanner');
     var btns = ['integrityRunBtn', 'integrityHealBtn', 'integrityDryRunBtn'];
     if (scanning) {
-      banner.classList.remove('d-none');
+      banner.classList.remove('is-hidden');
       btns.forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.disabled = true;
       });
     } else {
-      banner.classList.add('d-none');
+      banner.classList.add('is-hidden');
       document.getElementById('integrityScanElapsed').textContent = '';
       btns.forEach(function (id) {
         var el = document.getElementById(id);
@@ -319,7 +312,7 @@
     var alert = document.getElementById('integrityResultAlert');
     var title = document.getElementById('integrityResultTitle');
     var body = document.getElementById('integrityResultBody');
-    container.classList.remove('d-none');
+    container.classList.remove('is-hidden');
 
     var totalIssues = (data.corrupted_objects || 0) + (data.orphaned_objects || 0) +
                        (data.phantom_metadata || 0) + (data.stale_versions || 0) +
@@ -327,7 +320,7 @@
                        (data.poisoned_objects || 0) + (data.invalid_metadata_keys || 0);
 
     var prefix = dryRun ? '[Dry Run] ' : (autoHeal ? '[Heal] ' : '');
-    alert.className = totalIssues > 0 ? 'alert alert-warning mb-0 small' : 'alert alert-success mb-0 small';
+    alert.className = totalIssues > 0 ? 'adm-note adm-note-warn' : 'adm-note adm-note-ok';
     title.textContent = prefix + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
 
     var lines = [];
@@ -383,7 +376,7 @@
   });
 
   function runIntegrity(dryRun, autoHeal) {
-    document.getElementById('integrityResult').classList.add('d-none');
+    document.getElementById('integrityResult').classList.add('is-hidden');
     _integritySetScanning(true);
 
     fetch(pageConfig.integrityRunUrl, {
@@ -399,8 +392,8 @@
         var alert = document.getElementById('integrityResultAlert');
         var title = document.getElementById('integrityResultTitle');
         var body = document.getElementById('integrityResultBody');
-        container.classList.remove('d-none');
-        alert.className = 'alert alert-danger mb-0 small';
+        container.classList.remove('is-hidden');
+        alert.className = 'adm-note adm-note-bad';
         title.textContent = 'Error';
         body.textContent = data.error;
         return;
@@ -419,8 +412,8 @@
       var alert = document.getElementById('integrityResultAlert');
       var title = document.getElementById('integrityResultTitle');
       var body = document.getElementById('integrityResultBody');
-      container.classList.remove('d-none');
-      alert.className = 'alert alert-danger mb-0 small';
+      container.classList.remove('is-hidden');
+      alert.className = 'adm-note adm-note-bad';
       title.textContent = 'Error';
       body.textContent = err.message;
     });
@@ -441,7 +434,7 @@
 
   document.querySelectorAll('[data-dismiss-result]').forEach(function (button) {
     button.addEventListener('click', function () {
-      document.getElementById(button.getAttribute('data-dismiss-result')).classList.add('d-none');
+      document.getElementById(button.getAttribute('data-dismiss-result')).classList.add('is-hidden');
     });
   });
 

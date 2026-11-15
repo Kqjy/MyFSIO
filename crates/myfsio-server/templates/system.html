@@ -3,67 +3,143 @@
 {% block title %}Maintenance{% endblock %}
 
 {% block content %}
-<div class="page-header d-flex justify-content-between align-items-center mb-4">
+<div class="ui-pagehead">
   <div>
-    <p class="text-uppercase text-muted small mb-1">Operations</p>
-    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
-      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-        <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
-      </svg>
-      Maintenance
-    </h1>
-    <p class="text-muted mb-0 mt-1">Server information, feature flags, and maintenance tools.</p>
+    <h1>Maintenance</h1>
+    <div class="ui-pagehead-sub">Server information, feature flags, and maintenance tools.</div>
   </div>
-  <div class="d-none d-md-block">
-    <span class="badge bg-primary bg-opacity-10 text-primary fs-6 px-3 py-2">v{{ app_version }}</span>
+  <div class="ui-pagehead-actions">
+    <span class="ui-badge ui-badge-accent">v{{ app_version }}</span>
   </div>
 </div>
 
-<div class="row g-4 mb-4">
-  <div class="col-12">
-    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-        <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path d="M5 0a.5.5 0 0 1 .5.5V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2A2.5 2.5 0 0 1 14 4.5h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14a2.5 2.5 0 0 1-2.5 2.5v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14A2.5 2.5 0 0 1 2 11.5H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2A2.5 2.5 0 0 1 4.5 2V.5A.5.5 0 0 1 5 0zm-.5 3A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13h7a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 11.5 3h-7zM5 6.5A1.5 1.5 0 0 1 6.5 5h3A1.5 1.5 0 0 1 11 6.5v3A1.5 1.5 0 0 1 9.5 11h-3A1.5 1.5 0 0 1 5 9.5v-3zM6.5 6a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3z"/>
-          </svg>
-          Server Information
-        </h5>
-        <p class="text-muted small mb-0">Runtime environment and configuration</p>
+<section class="ui-card st-block" aria-labelledby="serverInfoTitle">
+  <div class="st-cardhead">
+    <h2 id="serverInfoTitle">Server information</h2>
+    <span class="ui-muted st-sub">Runtime environment and configuration</span>
+  </div>
+  <dl class="mt-facts">
+    <div><dt>Version</dt><dd>{{ app_version }}</dd></div>
+    <div><dt>Storage root</dt><dd><code>{{ storage_root }}</code></dd></div>
+    <div><dt>Platform</dt><dd>{{ platform }}</dd></div>
+    <div><dt>Engine</dt><dd><span class="ui-badge ui-badge-ok">Rust (native)</span></dd></div>
+  </dl>
+</section>
+
+<section class="ui-card st-block" aria-labelledby="featureFlagsTitle">
+  <div class="st-cardhead">
+    <h2 id="featureFlagsTitle">Feature flags</h2>
+    <span class="ui-muted st-sub">Features configured via environment variables</span>
+  </div>
+  <div class="ui-table-wrap">
+    <table class="ui-table">
+      <thead class="adm-sr">
+        <tr>
+          <th scope="col">Feature</th>
+          <th scope="col">State</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for feat in features %}
+        <tr>
+          <td>{{ feat.label }}</td>
+          <td class="st-num">
+            {% if feat.enabled %}
+            <span class="ui-badge ui-badge-ok">Enabled</span>
+            {% else %}
+            <span class="ui-badge">Disabled</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="mt-tools">
+  <section class="ui-card" aria-labelledby="gcTitle">
+    <div class="st-cardhead">
+      <h2 id="gcTitle">Garbage collection</h2>
+      {% if gc_status.enabled %}
+      <span class="ui-badge ui-badge-ok">Active</span>
+      {% else %}
+      <span class="ui-badge">Disabled</span>
+      {% endif %}
+    </div>
+    <p class="st-cardnote st-sub ui-muted">Clean up temporary files, orphaned uploads, and stale locks.</p>
+    {% if gc_status.enabled %}
+    <div class="adm-card-pad adm-stack mt-body">
+      {% if can_run_gc %}
+      <div class="mt-actions">
+        <button type="button" class="ui-btn ui-btn-sm ui-btn-primary" id="gcRunBtn" data-gc-run="live">Run now</button>
+        <button type="button" class="ui-btn ui-btn-sm" id="gcDryRunBtn" data-gc-run="dry">Dry run</button>
       </div>
-      <div class="card-body px-4 pb-4">
-        <div class="row g-3">
-          <div class="col-md-6 col-xl-3"><div class="small text-muted">Version</div><div class="fw-medium">{{ app_version }}</div></div>
-          <div class="col-md-6 col-xl-3"><div class="small text-muted">Storage Root</div><code class="text-break">{{ storage_root }}</code></div>
-          <div class="col-md-6 col-xl-3"><div class="small text-muted">Platform</div><div>{{ platform }}</div></div>
-          <div class="col-md-6 col-xl-3"><div class="small text-muted">Engine</div><span class="badge bg-success bg-opacity-10 text-success">Rust (native)</span></div>
+      {% endif %}
+
+      <div id="gcScanningBanner"{% if not gc_status.scanning %} class="is-hidden"{% endif %}>
+        <div class="adm-note mt-progress" role="status">
+          <span class="ui-spinner" aria-hidden="true"></span>
+          <span>GC in progress<span id="gcScanElapsed"></span></span>
         </div>
       </div>
-    </div>
-  </div>
 
-  <div class="col-12">
-    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-        <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path fill-rule="evenodd" d="M11.5 2a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM9.05 3a2.5 2.5 0 0 1 4.9 0H16v1h-2.05a2.5 2.5 0 0 1-4.9 0H0V3h9.05zM4.5 7a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2.05 8a2.5 2.5 0 0 1 4.9 0H16v1H6.95a2.5 2.5 0 0 1-4.9 0H0V8h2.05zm9.45 4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm-2.45 1a2.5 2.5 0 0 1 4.9 0H16v1h-2.05a2.5 2.5 0 0 1-4.9 0H0v-1h9.05z"/>
-          </svg>
-          Feature Flags
-        </h5>
-        <p class="text-muted small mb-0">Features configured via environment variables</p>
+      <div id="gcResult" class="is-hidden">
+        <div class="adm-note" id="gcResultAlert" role="status">
+          <div class="mt-result-head">
+            <strong id="gcResultTitle"></strong>
+            <button type="button" class="ui-toast-close" aria-label="Dismiss result" data-dismiss-result="gcResult">&times;</button>
+          </div>
+          <div id="gcResultBody"></div>
+        </div>
       </div>
-      <div class="card-body px-4 pb-4">
-        <table class="table table-sm mb-0">
-          <tbody>
-            {% for feat in features %}
+
+      <div class="st-facts-card">
+        <h3 class="mt-subhead">Configuration</h3>
+        <dl class="mt-config">
+          <div><dt>Interval</dt><dd>{{ gc_status.interval_hours }}h</dd></div>
+          <div><dt>Dry run</dt><dd>{% if gc_status.dry_run %}Yes{% else %}No{% endif %}</dd></div>
+          <div><dt>Temp max age</dt><dd>{{ gc_status.temp_file_max_age_hours }}h</dd></div>
+          <div><dt>Lock max age</dt><dd>{{ gc_status.lock_file_max_age_hours }}h</dd></div>
+          <div><dt>Multipart max age</dt><dd>{{ gc_status.multipart_max_age_days }}d</dd></div>
+        </dl>
+      </div>
+
+      <div id="gcHistoryContainer">
+      {% if gc_history %}
+      <h3 class="mt-subhead">Recent executions</h3>
+      <div class="ui-table-wrap">
+        <table class="ui-table mt-history">
+          <thead>
             <tr>
-              <td class="text-muted" style="width:55%">{{ feat.label }}</td>
-              <td class="text-end">
-                {% if feat.enabled %}
-                <span class="badge bg-success bg-opacity-10 text-success">Enabled</span>
+              <th scope="col">Time</th>
+              <th scope="col" class="st-num">Cleaned</th>
+              <th scope="col" class="st-num">Freed</th>
+              <th scope="col" class="st-num">Duration</th>
+              <th scope="col">Mode</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for exec in gc_history | slice(end=10) %}
+            <tr>
+              <td class="mt-when">{{ exec.timestamp_display }}</td>
+              <td class="st-num">
+                {% set r = exec.result %}
+                {% set t1 = r.temp_files_deleted | default(value=0) %}
+                {% set t2 = r.multipart_uploads_deleted | default(value=0) %}
+                {% set t3 = r.lock_files_deleted | default(value=0) %}
+                {% set t4 = r.orphaned_metadata_deleted | default(value=0) %}
+                {% set t5 = r.orphaned_versions_deleted | default(value=0) %}
+                {% set t6 = r.empty_dirs_removed | default(value=0) %}
+                {{ t1 + t2 + t3 + t4 + t5 + t6 }}
+              </td>
+              <td class="st-num">{{ exec.bytes_freed_display }}</td>
+              <td class="st-num">{{ exec.duration_display }}</td>
+              <td>
+                {% if exec.dry_run %}
+                <span class="ui-badge ui-badge-warn">Dry run</span>
                 {% else %}
-                <span class="badge bg-secondary bg-opacity-10 text-secondary">Disabled</span>
+                <span class="ui-badge ui-badge-accent">Live</span>
                 {% endif %}
               </td>
             </tr>
@@ -71,327 +147,151 @@
           </tbody>
         </table>
       </div>
-    </div>
-  </div>
-</div>
-
-<div class="row g-4 mb-4">
-  <div class="col-lg-6">
-    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
-            <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                <path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/>
-              </svg>
-              Garbage Collection
-            </h5>
-            <p class="text-muted small mb-0">Clean up temporary files, orphaned uploads, and stale locks</p>
-          </div>
-          <div>
-            {% if gc_status.enabled %}
-            <span class="badge bg-success bg-opacity-10 text-success">Active</span>
-            {% else %}
-            <span class="badge bg-secondary bg-opacity-10 text-secondary">Disabled</span>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-      <div class="card-body px-4 pb-4">
-        {% if gc_status.enabled %}
-        {% if can_run_gc %}
-        <div class="d-flex gap-2 mb-3">
-          <button class="btn btn-primary btn-sm d-inline-flex align-items-center" id="gcRunBtn" data-gc-run="live">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
-              <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-              <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-            </svg>
-            Run Now
-          </button>
-          <button class="btn btn-outline-secondary btn-sm" id="gcDryRunBtn" data-gc-run="dry">
-            Dry Run
-          </button>
-        </div>
-        {% endif %}
-
-        <div id="gcScanningBanner" class="mb-3 {% if not gc_status.scanning %}d-none{% endif %}">
-          <div class="alert alert-info mb-0 small d-flex align-items-center gap-2">
-            <div class="spinner-border spinner-border-sm text-info" role="status"></div>
-            <span>GC in progress<span id="gcScanElapsed"></span></span>
-          </div>
-        </div>
-
-        <div id="gcResult" class="mb-3 d-none">
-          <div class="alert mb-0 small" id="gcResultAlert">
-            <div class="d-flex justify-content-between align-items-start">
-              <div class="fw-semibold mb-1" id="gcResultTitle"></div>
-              <button type="button" class="btn-close btn-close-sm" style="font-size:0.65rem" data-dismiss-result="gcResult"></button>
-            </div>
-            <div id="gcResultBody"></div>
-          </div>
-        </div>
-
-        <div class="border rounded p-3 mb-3" style="background: var(--bs-tertiary-bg, #f8f9fa);">
-          <div class="d-flex align-items-center gap-2 mb-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-              <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
-            </svg>
-            <span class="small fw-semibold text-muted">Configuration</span>
-          </div>
-          <div class="row small">
-            <div class="col-6 mb-1"><span class="text-muted">Interval:</span> {{ gc_status.interval_hours }}h</div>
-            <div class="col-6 mb-1"><span class="text-muted">Dry run:</span> {% if gc_status.dry_run %}Yes{% else %}No{% endif %}</div>
-            <div class="col-6 mb-1"><span class="text-muted">Temp max age:</span> {{ gc_status.temp_file_max_age_hours }}h</div>
-            <div class="col-6 mb-1"><span class="text-muted">Lock max age:</span> {{ gc_status.lock_file_max_age_hours }}h</div>
-            <div class="col-6"><span class="text-muted">Multipart max age:</span> {{ gc_status.multipart_max_age_days }}d</div>
-          </div>
-        </div>
-
-        <div id="gcHistoryContainer">
-        {% if gc_history %}
-        <h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-            <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
-            <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
-            <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 8V3.5a.5.5 0 0 1 .5-.5z"/>
-          </svg>
-          Recent Executions
-        </h6>
-        <div class="table-responsive">
-          <table class="table table-sm small mb-0">
-            <thead class="table-light">
-              <tr>
-                <th>Time</th>
-                <th class="text-center">Cleaned</th>
-                <th class="text-center">Freed</th>
-                <th class="text-center">Duration</th>
-                <th class="text-center">Mode</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for exec in gc_history | slice(end=10) %}
-              <tr>
-                <td class="text-nowrap">{{ exec.timestamp_display }}</td>
-                <td class="text-center">
-                  {% set r = exec.result %}
-                  {% set t1 = r.temp_files_deleted | default(value=0) %}
-                  {% set t2 = r.multipart_uploads_deleted | default(value=0) %}
-                  {% set t3 = r.lock_files_deleted | default(value=0) %}
-                  {% set t4 = r.orphaned_metadata_deleted | default(value=0) %}
-                  {% set t5 = r.orphaned_versions_deleted | default(value=0) %}
-                  {% set t6 = r.empty_dirs_removed | default(value=0) %}
-                  {{ t1 + t2 + t3 + t4 + t5 + t6 }}
-                </td>
-                <td class="text-center">{{ exec.bytes_freed_display }}</td>
-                <td class="text-center text-nowrap">{{ exec.duration_display }}</td>
-                <td class="text-center">
-                  {% if exec.dry_run %}
-                  <span class="badge bg-warning bg-opacity-10 text-warning">Dry run</span>
-                  {% else %}
-                  <span class="badge bg-primary bg-opacity-10 text-primary">Live</span>
-                  {% endif %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% else %}
-        <div class="text-center py-2">
-          <p class="text-muted small mb-0">No executions recorded yet.</p>
-        </div>
-        {% endif %}
-        </div>
-
-        {% else %}
-        <div class="text-center py-4">
-          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="currentColor" class="text-muted mb-2 opacity-50" viewBox="0 0 16 16">
-            <path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/>
-          </svg>
-          {% if not can_read_gc %}
-          <p class="text-muted mb-1">You do not have permission to view garbage collection.</p>
-          <p class="text-muted small mb-0">Requires the <code>system:gc_read</code> permission.</p>
-          {% else %}
-          <p class="text-muted mb-1">Garbage collection is not enabled.</p>
-          <p class="text-muted small mb-0">Set <code>GC_ENABLED=true</code> to enable automatic cleanup.</p>
-          {% endif %}
-        </div>
-        {% endif %}
+      {% else %}
+      <p class="ui-muted mt-none">No executions recorded yet.</p>
+      {% endif %}
       </div>
     </div>
-  </div>
+    {% else %}
+    <div class="ui-empty">
+      {% if not can_read_gc %}
+      <h2>You do not have permission to view garbage collection.</h2>
+      <p>Requires the <code>system:gc_read</code> permission.</p>
+      {% else %}
+      <h2>Garbage collection is not enabled.</h2>
+      <p>Set <code>GC_ENABLED=true</code> to enable automatic cleanup.</p>
+      {% endif %}
+    </div>
+    {% endif %}
+  </section>
 
-  <div class="col-lg-6">
-    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
-            <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
-                <path d="M10.854 5.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 7.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
-              </svg>
-              Integrity Scanner
-            </h5>
-            <p class="text-muted small mb-0">Detect and heal corrupted objects, orphaned files, and metadata drift</p>
-          </div>
-          <div>
-            {% if integrity_status.enabled %}
-            <span class="badge bg-success bg-opacity-10 text-success">Active</span>
-            {% else %}
-            <span class="badge bg-secondary bg-opacity-10 text-secondary">Disabled</span>
-            {% endif %}
-          </div>
+  <section class="ui-card" aria-labelledby="integrityTitle">
+    <div class="st-cardhead">
+      <h2 id="integrityTitle">Integrity scanner</h2>
+      {% if integrity_status.enabled %}
+      <span class="ui-badge ui-badge-ok">Active</span>
+      {% else %}
+      <span class="ui-badge">Disabled</span>
+      {% endif %}
+    </div>
+    <p class="st-cardnote st-sub ui-muted">Detect and heal corrupted objects, orphaned files, and metadata drift.</p>
+    {% if integrity_status.enabled %}
+    <div class="adm-card-pad adm-stack mt-body">
+      {% if can_run_integrity %}
+      <div class="mt-actions">
+        <button type="button" class="ui-btn ui-btn-sm ui-btn-primary" id="integrityRunBtn" data-integrity-run="scan"{% if integrity_status.scanning %} disabled{% endif %}>Scan now</button>
+        <button type="button" class="ui-btn ui-btn-sm" id="integrityHealBtn" data-integrity-run="heal"{% if integrity_status.scanning %} disabled{% endif %}>Scan &amp; heal</button>
+        <button type="button" class="ui-btn ui-btn-sm" id="integrityDryRunBtn" data-integrity-run="dry"{% if integrity_status.scanning %} disabled{% endif %}>Heal preview</button>
+      </div>
+      {% endif %}
+
+      <div id="integrityScanningBanner"{% if not integrity_status.scanning %} class="is-hidden"{% endif %}>
+        <div class="adm-note mt-progress" role="status">
+          <span class="ui-spinner" aria-hidden="true"></span>
+          <span>Scan in progress<span id="integrityScanElapsed"></span></span>
         </div>
       </div>
-      <div class="card-body px-4 pb-4">
-        {% if integrity_status.enabled %}
-        {% if can_run_integrity %}
-        <div class="d-flex gap-2 flex-wrap mb-3">
-          <button class="btn btn-primary btn-sm d-inline-flex align-items-center" id="integrityRunBtn" data-integrity-run="scan" {% if integrity_status.scanning %}disabled{% endif %}>
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
-              <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-              <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-            </svg>
-            Scan Now
-          </button>
-          <button class="btn btn-outline-warning btn-sm" id="integrityHealBtn" data-integrity-run="heal" {% if integrity_status.scanning %}disabled{% endif %}>
-            Scan &amp; Heal
-          </button>
-          <button class="btn btn-outline-secondary btn-sm" id="integrityDryRunBtn" data-integrity-run="dry" {% if integrity_status.scanning %}disabled{% endif %}>
-            Heal Preview
-          </button>
-        </div>
-        {% endif %}
 
-        <div id="integrityScanningBanner" class="mb-3 {% if not integrity_status.scanning %}d-none{% endif %}">
-          <div class="alert alert-info mb-0 small d-flex align-items-center gap-2">
-            <div class="spinner-border spinner-border-sm text-info" role="status"></div>
-            <span>Scan in progress<span id="integrityScanElapsed"></span></span>
+      {% if integrity_status.persistence_error %}
+      <div class="adm-note adm-note-bad" role="alert">
+        The latest integrity state could not be persisted: {{ integrity_status.persistence_error }}
+      </div>
+      {% elif integrity_status.last_run_total_issues > 0 %}
+      <div class="adm-note adm-note-warn" role="alert">
+        The latest scan has {{ integrity_status.last_run_total_issues }} unresolved finding{% if integrity_status.last_run_total_issues != 1 %}s{% endif %}.
+      </div>
+      {% endif %}
+
+      <div id="integrityResult" class="is-hidden">
+        <div class="adm-note" id="integrityResultAlert" role="status">
+          <div class="mt-result-head">
+            <strong id="integrityResultTitle"></strong>
+            <button type="button" class="ui-toast-close" aria-label="Dismiss result" data-dismiss-result="integrityResult">&times;</button>
           </div>
+          <div id="integrityResultBody"></div>
         </div>
+      </div>
 
-        {% if integrity_status.persistence_error %}
-        <div class="alert alert-danger py-2 small mb-3">
-          The latest integrity state could not be persisted: {{ integrity_status.persistence_error }}
-        </div>
-        {% elif integrity_status.last_run_total_issues > 0 %}
-        <div class="alert alert-warning py-2 small mb-3">
-          The latest scan has {{ integrity_status.last_run_total_issues }} unresolved finding{% if integrity_status.last_run_total_issues != 1 %}s{% endif %}.
-        </div>
-        {% endif %}
+      <div class="st-facts-card">
+        <h3 class="mt-subhead">Configuration</h3>
+        <dl class="mt-config">
+          <div><dt>Interval</dt><dd>{{ integrity_status.interval_hours }}h</dd></div>
+          <div><dt>Dry run</dt><dd>{% if integrity_status.dry_run %}Yes{% else %}No{% endif %}</dd></div>
+          <div><dt>Checksum batch</dt><dd>{{ integrity_status.batch_size }}</dd></div>
+          <div><dt>Auto-heal</dt><dd>{% if integrity_status.auto_heal %}Yes{% else %}No{% endif %}</dd></div>
+          <div><dt>Peer recovery</dt><dd>{% if integrity_status.peer_heal_available %}Available{% else %}Unavailable{% endif %}</dd></div>
+          <div><dt>Quarantine retention</dt><dd>{% if integrity_status.quarantine_retention_days %}{{ integrity_status.quarantine_retention_days }}d{% else %}&mdash;{% endif %}</dd></div>
+        </dl>
+      </div>
 
-        <div id="integrityResult" class="mb-3 d-none">
-          <div class="alert mb-0 small" id="integrityResultAlert">
-            <div class="d-flex justify-content-between align-items-start">
-              <div class="fw-semibold mb-1" id="integrityResultTitle"></div>
-              <button type="button" class="btn-close btn-close-sm" style="font-size:0.65rem" data-dismiss-result="integrityResult"></button>
-            </div>
-            <div id="integrityResultBody"></div>
-          </div>
-        </div>
-
-        <div class="border rounded p-3 mb-3" style="background: var(--bs-tertiary-bg, #f8f9fa);">
-          <div class="d-flex align-items-center gap-2 mb-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-              <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
-            </svg>
-            <span class="small fw-semibold text-muted">Configuration</span>
-          </div>
-          <div class="row small">
-            <div class="col-6 mb-1"><span class="text-muted">Interval:</span> {{ integrity_status.interval_hours }}h</div>
-            <div class="col-6 mb-1"><span class="text-muted">Dry run:</span> {% if integrity_status.dry_run %}Yes{% else %}No{% endif %}</div>
-            <div class="col-6"><span class="text-muted">Checksum batch:</span> {{ integrity_status.batch_size }}</div>
-            <div class="col-6"><span class="text-muted">Auto-heal:</span> {% if integrity_status.auto_heal %}Yes{% else %}No{% endif %}</div>
-            <div class="col-6 mt-1"><span class="text-muted">Peer recovery:</span> {% if integrity_status.peer_heal_available %}Available{% else %}Unavailable{% endif %}</div>
-            <div class="col-6 mt-1"><span class="text-muted">Quarantine retention:</span> {% if integrity_status.quarantine_retention_days %}{{ integrity_status.quarantine_retention_days }}d{% else %}&mdash;{% endif %}</div>
-          </div>
-        </div>
-
-        <div id="integrityHistoryContainer">
-        {% if integrity_history %}
-        <h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-            <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
-            <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
-            <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 8V3.5a.5.5 0 0 1 .5-.5z"/>
-          </svg>
-          Recent Scans
-        </h6>
-        <div class="table-responsive">
-          <table class="table table-sm small mb-0">
-            <thead class="table-light">
-              <tr>
-                <th>Time</th>
-                <th class="text-center">Scanned</th>
-                <th class="text-center">Issues</th>
-                <th class="text-center">Healed</th>
-                <th class="text-center">Duration</th>
-                <th class="text-center">Mode</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for exec in integrity_history | slice(end=10) %}
-              <tr>
-                <td class="text-nowrap">{{ exec.timestamp_display }}</td>
-                <td class="text-center">{{ exec.result.objects_scanned| default(value=0) }}</td>
-                <td class="text-center">
-                  {% set i1 = exec.result.corrupted_objects | default(value=0) %}
-                  {% set i2 = exec.result.orphaned_objects | default(value=0) %}
-                  {% set i3 = exec.result.phantom_metadata | default(value=0) %}
-                  {% set i4 = exec.result.stale_versions | default(value=0) %}
-                  {% set i5 = exec.result.legacy_metadata_drifts | default(value=0) %}
-                  {% set i6 = exec.result.poisoned_objects | default(value=0) %}
-                  {% set i7 = exec.result.invalid_metadata_keys | default(value=0) %}
-                  {% set total_issues = i1 + i2 + i3 + i4 + i5 + i6 + i7 %}
-                  {% if total_issues > 0 %}
-                  <span class="text-danger fw-medium">{{ total_issues }}</span>
-                  {% else %}
-                  <span class="text-success">0</span>
-                  {% endif %}
-                </td>
-                <td class="text-center">{{ exec.result.issues_healed| default(value=0) }}</td>
-                <td class="text-center text-nowrap">{{ exec.duration_display }}</td>
-                <td class="text-center">
-                  {% if exec.dry_run %}
-                  <span class="badge bg-warning bg-opacity-10 text-warning">Dry</span>
-                  {% elif exec.auto_heal %}
-                  <span class="badge bg-success bg-opacity-10 text-success">Heal</span>
-                  {% else %}
-                  <span class="badge bg-primary bg-opacity-10 text-primary">Scan</span>
-                  {% endif %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% else %}
-        <div class="text-center py-2">
-          <p class="text-muted small mb-0">No scans recorded yet.</p>
-        </div>
-        {% endif %}
-        </div>
-
-        {% else %}
-        <div class="text-center py-4">
-          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="currentColor" class="text-muted mb-2 opacity-50" viewBox="0 0 16 16">
-            <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
-            <path d="M10.854 5.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 7.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
-          </svg>
-          {% if not can_read_integrity %}
-          <p class="text-muted mb-1">You do not have permission to view the integrity scanner.</p>
-          <p class="text-muted small mb-0">Requires the <code>system:integrity_read</code> permission.</p>
-          {% else %}
-          <p class="text-muted mb-1">Integrity scanner is not enabled.</p>
-          <p class="text-muted small mb-0">Set <code>INTEGRITY_ENABLED=true</code> to enable automatic scanning.</p>
-          {% endif %}
-        </div>
-        {% endif %}
+      <div id="integrityHistoryContainer">
+      {% if integrity_history %}
+      <h3 class="mt-subhead">Recent scans</h3>
+      <div class="ui-table-wrap">
+        <table class="ui-table mt-history">
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col" class="st-num">Scanned</th>
+              <th scope="col" class="st-num">Issues</th>
+              <th scope="col" class="st-num">Healed</th>
+              <th scope="col" class="st-num">Duration</th>
+              <th scope="col">Mode</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for exec in integrity_history | slice(end=10) %}
+            <tr>
+              <td class="mt-when">{{ exec.timestamp_display }}</td>
+              <td class="st-num">{{ exec.result.objects_scanned| default(value=0) }}</td>
+              <td class="st-num">
+                {% set i1 = exec.result.corrupted_objects | default(value=0) %}
+                {% set i2 = exec.result.orphaned_objects | default(value=0) %}
+                {% set i3 = exec.result.phantom_metadata | default(value=0) %}
+                {% set i4 = exec.result.stale_versions | default(value=0) %}
+                {% set i5 = exec.result.legacy_metadata_drifts | default(value=0) %}
+                {% set i6 = exec.result.poisoned_objects | default(value=0) %}
+                {% set i7 = exec.result.invalid_metadata_keys | default(value=0) %}
+                {% set total_issues = i1 + i2 + i3 + i4 + i5 + i6 + i7 %}
+                {% if total_issues > 0 %}
+                <strong class="st-bad">{{ total_issues }}</strong>
+                {% else %}
+                <span class="st-ok">0</span>
+                {% endif %}
+              </td>
+              <td class="st-num">{{ exec.result.issues_healed| default(value=0) }}</td>
+              <td class="st-num">{{ exec.duration_display }}</td>
+              <td>
+                {% if exec.dry_run %}
+                <span class="ui-badge ui-badge-warn">Dry</span>
+                {% elif exec.auto_heal %}
+                <span class="ui-badge ui-badge-ok">Heal</span>
+                {% else %}
+                <span class="ui-badge ui-badge-accent">Scan</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="ui-muted mt-none">No scans recorded yet.</p>
+      {% endif %}
       </div>
     </div>
-  </div>
+    {% else %}
+    <div class="ui-empty">
+      {% if not can_read_integrity %}
+      <h2>You do not have permission to view the integrity scanner.</h2>
+      <p>Requires the <code>system:integrity_read</code> permission.</p>
+      {% else %}
+      <h2>Integrity scanner is not enabled.</h2>
+      <p>Set <code>INTEGRITY_ENABLED=true</code> to enable automatic scanning.</p>
+      {% endif %}
+    </div>
+    {% endif %}
+  </section>
 </div>
 {% endblock %}
 
