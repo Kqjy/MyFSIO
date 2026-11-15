@@ -54,9 +54,9 @@
   const previewAudio = document.getElementById('preview-audio');
   const previewText = document.getElementById('preview-text');
   const previewIframe = document.getElementById('preview-iframe');
-  const previewStage = previewPlaceholder ? previewPlaceholder.closest('.preview-stage') : document.querySelector('.preview-stage');
+  const previewStage = previewPlaceholder ? previewPlaceholder.closest('.ob-preview') : document.querySelector('.ob-preview');
   const setAudioStage = (active) => {
-    if (previewStage) previewStage.classList.toggle('preview-stage-audio', !!active);
+    if (previewStage) previewStage.classList.toggle('is-audio', !!active);
   };
   const downloadButton = document.getElementById('downloadButton');
   const presignButton = document.getElementById('presignButton');
@@ -1680,12 +1680,12 @@
     previewMetadata.classList.remove('is-hidden');
     userMetadata.forEach(([key, value]) => {
       const wrapper = document.createElement('div');
-      wrapper.className = 'metadata-entry';
+      wrapper.className = 'ob-metadata-entry';
       const label = document.createElement('div');
-      label.className = 'metadata-key';
+      label.className = 'ob-metadata-key';
       label.textContent = key;
       const val = document.createElement('div');
-      val.className = 'metadata-value text-break';
+      val.className = 'ob-metadata-value';
       val.textContent = value;
       wrapper.appendChild(label);
       wrapper.appendChild(val);
@@ -1719,10 +1719,10 @@
     const targetLabel = label || row?.dataset.key || 'this object';
     const metadata = version.metadata && typeof version.metadata === 'object' ? Object.entries(version.metadata) : [];
     const metadataHtml = metadata.length
-      ? `<div class="ob-restore-heading">Metadata</div><div class="metadata-stack ob-metadata">${metadata
+      ? `<div class="ob-restore-heading">Metadata</div><div class="ob-metadata">${metadata
         .map(
           ([key, value]) =>
-            `<div class="metadata-entry"><div class="metadata-key">${escapeHtml(key)}</div><div class="metadata-value">${escapeHtml(value)}</div></div>`
+            `<div class="ob-metadata-entry"><div class="ob-metadata-key">${escapeHtml(key)}</div><div class="ob-metadata-value">${escapeHtml(value)}</div></div>`
         )
         .join('')}</div>`
       : '';
@@ -2209,7 +2209,7 @@
     if (!previewPlaceholder) return;
     setAudioStage(false);
     previewIframe?.classList.add('is-hidden');
-    previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="ob-preview-title">Preview unavailable</div><div class="ui-hint">Download to view</div></div>';
+    previewPlaceholder.innerHTML = '<div class="ob-preview-unavailable"><div class="ob-preview-title">Preview unavailable</div><div class="ui-hint">Download to view</div></div>';
     previewPlaceholder.classList.remove('is-hidden');
   };
 
@@ -3891,12 +3891,12 @@
       previewTagsEmpty.classList.remove('is-hidden');
     } else {
       previewTagsEmpty.classList.add('is-hidden');
-      previewTagsList.innerHTML = currentObjectTags.map(t => `<span class="tag-pill"><span class="tag-pill-key">${escapeHtml(t.Key)}</span><span class="tag-pill-value">${escapeHtml(t.Value)}</span></span>`).join('');
+      previewTagsList.innerHTML = currentObjectTags.map(t => `<span class="ob-tag"><span class="ob-tag-key">${escapeHtml(t.Key)}</span><span class="ob-tag-value">${escapeHtml(t.Value)}</span></span>`).join('');
     }
   };
 
   const syncTagInputs = () => {
-    previewTagsInputs?.querySelectorAll('.tag-editor-row').forEach((row, idx) => {
+    previewTagsInputs?.querySelectorAll('.ob-tag-editor-row').forEach((row, idx) => {
       if (idx < currentObjectTags.length) {
         currentObjectTags[idx].Key = row.querySelector(`[data-tag-key="${idx}"]`)?.value || '';
         currentObjectTags[idx].Value = row.querySelector(`[data-tag-value="${idx}"]`)?.value || '';
@@ -3907,10 +3907,10 @@
   const renderTagEditor = () => {
     if (!previewTagsInputs) return;
     previewTagsInputs.innerHTML = currentObjectTags.map((t, idx) => `
-      <div class="tag-editor-row">
+      <div class="ob-tag-editor-row">
         <input type="text" class="ui-input" aria-label="Tag key" placeholder="e.g. Environment" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
         <input type="text" class="ui-input" aria-label="Tag value" placeholder="e.g. Production" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
-        <button class="tag-editor-delete" type="button" aria-label="Remove tag" data-inline-action="removeTagRow" data-inline-index="${idx}">
+        <button class="ob-tag-editor-remove" type="button" aria-label="Remove tag" data-inline-action="removeTagRow" data-inline-index="${idx}">
           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
         </button>
       </div>
@@ -3929,7 +3929,7 @@
     previewTagsList.classList.add('is-hidden');
     previewTagsEmpty.classList.add('is-hidden');
     previewTagsEditor?.classList.remove('is-hidden');
-    const card = previewTagsEditor?.querySelector('.tag-editor-card');
+    const card = previewTagsEditor?.querySelector('.ob-tag-editor');
     if (card) {
       card.style.opacity = '0';
       card.style.transition = 'opacity 0.2s ease';
@@ -3960,7 +3960,7 @@
     if (!activeRow) return;
     const tagsUrl = activeRow.dataset.tagsUrl;
     if (!tagsUrl) return;
-    const inputs = previewTagsInputs?.querySelectorAll('.tag-editor-row');
+    const inputs = previewTagsInputs?.querySelectorAll('.ob-tag-editor-row');
     const newTags = [];
     inputs?.forEach((group, idx) => {
       const key = group.querySelector(`[data-tag-key="${idx}"]`)?.value?.trim() || '';

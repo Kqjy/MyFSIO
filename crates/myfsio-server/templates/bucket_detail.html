@@ -81,7 +81,7 @@
       <button type="button" class="icon-btn" id="filter-warning-dismiss" aria-label="Dismiss"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
     <div
-      class="objects-table-container drop-zone"
+      class="objects-table-container ob-drop-zone"
       id="objects-drop-zone"
       data-bucket="{{ bucket_name }}"
       data-versioning="{% if versioning_enabled %}true{% else %}false{% endif %}"
@@ -149,7 +149,7 @@
         </div>
         <button type="button" class="icon-btn" id="objectDrawerClose" aria-label="Close details"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
-      <div class="preview-stage ob-preview">
+      <div class="ob-preview">
         <div id="preview-placeholder" class="ui-muted">
           <div>No preview available</div>
         </div>
@@ -202,14 +202,14 @@
           <div id="preview-tags-list" class="ui-badges"></div>
           <div id="preview-tags-empty" class="ui-muted">No tags</div>
           <div id="preview-tags-editor" class="is-hidden">
-            <div class="tag-editor-card">
-              <div class="tag-editor-header">
+            <div class="ob-tag-editor">
+              <div class="ob-tag-editor-head">
                 <span>Key</span>
                 <span>Value</span>
                 <span></span>
               </div>
               <div id="preview-tags-inputs"></div>
-              <div class="tag-editor-actions">
+              <div class="ob-tag-editor-actions">
                 <button class="ui-btn ui-btn-sm" type="button" id="addTagRow">
                   <svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>
                   Add tag
@@ -226,7 +226,7 @@
       </div>
       <div id="obPanelMetadata" aria-labelledby="obTabMetadata" hidden>
         <div id="preview-metadata" class="is-hidden">
-          <div id="preview-metadata-list" class="metadata-stack ob-metadata"></div>
+          <div id="preview-metadata-list" class="ob-metadata"></div>
         </div>
         <div class="ui-muted ob-panel-empty">No user metadata</div>
       </div>
@@ -1397,29 +1397,29 @@
   </form>
 </dialog>
 
-<div class="context-menu is-hidden" id="objectContextMenu">
-  <button class="context-menu-item" data-ctx-action="download">
+<div class="ui-menu ob-context-menu is-hidden" id="objectContextMenu">
+  <button class="ui-menu-item" data-ctx-action="download">
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
       <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
       <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
     </svg>
     Download
   </button>
-  <button class="context-menu-item" data-ctx-action="copy-path">
+  <button class="ui-menu-item" data-ctx-action="copy-path">
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
       <path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/>
     </svg>
     Copy S3 Path
   </button>
-  <button class="context-menu-item" data-ctx-action="presign">
+  <button class="ui-menu-item" data-ctx-action="presign">
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
       <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
     </svg>
     Share Link
   </button>
-  <div class="context-menu-divider"></div>
-  <button class="context-menu-item text-danger" data-ctx-action="delete">
+  <div class="ui-menu-sep"></div>
+  <button class="ui-menu-item is-danger" data-ctx-action="delete">
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
       <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
       <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
