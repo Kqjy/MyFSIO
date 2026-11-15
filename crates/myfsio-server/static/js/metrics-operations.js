@@ -44,7 +44,7 @@ function bootstrapOperationsSection() {
   var latestWindowBar = null;
   var HEALTH_MAX_BARS = 95;
   var SERVER_ERROR_CODES = ['InternalError', 'ServiceUnavailable', 'SlowDown', 'NotImplemented'];
-  var EMPTY_ERRORS_HTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>No recent errors</div></div>';
+  var EMPTY_ERRORS_HTML = '<div class="mx-empty"><div>No recent errors</div></div>';
   var operationsLoadInFlight = false;
   var operationsLoadSucceeded = false;
   var esc = window.UICore && window.UICore.escapeHtml ? window.UICore.escapeHtml : function(value) {
@@ -215,7 +215,7 @@ function bootstrapOperationsSection() {
     element.textContent = message + ' ';
     var retry = document.createElement('button');
     retry.type = 'button';
-    retry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    retry.className = 'mx-link';
     retry.textContent = 'Retry';
     retry.addEventListener('click', loader);
     element.appendChild(retry);
@@ -379,7 +379,7 @@ function bootstrapOperationsSection() {
       errorCodes = errorCodes.slice(0, 8);
       if (errorCodes.length === 0) {
         var emptyCodesText = opScope === 'ui' ? 'Console requests carry no S3 error code; see Recent errors' : 'No errors in this range';
-        errorBody.innerHTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>' + esc(emptyCodesText) + '</div></div>';
+        errorBody.innerHTML = '<div class="mx-empty"><div>' + esc(emptyCodesText) + '</div></div>';
       } else {
         errorBody.innerHTML = errorCodes.map(function(entry) {
           var code = entry[0];
@@ -388,9 +388,9 @@ function bootstrapOperationsSection() {
           var title = bucketTitleForCode(code, summary.error_buckets || {});
           var server = isServerErrorCode(code);
           return '<button type="button" class="ops-bar-row ops-bar-btn" data-error-code="' + esc(code) + '" title="' + esc(title) + '">' +
-            '<code class="text-truncate ' + (server ? 'text-danger' : 'text-body') + '">' + esc(code) + '</code>' +
-            '<span class="text-muted">' + count.toLocaleString() + ' · ' + pct + '%</span>' +
-            '<span class="progress"><span class="progress-bar ' + (server ? 'bg-danger' : 'bg-warning') + '" style="width: ' + pct + '%"></span></span>' +
+            '<code class="ops-clip' + (server ? ' st-bad' : '') + '">' + esc(code) + '</code>' +
+            '<span class="ui-muted">' + count.toLocaleString() + ' · ' + pct + '%</span>' +
+            '<progress class="ops-progress ' + (server ? 'is-bad' : 'is-warn') + '" max="100" value="' + pct + '"></progress>' +
             '</button>';
         }).join('');
         attachErrorCodeClicks();
@@ -409,16 +409,16 @@ function bootstrapOperationsSection() {
       buckets.sort(function(a, b) { return b[1] - a[1]; });
       buckets = buckets.slice(0, 6);
       if (buckets.length === 0) {
-        bucketBody.innerHTML = '<div class="text-muted small">No bucket-scoped errors</div>';
+        bucketBody.innerHTML = '<div class="ui-muted st-sub">No bucket-scoped errors</div>';
       } else {
         var maxBucket = buckets[0][1];
         bucketBody.innerHTML = buckets.map(function(entry, index) {
           var label = entry[0] === '(other)' ? 'other buckets' : entry[0];
           var pct = maxBucket > 0 ? Math.round((entry[1] / maxBucket) * 100) : 0;
-          return '<div class="ops-bar-row' + (index === buckets.length - 1 ? ' mb-0' : '') + '">' +
-            '<span class="text-truncate" title="' + esc(label) + '">' + esc(label) + '</span>' +
-            '<span class="text-muted">' + entry[1].toLocaleString() + '</span>' +
-            '<span class="progress"><span class="progress-bar bg-secondary" style="width: ' + pct + '%"></span></span>' +
+          return '<div class="ops-bar-row">' +
+            '<span class="ops-clip" title="' + esc(label) + '">' + esc(label) + '</span>' +
+            '<span class="ui-muted">' + entry[1].toLocaleString() + '</span>' +
+            '<progress class="ops-progress" max="100" value="' + pct + '"></progress>' +
             '</div>';
         }).join('');
       }
@@ -441,7 +441,7 @@ function bootstrapOperationsSection() {
           errorBody.innerHTML = '';
           var retry = document.createElement('button');
           retry.type = 'button';
-          retry.className = 'btn btn-link btn-sm';
+          retry.className = 'mx-link';
           retry.textContent = 'Unable to load error summary · Retry';
           retry.addEventListener('click', function() { loadErrorSummary(true); });
           errorBody.appendChild(retry);
@@ -536,7 +536,7 @@ function bootstrapOperationsSection() {
 
   function feedRowHtml(item) {
     var isServer = Number(item.status) >= 500;
-    var statusClass = isServer ? 'bg-danger-subtle text-danger' : 'bg-warning-subtle text-warning-emphasis';
+    var statusClass = isServer ? 'ui-badge-bad' : 'ui-badge-warn';
     var target;
     if (!item.bucket) target = '—';
     else if (item.distinctKeys > 1) target = item.bucket + '/… · ' + item.distinctKeys + ' distinct keys';
@@ -555,12 +555,12 @@ function bootstrapOperationsSection() {
     return '<details data-feed-key="' + esc(item.key) + '"' + (feedExpanded[item.key] ? ' open' : '') + '>' +
       '<summary>' +
       '<span class="ops-dot ' + (isServer ? 'ops-dot-5' : 'ops-dot-4') + '"></span>' +
-      '<div style="min-width: 0;">' +
+      '<div class="ops-main">' +
       '<div class="ops-line1">' +
-      '<code class="fw-semibold ' + (isServer ? 'text-danger' : 'text-body') + '">' + esc(item.code) + '</code>' +
-      '<span class="badge ' + statusClass + '">' + esc(item.status) + '</span>' +
-      '<span class="badge bg-secondary-subtle text-secondary">' + esc(item.method) + '</span>' +
-      (item.source && item.source !== 'api' ? '<span class="badge bg-info-subtle text-info-emphasis">' + esc(item.source) + '</span>' : '') +
+      '<code class="ops-code' + (isServer ? ' st-bad' : '') + '">' + esc(item.code) + '</code>' +
+      '<span class="ui-badge ' + statusClass + '">' + esc(item.status) + '</span>' +
+      '<span class="ui-badge">' + esc(item.method) + '</span>' +
+      (item.source && item.source !== 'api' ? '<span class="ui-badge ui-badge-accent">' + esc(item.source) + '</span>' : '') +
       '</div>' +
       '<div class="ops-line2" title="' + esc(target) + '">' + esc(target) + '</div>' +
       '</div>' +
@@ -583,7 +583,7 @@ function bootstrapOperationsSection() {
     entries.sort(function(a, b) { return b[1] - a[1]; });
     if (entries.length === 0) {
       opCodeChips.innerHTML = '';
-      opCodeChips.classList.add('d-none');
+      opCodeChips.classList.add('is-hidden');
       return;
     }
     var shown = entries.slice(0, 6);
@@ -595,14 +595,14 @@ function bootstrapOperationsSection() {
         hidden -= 1;
       }
     }
-    var html = '<button type="button" class="btn btn-sm rounded-pill ' + (selectedCode ? 'btn-outline-secondary' : 'btn-primary') + '" data-chip-code="">All <span class="opacity-75">' + errors.length + '</span></button>';
+    var html = '<button type="button" class="mx-chip' + (selectedCode ? '' : ' is-active') + '" data-chip-code="">All <span class="mx-chip-count">' + errors.length + '</span></button>';
     html += shown.map(function(entry) {
       var active = selectedCode === entry[0];
-      return '<button type="button" class="btn btn-sm rounded-pill ' + (active ? 'btn-primary' : 'btn-outline-secondary') + '" data-chip-code="' + esc(entry[0]) + '">' + esc(entry[0]) + ' <span class="opacity-75">' + entry[1] + '</span></button>';
+      return '<button type="button" class="mx-chip' + (active ? ' is-active' : '') + '" data-chip-code="' + esc(entry[0]) + '">' + esc(entry[0]) + ' <span class="mx-chip-count">' + entry[1] + '</span></button>';
     }).join('');
-    if (hidden > 0) html += '<span class="small text-muted align-self-center">+' + hidden + ' more</span>';
+    if (hidden > 0) html += '<span class="ui-muted st-sub mx-chip-more">+' + hidden + ' more</span>';
     opCodeChips.innerHTML = html;
-    opCodeChips.classList.remove('d-none');
+    opCodeChips.classList.remove('is-hidden');
     opCodeChips.querySelectorAll('[data-chip-code]').forEach(function(chip) {
       chip.addEventListener('click', function() {
         selectErrorCode(chip.getAttribute('data-chip-code'));
@@ -625,8 +625,8 @@ function bootstrapOperationsSection() {
     var items = groupedMode ? buildErrorGroups(scoped) : buildErrorEvents(scoped);
 
     if (items.length === 0) {
-      opErrorFeed.innerHTML = all.length === 0 ? EMPTY_ERRORS_HTML : '<div class="text-muted small text-center py-4">No matching errors</div>';
-      if (opFeedMoreWrap) opFeedMoreWrap.classList.add('d-none');
+      opErrorFeed.innerHTML = all.length === 0 ? EMPTY_ERRORS_HTML : '<div class="mx-empty">No matching errors</div>';
+      if (opFeedMoreWrap) opFeedMoreWrap.classList.add('is-hidden');
       if (recentErrorsStatus) recentErrorsStatus.textContent = '0 shown · ' + buffered.toLocaleString() + ' buffered';
       return;
     }
@@ -646,9 +646,9 @@ function bootstrapOperationsSection() {
     if (opFeedMoreWrap && opFeedMore) {
       if (remaining > 0) {
         opFeedMore.textContent = 'Show ' + remaining.toLocaleString() + ' more';
-        opFeedMoreWrap.classList.remove('d-none');
+        opFeedMoreWrap.classList.remove('is-hidden');
       } else {
-        opFeedMoreWrap.classList.add('d-none');
+        opFeedMoreWrap.classList.add('is-hidden');
       }
     }
 
@@ -674,18 +674,18 @@ function bootstrapOperationsSection() {
     if (!barEl) return;
     if (healthBars.length === 0) {
       barEl.innerHTML = '';
-      barEl.classList.add('d-none');
-      if (labelsEl) labelsEl.classList.add('d-none');
+      barEl.classList.add('is-hidden');
+      if (labelsEl) labelsEl.classList.add('is-hidden');
       if (scaleEl) scaleEl.textContent = '';
       if (emptyEl) {
         emptyEl.textContent = 'Collecting data — first snapshot in up to ' + healthIntervalMinutes + ' min';
-        emptyEl.classList.remove('d-none');
+        emptyEl.classList.remove('is-hidden');
       }
       return;
     }
-    if (emptyEl) emptyEl.classList.add('d-none');
-    barEl.classList.remove('d-none');
-    if (labelsEl) labelsEl.classList.remove('d-none');
+    if (emptyEl) emptyEl.classList.add('is-hidden');
+    barEl.classList.remove('is-hidden');
+    if (labelsEl) labelsEl.classList.remove('is-hidden');
 
     var bars = healthBars.slice();
     if (latestWindowBar) bars.push(latestWindowBar);
@@ -755,7 +755,7 @@ function bootstrapOperationsSection() {
         var emptyEl = document.getElementById('opHealthEmpty');
         if (emptyEl && healthBars.length === 0) {
           emptyEl.textContent = 'Unable to load request health.';
-          emptyEl.classList.remove('d-none');
+          emptyEl.classList.remove('is-hidden');
         }
         renderRetryStatus(opTrendStatus, 'Unable to load operation history.', function() { loadOpHistory(true); });
       });
@@ -770,7 +770,7 @@ function bootstrapOperationsSection() {
         if (generation !== filterGeneration) return;
         if (!data.enabled) {
           if (recentErrorsStatus) recentErrorsStatus.textContent = 'Not available';
-          if (opErrorFeed) opErrorFeed.innerHTML = '<div class="text-muted small text-center py-4">Not available</div>';
+          if (opErrorFeed) opErrorFeed.innerHTML = '<div class="mx-empty">Not available</div>';
           return;
         }
         recentErrorsData = { errors: data.errors || [], total_buffered: data.total_buffered || 0 };
@@ -1043,7 +1043,7 @@ function renderOperationsBootstrapError() {
     operationsStatus.textContent = 'Unable to initialize operations. ';
     var operationsRetry = document.createElement('button');
     operationsRetry.type = 'button';
-    operationsRetry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    operationsRetry.className = 'mx-link';
     operationsRetry.textContent = 'Retry';
     operationsRetry.addEventListener('click', tryBootstrapOperationsSection);
     operationsStatus.appendChild(operationsRetry);

@@ -113,7 +113,7 @@ try {
   if (!chartsAvailable) {
     var chartBanner = document.getElementById('metrics-error-banner');
     if (chartBanner) {
-      chartBanner.classList.remove('d-none');
+      chartBanner.classList.remove('is-hidden');
       var chartBannerMsg = chartBanner.querySelector('div');
       if (chartBannerMsg) chartBannerMsg.textContent = 'Charts unavailable: the chart module failed to load. Metric values will still refresh, but gauges and graphs cannot be drawn.';
     }
@@ -153,7 +153,7 @@ try {
     var status = HEALTH_ICONS[health.status] ? health.status : 'ok';
     var issues = health.issues || [];
     var banner = document.getElementById('healthBanner');
-    if (banner) banner.className = 'card border-0 shadow-sm mb-4 health-banner health-' + status;
+    if (banner) banner.className = 'ui-card st-block health-banner health-' + status;
     var icon = document.getElementById('healthBannerIcon');
     if (icon) icon.innerHTML = HEALTH_ICONS[status];
     var title = document.getElementById('healthTitle');
@@ -168,11 +168,11 @@ try {
     if (list) {
       list.innerHTML = issues.map(function(issue) {
         var critical = issue.severity === 'critical';
-        return '<li><span class="badge ' + (critical ? 'bg-danger-subtle text-danger-emphasis' : 'bg-warning-subtle text-warning-emphasis') + '">' + (critical ? 'Critical' : 'Warning') + '</span> ' +
-          '<span class="fw-semibold">' + escapeText(issue.label) + '</span> ' +
-          '<span class="text-muted">' + escapeText(issue.detail) + '</span></li>';
+        return '<li><span class="ui-badge ' + (critical ? 'ui-badge-bad' : 'ui-badge-warn') + '">' + (critical ? 'Critical' : 'Warning') + '</span> ' +
+          '<strong>' + escapeText(issue.label) + '</strong> ' +
+          '<span class="ui-muted">' + escapeText(issue.detail) + '</span></li>';
       }).join('');
-      list.classList.toggle('d-none', issues.length === 0);
+      list.classList.toggle('is-hidden', issues.length === 0);
     }
   }
 
@@ -317,9 +317,9 @@ try {
         var el;
         el = document.querySelector('[data-metric="cpu_status"]');
         if (el) {
-          if (data.cpu_percent > 80) { el.textContent = 'High'; el.className = 'badge bg-danger-subtle text-danger'; }
-          else if (data.cpu_percent > 50) { el.textContent = 'Medium'; el.className = 'badge bg-warning-subtle text-warning'; }
-          else { el.textContent = 'Normal'; el.className = 'badge bg-success-subtle text-success'; }
+          if (data.cpu_percent > 80) { el.textContent = 'High'; el.className = 'ui-badge ui-badge-bad'; }
+          else if (data.cpu_percent > 50) { el.textContent = 'Medium'; el.className = 'ui-badge ui-badge-warn'; }
+          else { el.textContent = 'Normal'; el.className = 'ui-badge ui-badge-ok'; }
         }
 
         el = document.querySelector('[data-metric="memory_used"]');
@@ -347,11 +347,11 @@ try {
 
         countdown = 5;
         var errBanner = document.getElementById('metrics-error-banner');
-        if (errBanner) errBanner.classList.add('d-none');
+        if (errBanner) errBanner.classList.add('is-hidden');
       })
       .catch(function() {
         var errBanner = document.getElementById('metrics-error-banner');
-        if (errBanner) errBanner.classList.remove('d-none');
+        if (errBanner) errBanner.classList.remove('is-hidden');
       });
   }
 
@@ -379,8 +379,8 @@ try {
     pauseBtn.addEventListener('click', function() {
       paused = !paused;
       window.__metricsPaused = paused;
-      pauseIcon.classList.toggle('d-none', paused);
-      playIcon.classList.toggle('d-none', !paused);
+      pauseIcon.classList.toggle('is-hidden', paused);
+      playIcon.classList.toggle('is-hidden', !paused);
       if (liveDot) liveDot.style.animationPlayState = paused ? 'paused' : 'running';
       pauseBtn.title = paused ? 'Resume auto-refresh' : 'Pause auto-refresh';
       if (!paused) { updateMetrics(); countdown = 5; }
@@ -451,9 +451,9 @@ try {
   }
 })();
 document.getElementById('metricsErrorDismiss')?.addEventListener('click', function() {
-  document.getElementById('metrics-error-banner')?.classList.add('d-none');
+  document.getElementById('metrics-error-banner')?.classList.add('is-hidden');
 });
 } catch (error) {
   var metricsBanner = document.getElementById('metrics-error-banner');
-  if (metricsBanner) metricsBanner.classList.remove('d-none');
+  if (metricsBanner) metricsBanner.classList.remove('is-hidden');
 }

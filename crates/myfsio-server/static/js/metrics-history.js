@@ -142,7 +142,7 @@ function bootstrapHistorySection() {
     historyStatus.textContent = 'Unable to load history. ';
     var retry = document.createElement('button');
     retry.type = 'button';
-    retry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    retry.className = 'mx-link';
     retry.textContent = 'Retry';
     retry.addEventListener('click', function() { loadHistory(true); });
     historyStatus.appendChild(retry);
@@ -202,8 +202,8 @@ function bootstrapHistorySection() {
     storageMode = mode === 'buckets' ? 'buckets' : 'total';
     var totalWrap = document.getElementById('storageTotalWrap');
     var bucketWrap = document.getElementById('storageBucketWrap');
-    if (totalWrap) totalWrap.classList.toggle('d-none', storageMode !== 'total');
-    if (bucketWrap) bucketWrap.classList.toggle('d-none', storageMode !== 'buckets');
+    if (totalWrap) totalWrap.classList.toggle('is-hidden', storageMode !== 'total');
+    if (bucketWrap) bucketWrap.classList.toggle('is-hidden', storageMode !== 'buckets');
     var input = document.querySelector('input[name="storageMode"][value="' + storageMode + '"]');
     if (input) input.checked = true;
     [storageChart, storageBucketChart].forEach(function(chart) { if (chart) chart.resize(); });
@@ -323,7 +323,7 @@ function renderHistoryBootstrapError() {
     historyInitStatus.textContent = 'Unable to initialize history. ';
     var historyInitRetry = document.createElement('button');
     historyInitRetry.type = 'button';
-    historyInitRetry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    historyInitRetry.className = 'mx-link';
     historyInitRetry.textContent = 'Retry';
     historyInitRetry.addEventListener('click', tryBootstrapHistorySection);
     historyInitStatus.appendChild(historyInitRetry);

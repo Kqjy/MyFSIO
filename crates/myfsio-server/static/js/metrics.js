@@ -30,7 +30,7 @@
 
   function renderTrend(history, enabled) {
     var wrap = document.getElementById('diskPressureTrendWrap');
-    if (wrap) wrap.classList.toggle('d-none', !enabled);
+    if (wrap) wrap.classList.toggle('is-hidden', !enabled);
     if (!enabled || typeof SvgChart === 'undefined') return;
     var canvas = document.getElementById('diskPressureTrend');
     if (!canvas) return;
@@ -82,23 +82,23 @@
     if (status) {
       if (!enabled) {
         status.textContent = 'Admission disabled';
-        status.className = 'badge bg-secondary-subtle text-secondary';
+        status.className = 'ui-badge';
       } else if (recentTimeouts > 0) {
         status.textContent = 'Shedding load';
-        status.className = 'badge bg-danger-subtle text-danger-emphasis';
+        status.className = 'ui-badge ui-badge-bad';
       } else {
         status.textContent = 'Admission active';
-        status.className = 'badge bg-success-subtle text-success';
+        status.className = 'ui-badge ui-badge-ok';
       }
     }
-    if (hint) hint.classList.toggle('d-none', enabled);
+    if (hint) hint.classList.toggle('is-hidden', enabled);
     setValue('read_permits', formatPermits(pressure.read_permits_in_use, pressure.read_limit));
     setValue('write_permits', formatPermits(pressure.write_permits_in_use, pressure.write_limit));
     setValue('recent_wait_avg', count(recent.wait_ms_avg).toLocaleString());
     setValue('recent_wait_max', count(recent.wait_ms_max).toLocaleString());
     setValue('recent_timeouts', recentTimeouts.toLocaleString());
     var timeoutsEl = element('recent_timeouts');
-    if (timeoutsEl) timeoutsEl.classList.toggle('text-danger', recentTimeouts > 0);
+    if (timeoutsEl) timeoutsEl.classList.toggle('st-bad', recentTimeouts > 0);
     setValue('queue_timeouts_total', count(pressure.queue_timeouts).toLocaleString());
     setValue('upload_spool_bytes', formatBytes(pressure.upload_spool_bytes));
     var capacity = count(replication.capacity);
