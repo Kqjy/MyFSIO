@@ -75,7 +75,7 @@
           <h2>Set up &amp; run locally</h2>
         </div>
         <p class="ui-muted">Build or run the Rust server and launch the API plus web UI from a single process.</p>
-        <div class="ad-note">
+        <div class="adm-note">
           Runtime note: the repository root is the Cargo workspace. For the verified runtime configuration list, use the repository <code>docs.md</code>.
         </div>
         <ol class="docs-steps">
@@ -525,7 +525,7 @@ cargo build --release -p myfsio-server
             </tbody>
           </table>
         </div>
-        <div class="ad-note ad-note-warn">
+        <div class="adm-note adm-note-warn">
           <strong>Production Checklist:</strong> Set <code>SECRET_KEY</code> (also enables IAM config encryption at rest), restrict <code>CORS_ORIGINS</code>, configure <code>API_BASE_URL</code>, enable HTTPS via a reverse proxy, run <code>myfsio-server --check-config</code> before starting, and set credential expiry on non-admin users.
         </div>
       </div>
@@ -955,7 +955,7 @@ s3.complete_multipart_upload(
             </li>
         </ol>
 
-        <div class="ad-note">
+        <div class="adm-note">
             <div class="docs-aside">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
                   <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
@@ -997,7 +997,7 @@ s3.complete_multipart_upload(
         <h3 class="docs-sub">Bidirectional Site Replication</h3>
         <p class="docs-note">For true two-way synchronization with automatic conflict resolution, use the <code>bidirectional</code> mode. Both sites must be configured to sync with each other.</p>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -1136,7 +1136,7 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
             </tbody>
           </table>
         </div>
-        <div class="ad-note ad-note-warn">
+        <div class="adm-note adm-note-warn">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
@@ -1365,7 +1365,7 @@ curl {{ api_base }}/myfsio/admin/topology \
         <p class="docs-note">Site registry data is stored at:</p>
         <code class="docs-code-line">data/.myfsio.sys/config/site_registry.json</code>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -1445,7 +1445,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?versions" \
 curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -1512,7 +1512,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?quota" \
 curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?quota" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -1581,7 +1581,7 @@ cargo run -p myfsio-server --</code></pre>
           </li>
         </ol>
 
-        <div class="ad-note ad-note-warn">
+        <div class="adm-note adm-note-warn">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
@@ -1672,7 +1672,7 @@ curl "{{ api_base }}/my-bucket/secret.txt" \
   -H "x-amz-server-side-encryption-customer-algorithm: AES256" \
   -H "x-amz-server-side-encryption-customer-key: $KEY" \
   -H "x-amz-server-side-encryption-customer-key-MD5: $KEY_MD5"</code></pre>
-        <div class="ad-note">
+        <div class="adm-note">
           <strong>Note:</strong> SSE-C does not require <code>ENCRYPTION_ENABLED</code> or <code>KMS_ENABLED</code>. If you lose your key, the data is irrecoverable.
         </div>
       </div>
@@ -1747,7 +1747,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
 curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -1851,7 +1851,7 @@ curl "{{ api_base }}/myfsio/admin/gc/status" \
 curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -1960,7 +1960,7 @@ curl "{{ api_base }}/myfsio/admin/integrity/status" \
 curl "{{ api_base }}/myfsio/admin/integrity/history?limit=10" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -2051,7 +2051,7 @@ curl -X PUT "http://localhost:5100/ui/metrics/settings" \
         <code class="docs-code-line">data/.myfsio.sys/config/metrics_history.json</code>
         <p class="docs-note">Writes use atomic temp-file replacement. Corrupt files are renamed with a <code>.corrupt-&lt;ts&gt;</code> suffix, one startup snapshot is recorded when enabled, and storage-size walks are cached according to <code>METRICS_STORAGE_REFRESH_MINUTES</code>.</p>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -2165,7 +2165,7 @@ curl "http://localhost:5100/ui/metrics/operations/errors?limit=100&amp;code=NoSu
         <code class="docs-code-line">data/.myfsio.sys/config/operation_metrics.json</code>
         <p class="docs-note">Error-code summaries for 1h/6h/24h merge persisted snapshots with the live window, survive rollover and restarts, and include per-bucket attribution capped at 50 buckets plus <code>(other)</code>. Recent errors are a 256-entry in-memory ring buffer with request IDs. Error-code-over-time charts zero-fill empty buckets. Writes are atomic; corrupt files are quarantined with <code>.corrupt-&lt;ts&gt;</code>. Shutdown flushes non-empty windows, and empty windows do not write.</p>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -2298,7 +2298,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
 curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -2379,7 +2379,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
     &lt;/WebhookConfiguration&gt;
   &lt;/NotificationConfiguration&gt;'</code></pre>
 
-        <div class="ad-note ad-note-warn">
+        <div class="adm-note adm-note-warn">
           <div class="docs-aside">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="docs-icon" viewBox="0 0 16 16">
               <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
@@ -2400,7 +2400,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
         </div>
         <p class="ui-muted">Query CSV, JSON, or Parquet files directly using SQL without downloading the entire object.</p>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <strong>Note:</strong> DuckDB is bundled into the Rust server binary &mdash; no separate install is required.
         </div>
 
@@ -2559,7 +2559,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
   -H "x-amz-acl: private" \
   --data-binary @file.txt</code></pre>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <strong>Recommendation:</strong> For most use cases, prefer bucket policies over ACLs for more flexible access control.
         </div>
       </div>
@@ -2621,7 +2621,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
         </div>
         <p class="ui-muted">Host static websites directly from S3 buckets with custom index and error pages, served via custom domain mapping.</p>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <strong>Prerequisite:</strong> Set <code>WEBSITE_HOSTING_ENABLED=true</code> to enable this feature.
         </div>
 
@@ -2667,7 +2667,7 @@ curl -X DELETE "{{ api_base }}/myfsio/admin/website-domains/example.com" \
         <h3 class="docs-sub">3. Point your domain</h3>
         <p class="docs-note">MyFSIO handles domain routing natively via the <code>Host</code> header &mdash; no path-based proxy rules needed. Just point your domain to the MyFSIO API server.</p>
 
-        <div class="ad-note">
+        <div class="adm-note">
           <strong>Direct access (HTTP only):</strong> Point your domain's DNS (A or CNAME) directly to the MyFSIO server on port 5000.
         </div>
 
@@ -2682,7 +2682,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }</code></pre>
-        <div class="ad-note ad-note-warn">
+        <div class="adm-note adm-note-warn">
           <strong>Important:</strong> The <code>proxy_set_header Host $host;</code> directive is required. MyFSIO matches the incoming <code>Host</code> header against domain mappings to determine which bucket to serve.
         </div>
 

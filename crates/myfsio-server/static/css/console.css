@@ -2732,13 +2732,13 @@ textarea.ui-input {
 }
 
 .docs-section .ui-table-wrap,
-.docs-section .ad-note,
+.docs-section .adm-note,
 .docs-highlight,
 .docs-cols {
 	margin-bottom: 16px;
 }
 
-.docs-section .ad-note {
+.docs-section .adm-note {
 	line-height: 1.5;
 }
 
