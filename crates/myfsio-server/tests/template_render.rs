@@ -640,7 +640,7 @@ fn signed_out_ctx() -> Context {
 }
 
 fn assert_bare_page(rendered: &str) {
-    assert!(rendered.contains("<main class=\"main-content\">"));
+    assert!(rendered.contains("<main class=\"main-content\" id=\"main-content\" tabindex=\"-1\">"));
     assert!(rendered.contains("<h1>"));
     assert!(!rendered.contains("id=\"appNav\""));
     for bootstrap_class in [

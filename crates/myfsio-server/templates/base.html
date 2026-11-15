@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="{{ url_for(endpoint="static", filename="css/console-admin.css") }}" />
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
 {%- set crumb_group = "" -%}
 {%- set crumb_page = "" -%}
 {%- set crumb_url = "" -%}
@@ -129,7 +130,7 @@
           <button class="icon-btn" type="button" id="themeToggle" aria-label="Toggle dark mode" data-ui-tip-side="bottom"><svg class="ic" aria-hidden="true"><use href="#i-theme"/></svg></button>
         </header>
         {% endif %}
-        <main class="main-content">
+        <main class="main-content" id="main-content" tabindex="-1">
           {% block content %}{% endblock %}
         </main>
       </div>

@@ -385,6 +385,27 @@ summary {
 	display: none !important;
 }
 
+.skip-link {
+	position: absolute;
+	left: 8px;
+	top: -48px;
+	z-index: 2000;
+	padding: 8px 12px;
+	border-radius: 8px;
+	background: var(--c-panel);
+	color: var(--c-accent);
+	font-weight: 600;
+	outline: 2px solid var(--c-accent-fill);
+}
+
+.skip-link:focus {
+	top: 8px;
+}
+
+.main-content:focus {
+	outline: none;
+}
+
 .ic-sprite {
 	position: absolute;
 }
